@@ -29,6 +29,10 @@ public struct MCPServer {
                 return encode(.object(["jsonrpc": .string("2.0"), "id": id,
                     "error": .object(["code": .number(-32601), "message": .string("unknown tool: \(name)")])]))
             }
+            // Same reason as the CLI read commands: hook events wait in the
+            // spool until something consumes them, and on a headless machine
+            // that something is us, right now.
+            InboxModel.drainHeadless(paths: paths)
             if let arguments = request["params"]?["arguments"], arguments.objectValue == nil {
                 return rpcError(id, -32602, "arguments must be an object")
             }

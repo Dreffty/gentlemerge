@@ -102,6 +102,28 @@ public final class InboxModel {
 
     // MARK: - Lifecycle
 
+    /// One drain without the app: build the model, load its state, ingest
+    /// everything pending in the spool, save. Read commands (`brief`,
+    /// `claims`, `precommit`) and the MCP server call this first, so hook
+    /// events turn into claims, activities and briefings even where the
+    /// menu-bar app never runs (Linux, headless, CI). The same pipeline the
+    /// app ticks — minus the watcher, the timer and the PID file — so the
+    /// behavior is identical, just driven on demand.
+    ///
+    /// Synchronous CLI/MCP contexts cannot await the MainActor, and this
+    /// process runs nothing else on it: no app runloop, no concurrent tasks.
+    /// Safety against the app draining at the same time lives where it
+    /// always has — atomic file writes and flock on the hot files — not in
+    /// this process's executor.
+    nonisolated public static func drainHeadless(paths: Paths) {
+        MainActor.assumeIsolated {
+            let model = InboxModel(paths: paths)
+            model.loadState()
+            model.drainNow()
+            model.saveState()
+        }
+    }
+
     public func start() {
         spool.writeAppPID()
         loadState()
@@ -624,7 +646,8 @@ public final class InboxModel {
     }
 
     /// Implicit path claims: the moment an agent edits a file, everyone else
-    /// can know. Costs the agent zero tokens; the app does it while draining.
+    /// can know. Costs the agent zero tokens; draining does it while
+    /// ingesting, with or without the app running.
     ///
     /// Never throws and never blocks the ingest: a claim that fails to be
     /// recorded is a briefing that says less, not an agent that stops.

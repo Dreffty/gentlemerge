@@ -761,6 +761,10 @@ enum CLI {
     /// it is must still be able to receive it.
     private static func brief(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
+        // Hook events land in the spool; without the app running nobody
+        // consumes them. Drain first so a briefing never misses what just
+        // happened, on macOS and on headless Linux alike.
+        InboxModel.drainHeadless(paths: paths)
         let bus = AgentBus(paths: paths)
         // You run this from inside the project you are about to work on, so that
         // is the project it is about.
@@ -1014,6 +1018,9 @@ enum CLI {
     private static func precommit(_ arguments: [String]) -> Int32 {
         let directory = projectDirectory(arguments)
         let paths = Paths.fromEnvironment()
+        // The gate must see edit-claims the hooks just reported. Drain first:
+        // a violation reported seconds ago is a violation now.
+        InboxModel.drainHeadless(paths: paths)
         if let claimed = value(after: "--as", in: arguments) ?? value(after: "--from", in: arguments) {
             do {
                 _ = try Identity.reconcile(explicit: claimed,
@@ -2020,6 +2027,7 @@ enum CLI {
     /// `gentlemerge claims` — who holds what, across this project.
     private static func claims(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
+        InboxModel.drainHeadless(paths: paths)
         let directory = projectDirectory(arguments, allowPositional: false)
         let project = ProjectRegistry.canonicalPath(for: directory)
         let live = PathClaims(paths: paths).live(project: project)

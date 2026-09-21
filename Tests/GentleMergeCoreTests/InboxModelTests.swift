@@ -52,8 +52,46 @@ final class InboxModelTests: XCTestCase {
         )
     }
 
-    // MARK: - Rows
+    // MARK: - Headless drain
 
+    /// Hook events wait in the spool until something consumes them. With no
+    /// app running that something must be the read commands themselves —
+    /// otherwise implicit claims (and everything built on them) silently
+    /// never happen on headless machines.
+    func testHeadlessDrainTurnsSpoolEditsIntoClaimsWithoutTheApp() throws {
+        let repo = root.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        _ = Shell.run("/usr/bin/env", ["git", "init", "-q", repo.path], timeout: 15)
+        let file = repo.appendingPathComponent("lib").appendingPathComponent("a.ts")
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("v1".utf8).write(to: file)
+        let project = ProjectRegistry.canonicalPath(for: repo.path)
+
+        let edit = envelope(event: "PostToolUse", project: repo.path, extra: [
+            "tool_name": .string("Edit"),
+            "tool_input": .object(["file_path": .string(file.path)]),
+            "label": .string("hermes"),
+        ])
+        try SpoolStore(paths: paths).enqueue(edit)
+        XCTAssertTrue(
+            PathClaims(paths: paths).live(project: project).isEmpty,
+            "nothing consumed the spool yet"
+        )
+
+        InboxModel.drainHeadless(paths: paths)
+
+        let live = PathClaims(paths: paths).live(project: project)
+        XCTAssertTrue(
+            live.contains { $0.label == "hermes" && $0.pattern.hasSuffix("a.ts") },
+            "the edit became a claim: \(live.map(\.pattern))"
+        )
+        XCTAssertTrue(
+            SpoolStore(paths: paths).drain().isEmpty,
+            "the spool is consumed, not just read"
+        )
+    }
+
+    // MARK: - Rows
     func testOnlyTheNewestStateOfASessionStays() async throws {
         model.ingest(envelope(id: "old", event: "Stop"))
         model.ingest(envelope(id: "new", event: "Stop"))
