@@ -306,9 +306,10 @@ check "an executor signs with the name it was given" \
     "$(cd "$REPO" && "$BIN" brief --as codex | grep -c 'claude#exec1')" "1"
 
 echo "nothing sensitive crosses the bus"
-"$BIN" say "despliega con ghp_TEST00000000000000000000FAKE y avisa a agent@example.invalid" > "$SANDBOX/say.out" 2>&1
+SKEY="ghp_TEST00000000000000000000FAKE"
+"$BIN" say "despliega con $SKEY y avisa a agent@example.invalid" > "$SANDBOX/say.out" 2>&1
 check "the sender is told what was taken out" "$(grep -c 'taken out' "$SANDBOX/say.out")" "1"
-check "the key never reaches disk" "$(grep -c 'ghp_AbCdEfGhIjKlMnOpQrStUvWxYz' "$GENTLEMERGE_HOME/messages.jsonl")" "0"
+check "the key never reaches disk" "$(grep -c "$SKEY" "$GENTLEMERGE_HOME/messages.jsonl")" "0"
 check "neither does the email" "$(grep -c 'agent@example.invalid' "$GENTLEMERGE_HOME/messages.jsonl")" "0"
 check "the rest of the sentence survives" "$(grep -c 'despliega con' "$GENTLEMERGE_HOME/messages.jsonl")" "1"
 
@@ -328,13 +329,14 @@ check "ordinary numbers are left alone" \
 # is about what lands on disk and what the other agent is handed — neither of
 # which a unit test can see through a real process.
 echo "leaving a file, not a paragraph"
-printf '# Informe\nDesplegado con ANTHROPIC_API_KEY=sk-TEST0000000000000000000000FAKE\nel puerto sigue siendo 8080\n' \
+RKEY="sk-TEST0000000000000000000000FAKE"
+printf '# Informe\nDesplegado con ANTHROPIC_API_KEY=%s\nel puerto sigue siendo 8080\n' "$RKEY" \
     > "$SANDBOX/report.md"
 "$BIN" say "el informe está listo" --to receptor --from codex --project "$REPO" \
     --attach "$SANDBOX/report.md" > "$SANDBOX/attach.out" 2>&1
 check "the sender is told where it went" "$(grep -c '→ attachment:' "$SANDBOX/attach.out")" "1"
 check "the stored copy has lost the key" \
-    "$(grep -rc 'sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz' "$GENTLEMERGE_HOME/artifacts" | grep -cv ':0$')" "0"
+    "$(grep -rc "$RKEY" "$GENTLEMERGE_HOME/artifacts" | grep -cv ':0$')" "0"
 check "and is still the report" \
     "$(grep -rc 'el puerto sigue siendo 8080' "$GENTLEMERGE_HOME/artifacts" | grep -c ':1$')" "1"
 check "the original the sender wrote is untouched" \

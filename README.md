@@ -71,9 +71,9 @@ gentlemerge install     # hooks for Claude Code / Codex if present (idempotent, 
 **Set up a repo for several agents**
 ```sh
 cd your-repo
-gentlemerge init --git-hooks            # HANDOFF.md + pre-commit & pre-merge-commit in the hooks dir git actually uses (core.hooksPath wins; covers all worktrees)
-git worktree add ../wt-claude -b agent/claude && (cd ../wt-claude && gentlemerge init --label claude)
-git worktree add ../wt-hermes -b agent/hermes && (cd ../wt-hermes && gentlemerge init --label hermes)
+gentlemerge project init --git-hooks            # HANDOFF.md + pre-commit & pre-merge-commit in the hooks dir git actually uses (core.hooksPath wins; covers all worktrees)
+git worktree add ../wt-claude -b agent/claude && (cd ../wt-claude && gentlemerge project init --label claude)
+git worktree add ../wt-hermes -b agent/hermes && (cd ../wt-hermes && gentlemerge project init --label hermes)
 ```
 Declare zones in `.gentlemerge/HANDOFF.md`:
 ```markdown

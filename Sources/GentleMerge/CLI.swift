@@ -92,6 +92,10 @@ enum CLI {
             return projectList()
         case "project":
             return project(rest)
+        case "init":
+            // Forgiving alias: the README teaches `project init`, but bare
+            // `init` is what a newcomer types first. Same flags.
+            return project(["init"] + rest)
         case "handoff":
             return handoff(rest)
         case "precommit":
