@@ -212,6 +212,62 @@ final class LandingTests: XCTestCase {
         XCTAssertTrue(AgentBus(paths: paths).messages().first?.text.hasPrefix("landed ") == true)
     }
 
+    /// Moving the ref under a live checkout desyncs it: the worktree keeps
+    /// the old files and shows a staged phantom diff, and the next commit
+    /// there would resurrect them. So the landing merges inside whatever
+    /// worktree holds main — including a secondary one.
+    func testLandingIntoMainCheckedOutElsewhereMergesThere() throws {
+        let repo = try makeRepo()
+        // The main checkout lives elsewhere: park the root so main can be
+        // checked out in the secondary worktree.
+        git(["checkout", "-qb", "parking"], in: repo)
+        let mainWT = root.appendingPathComponent("wt-main")
+        git(["worktree", "add", mainWT.path, "main"], in: repo)
+        defer { git(["worktree", "remove", "--force", mainWT.path], in: repo) }
+        let agentWT = root.appendingPathComponent("wt-agent")
+        git(["worktree", "add", "-b", "agent/alice", agentWT.path], in: repo)
+        defer { git(["worktree", "remove", "--force", agentWT.path], in: repo) }
+        try write("alice\n", to: "a.txt", in: agentWT)
+        commit("alice", in: agentWT)
+
+        let report = try land(agentWT)
+        XCTAssertEqual(tip(of: "main", in: repo), report.sha)
+        XCTAssertEqual(
+            try String(contentsOf: mainWT.appendingPathComponent("a.txt"), encoding: .utf8),
+            "alice\n",
+            "the checkout holding main moves with it"
+        )
+        XCTAssertTrue(
+            git(["status", "--porcelain"], in: mainWT).stdout.isEmpty,
+            "no staged phantom diff left behind"
+        )
+    }
+
+    /// A dirty checkout of main cannot be merged into: refuse instead of
+    /// forcing or desyncing it.
+    func testLandingIntoADirtyMainCheckoutRefuses() throws {
+        let repo = try makeRepo()
+        git(["checkout", "-qb", "parking"], in: repo)
+        let mainWT = root.appendingPathComponent("wt-main")
+        git(["worktree", "add", mainWT.path, "main"], in: repo)
+        defer { git(["worktree", "remove", "--force", mainWT.path], in: repo) }
+        let agentWT = root.appendingPathComponent("wt-agent")
+        git(["worktree", "add", "-b", "agent/alice", agentWT.path], in: repo)
+        defer { git(["worktree", "remove", "--force", agentWT.path], in: repo) }
+        try write("alice\n", to: "a.txt", in: agentWT)
+        try write("alice was here\n", to: "f.txt", in: agentWT)
+        commit("alice", in: agentWT)
+        // A tracked modification of a file the landing would overwrite: an
+        // untracked file would not stop a fast-forward, and must not stop
+        // a landing either.
+        try write("local edit\n", to: "f.txt", in: mainWT)
+
+        let mainBefore = tip(of: "main", in: repo)
+        let failed = failure { try land(agentWT) }
+        XCTAssertNotNil(failed, "a dirty main checkout must refuse the landing")
+        XCTAssertEqual(tip(of: "main", in: repo), mainBefore)
+    }
+
     func testDryRunPlansWithoutTouchingAnything() throws {
         let repo = try makeRepo()
         git(["checkout", "-qb", "agent/alice"], in: repo)

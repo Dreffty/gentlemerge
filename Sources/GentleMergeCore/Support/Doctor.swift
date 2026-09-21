@@ -116,6 +116,15 @@ public struct Doctor: Sendable {
             return !body.contains(marker) || !FileManager.default.isExecutableFile(atPath: path.path)
         }
         if missing.isEmpty {
+            // Hooks without a gate binary warn on every commit but check
+            // nothing. That is exactly the state worth shouting about.
+            let gate = ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"]
+                ?? (FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent(".gentlemerge/bin/gentlemerge").path)
+            if !FileManager.default.isExecutableFile(atPath: gate) {
+                return Check(name: "git-hooks", level: .warn,
+                    detail: "hooks live in \(directory.path) but the gate binary is missing at \(gate) — commits pass unchecked. Reinstall (`gentlemerge install`) or set GENTLEMERGE_BIN.")
+            }
             return Check(name: "git-hooks", level: .ok,
                 detail: "pre-commit + pre-merge-commit + post-commit live in \(directory.path)" + (note.map { " (\($0))" } ?? ""))
         }

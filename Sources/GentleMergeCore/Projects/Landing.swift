@@ -332,19 +332,20 @@ public enum Landing {
         )
     }
 
-    /// Move `into` to `sha`: a real merge when it is checked out in the main
-    /// worktree, a guarded ref update otherwise. The old-value guard on
-    /// `update-ref` means a main that moved under us fails loudly instead of
-    /// being overwritten.
+    /// Move `into` to `sha`: a real merge wherever it is checked out, a
+    /// guarded ref update only when it sits on no checkout at all. Moving
+    /// the ref under a live checkout leaves that worktree behind with a
+    /// staged phantom diff — the next commit there would resurrect the old
+    /// files. The old-value guard on `update-ref` means a main that moved
+    /// under us fails loudly instead of being overwritten.
     static func fastForward(into: String, to sha: String, from intoSHA: String, branch: String, repo: String) throws {
-        let mainRoot = RepoIdentity.mainWorktreeRoot(for: repo) ?? repo
-        if RepoIdentity.currentBranch(at: mainRoot) == into {
+        if let checkout = checkedOutWorktree(of: into, in: repo) {
             let merged = Shell.run(
-                "/usr/bin/env", ["git", "-C", mainRoot, "merge", "--ff-only", sha],
+                "/usr/bin/env", ["git", "-C", checkout, "merge", "--ff-only", sha],
                 environment: ["GIT_OPTIONAL_LOCKS": "0"], timeout: 60
             )
             guard merged.succeeded else {
-                throw Failure.cannotFastForward(reason: "`\(into)` is checked out in \(mainRoot) and would not fast-forward")
+                throw Failure.cannotFastForward(reason: "`\(into)` is checked out in \(checkout) and would not fast-forward there — clean it up or update it first")
             }
             return
         }
@@ -355,6 +356,25 @@ public enum Landing {
         guard moved.succeeded else {
             throw Failure.cannotFastForward(reason: "`\(into)` moved while landing — try again")
         }
+    }
+
+    /// The worktree path with `branch` checked out, or nil when it sits on
+    /// no checkout. Only lines with a real branch count: bare and detached
+    /// entries never match.
+    static func checkedOutWorktree(of branch: String, in repo: String) -> String? {
+        let listed = git(["worktree", "list", "--porcelain"], in: repo)
+        guard listed.succeeded else { return nil }
+        var current: String?
+        for line in listed.lines {
+            if line.hasPrefix("worktree ") {
+                current = String(line.dropFirst("worktree ".count))
+            } else if line == "branch refs/heads/\(branch)" {
+                if let current { return current }
+            } else if line.isEmpty {
+                current = nil
+            }
+        }
+        return nil
     }
 
     // MARK: - Automatic landing

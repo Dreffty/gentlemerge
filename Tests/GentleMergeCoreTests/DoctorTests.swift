@@ -49,8 +49,25 @@ final class DoctorTests: XCTestCase {
         XCTAssertTrue(hooks.detail.contains("git-hooks install"), hooks.detail)
     }
 
-    func testInstalledHooksReportOk() throws {
+    func testInstalledHooksWithoutBinaryWarn() throws {
         _ = try GitHookInstaller(paths: paths).install(repo: repo)
+        // Hermetic: the developer machine running this test may or may not
+        // have a gate binary installed — point at a path that cannot exist.
+        setenv("GENTLEMERGE_BIN", "/nonexistent-gentlemerge-binary", 1)
+        defer { unsetenv("GENTLEMERGE_BIN") }
+        let hooks = check("git-hooks", in: diagnose())
+        XCTAssertEqual(hooks.level, .warn, hooks.detail)
+        XCTAssertTrue(hooks.detail.contains("missing"), hooks.detail)
+        XCTAssertTrue(hooks.detail.contains("unchecked"), hooks.detail)
+    }
+
+    func testInstalledHooksWithBinaryReportOk() throws {
+        _ = try GitHookInstaller(paths: paths).install(repo: repo)
+        let fake = root.appendingPathComponent("gentlemerge")
+        try Data("#!/bin/sh\nexit 0\n".utf8).write(to: fake)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+        setenv("GENTLEMERGE_BIN", fake.path, 1)
+        defer { unsetenv("GENTLEMERGE_BIN") }
         let hooks = check("git-hooks", in: diagnose())
         XCTAssertEqual(hooks.level, .ok, hooks.detail)
         XCTAssertTrue(hooks.detail.contains("post-commit"), hooks.detail)

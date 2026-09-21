@@ -130,3 +130,27 @@ final class HookInstallerTests: XCTestCase {
         XCTAssertFalse(installer.codexNotifyScript(chaining: []).contains("$@\" >/dev/null"))
     }
 }
+
+/// The git gate must never look protective while checking nothing: when the
+/// binary it resolves is absent, both scripts say so on stderr instead of
+/// passing silently.
+final class GitHookScriptTests: XCTestCase {
+    func testPreCommitWarnsWhenTheBinaryIsMissing() {
+        XCTAssertTrue(GitHookInstaller.script.contains("NOT checked"))
+        XCTAssertTrue(GitHookInstaller.script.contains("GENTLEMERGE_BIN"))
+    }
+
+    func testPostCommitWarnsWhenTheBinaryIsMissing() {
+        XCTAssertTrue(GitHookInstaller.postCommitScript.contains("NOT released"))
+    }
+
+    func testEnsureBinaryLinkRefusesOutsideTheRealBinary() {
+        let home = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("gentlemerge-link-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: home) }
+        // Under XCTest the running executable is the test bundle, not
+        // gentlemerge — so this must decline, never plant a bogus link.
+        XCTAssertFalse(GitHookInstaller.ensureBinaryLink(paths: Paths(home: home)))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("bin/gentlemerge").path))
+    }
+}

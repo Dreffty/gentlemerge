@@ -32,6 +32,8 @@ public struct GitHookInstaller: Sendable {
     AI="${GENTLEMERGE_BIN:-$HOME/.gentlemerge/bin/gentlemerge}"
     if [ -x "$AI" ]; then
       "$AI" precommit --enforce --staged --project "$(git rev-parse --show-toplevel)" || exit 1
+    else
+      echo "gentlemerge: gate binary not found at $AI — this commit is NOT checked. Reinstall (gentlemerge install) or set GENTLEMERGE_BIN." >&2
     fi
     # Chain whatever was here before us (husky, lint-staged, ...).
     PREV="$0.gentlemerge-prev"
@@ -48,6 +50,8 @@ public struct GitHookInstaller: Sendable {
     AI="${GENTLEMERGE_BIN:-$HOME/.gentlemerge/bin/gentlemerge}"
     if [ -x "$AI" ]; then
       "$AI" postcommit --project "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true
+    else
+      echo "gentlemerge: gate binary not found at $AI — claims on this commit are NOT released (they expire). Reinstall or set GENTLEMERGE_BIN." >&2
     fi
     # Chain whatever was here before us.
     PREV="$0.gentlemerge-prev"
@@ -141,9 +145,33 @@ public struct GitHookInstaller: Sendable {
                 fresh.append(hook.name)
             }
         }
+        // The hooks resolve the gate through this link. Without it they warn
+        // on every commit but check nothing — so installing the gate installs
+        // the link, not just the scripts.
+        if !dryRun { Self.ensureBinaryLink(paths: paths) }
         let suffix = note.map { " (\($0))" } ?? ""
         if fresh.isEmpty { return "already installed at \(directory.path)" + suffix }
         return "installed \(fresh.joined(separator: " + ")) at \(directory.path)" + suffix
+    }
+
+    /// `<home>/bin/gentlemerge` pointing at this binary. Skipped when the
+    /// current executable is not gentlemerge itself (tests, previews), so a
+    /// test run never plants a bogus link in a real or fake home.
+    @discardableResult
+    public static func ensureBinaryLink(paths: Paths) -> Bool {
+        guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath(),
+              executable.lastPathComponent == "gentlemerge" else { return false }
+        let link = paths.bin.appendingPathComponent("gentlemerge")
+        do {
+            try FileManager.default.createDirectory(at: paths.bin, withIntermediateDirectories: true)
+            if let existing = try? FileManager.default.destinationOfSymbolicLink(atPath: link.path),
+               URL(fileURLWithPath: existing).resolvingSymlinksInPath() == executable { return true }
+            try? FileManager.default.removeItem(at: link)
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: executable)
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// Places one hook, chaining a foreign predecessor. Returns whether the
