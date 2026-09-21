@@ -1,0 +1,15 @@
+.build/
+build/
+.swiftpm/
+DerivedData/
+.DS_Store
+*.xcuserdatad
+.gentlemerge/
+# legacy home, pre-rename
+.agent-inbox/
+.claude/
+.codex/
+.mcp.json
+*.bak
+backups/
+*.log

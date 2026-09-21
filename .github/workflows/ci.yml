@@ -1,0 +1,27 @@
+name: ci
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: swift build -c release
+      - run: swift test
+      - run: python3 Scripts/test-build-contract.py
+      - if: runner.os == 'macOS'
+        run: make app
+      # ADAPTED: this repository root is already GentleMerge; no extra prefix.
+      - run: GENTLEMERGE_BIN="$PWD/.build/release/gentlemerge" bash Scripts/smoke-test.sh
