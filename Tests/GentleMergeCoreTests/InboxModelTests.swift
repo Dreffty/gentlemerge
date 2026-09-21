@@ -58,7 +58,7 @@ final class InboxModelTests: XCTestCase {
     /// app running that something must be the read commands themselves —
     /// otherwise implicit claims (and everything built on them) silently
     /// never happen on headless machines.
-    func testHeadlessDrainTurnsSpoolEditsIntoClaimsWithoutTheApp() throws {
+    func testHeadlessDrainTurnsSpoolEditsIntoClaimsWithoutTheApp() async throws {
         let repo = root.appendingPathComponent("repo")
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
         _ = Shell.run("/usr/bin/env", ["git", "init", "-q", repo.path], timeout: 15)
