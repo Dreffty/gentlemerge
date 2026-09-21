@@ -10,25 +10,25 @@ Claude Code, Codex, Hermes, Gemini CLI, OpenCode — anything that speaks MCP or
 $ gentlemerge demo
 ownership: lib/store/** → claude · lib/data/** → hermes · assets/** → codex
 
-[claude]  claimed lib/store/**
 [hermes]  claimed lib/data/**
-[claude]  edited lib/store/product_page.dart
-[claude]  commit ok
 [hermes]  edited lib/data/models.dart
 [hermes]  commit ok
-[claude]  delegated req-7f3a → codex (may touch: assets/**)
-[codex]   accepted req-7f3a
+[claude]  claimed lib/store/**
+[claude]  edited lib/store/product_page.dart
+[claude]  commit ok
+[claude]  delegated req-7f3a82 → codex (may touch: assets/**)
+[codex]   accepted req-7f3a82
 [codex]   edited assets/hero_ropa.png.txt
 [codex]   commit ok
-[codex]   done req-7f3a · assets/hero_ropa.png.txt
+[codex]   done req-7f3a82 · assets/hero_ropa.png.txt
 [claude]  edited lib/data/models.dart
-[claude]  commit BLOCKED: ✖ lib/data/models.dart: claimed by hermes (models) until 14:47
+[claude]  commit BLOCKED: ✖ lib/data/models.dart: owned by hermes per HANDOFF.md; claim it explicitly to override
 [claude]  → hermes: need a nullable `sku` on Product, can you add it?
 [hermes]  briefing:
     ## Messages for you
     - [claude → hermes] need a nullable `sku` on Product, can you add it?
 
-coordination cost: 6 briefings (3 non-empty) · ≈ 410 tokens total · ≈ 68 tokens/turn (estimate: chars/4)
+coordination cost: 3 briefings (3 non-empty) · ≈ 693 tokens total · ≈ 231 tokens/turn (estimate: chars/4)
 ```
 
 ## Why
