@@ -13,3 +13,5 @@ DerivedData/
 *.bak
 backups/
 *.log
+.env
+.env.*
