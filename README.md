@@ -4,7 +4,7 @@
 
 Claude Code, Codex, Hermes, Gemini CLI, OpenCode — anything that speaks MCP or git — working on the same project at the same time, without stepping on each other, without spending tokens watching each other.
 
-100% local. No cloud, no accounts. Your code and your agents' messages never leave your machine.
+100% local. No cloud, no accounts. Your code stays on your machine — note your agents' own providers may be remote; that traffic is between you and them.
 
 ```
 $ gentlemerge demo
@@ -57,7 +57,7 @@ Each agent works in its own **git worktree** with a label (`claude`, `codex`, `h
 3. **Enforces** — a `pre-commit` hook that costs no tokens and can't be forgotten.
 4. **Briefs** — injects only what changed into each agent's next turn.
 
-The optional macOS menu-bar app shows the board, approvals and reviews. Everything works without it.
+The optional macOS menu-bar app shows the board, approvals and reviews. Everything else — claims, briefings, the gate, requests, land — works without it: read commands drain the spool on demand, on macOS and headless Linux alike. What needs the app is live socket/tty nudges and the UI itself.
 
 ## Install
 
@@ -110,10 +110,10 @@ Native Windows blockers: `flock`, Unix domain sockets, POSIX permissions. PRs we
 
 ## Safety
 
-Only if you opt in, GentleMerge can deliver a fixed one-line notice to another agent's session, or start a headless agent to handle a delegated request. Dispatch has three modes (`config set dispatchMode off|delegated|strict`, also in the app under HEADLESS WORK): off by default, delegated lets agents trigger within tiers and a daily minute-budget, strict only runs human-created requests. Every decision is gated by pure and exhaustively tested decision functions, and every decision is logged. Secrets are scrubbed before anything reaches disk or another agent. See [SECURITY.md](SECURITY.md).
+Only if you opt in, GentleMerge can deliver a fixed one-line notice to another agent's session, or start a headless agent to handle a delegated request. Dispatch has three modes (`config set dispatchMode off|delegated|strict`, also in the app under HEADLESS WORK): off by default, delegated lets agents trigger within tiers and a daily minute-budget, strict only runs human-created requests. Every decision is gated by pure and exhaustively tested decision functions, and every decision is logged. Secrets are scrubbed before anything reaches another agent, the ledger or the bus — raw hook payloads rest briefly in the local spool (owner-only files, pruned within days). See [SECURITY.md](SECURITY.md).
 
 Guarantees come in three rungs, depending on the client — declared, not implied:
-- **Enforced** (git gate): `pre-commit`/`pre-merge-commit` block. No client option can skip it except the human escape hatch, and every skip is published to the bus.
+- **Enforced** (git gate): `pre-commit`/`pre-merge-commit` block. No client option can skip it except the human escape hatch, and every skip is published to the bus. A hostile local process still can (`--no-verify`, editing the hook): the gate coordinates cooperative agents. A missing gate binary warns on every commit instead of passing silently.
 - **Advised** (hooks): PreToolUse warns before the edit lands. A client without hooks never hears it.
 - **Convention** (MCP): `claim_check` answers honestly, but nothing stops the edit. MCP clients coordinate by discipline plus the enforced gate at commit time.
 

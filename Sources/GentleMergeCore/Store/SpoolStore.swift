@@ -15,9 +15,12 @@ public struct SpoolStore: Sendable {
     }
 
     /// Publish the same envelope as a hook, with an independent safe filename.
+    /// Owner-only, like everything the hook script writes: the payload is the
+    /// agent's tool input verbatim, and the Redactor only sees it later.
     public func enqueue(_ envelope: SpoolEnvelope) throws {
-        try AtomicFile.write(JSONCoding.encoder().encode(envelope),
-                             to: paths.spool.appendingPathComponent(UUID().uuidString + ".json"))
+        let url = paths.spool.appendingPathComponent(UUID().uuidString + ".json")
+        try AtomicFile.write(JSONCoding.encoder().encode(envelope), to: url)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 
     // MARK: - Reading

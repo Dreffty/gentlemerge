@@ -20,6 +20,10 @@ public enum HookScript {
     # It must never break the agent: every failure path exits 0 silently.
 
     set -u
+    # The payload it carries is the agent's own tool input, verbatim — it may
+    # hold secrets the Redactor will only see later. Everything this script
+    # writes (payload, envelope) is owner-only from birth.
+    umask 077
 
     PROVIDER="unknown"
     MODE="notify"

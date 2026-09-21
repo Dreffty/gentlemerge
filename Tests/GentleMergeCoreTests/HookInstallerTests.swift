@@ -144,6 +144,11 @@ final class GitHookScriptTests: XCTestCase {
         XCTAssertTrue(GitHookInstaller.postCommitScript.contains("NOT released"))
     }
 
+    func testHookPayloadsAreOwnerOnlyFromBirth() {
+        // The hook carries verbatim tool input; the Redactor sees it later.
+        XCTAssertTrue(HookScript.source.contains("umask 077"))
+    }
+
     func testEnsureBinaryLinkRefusesOutsideTheRealBinary() {
         let home = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("gentlemerge-link-\(UUID().uuidString)")
