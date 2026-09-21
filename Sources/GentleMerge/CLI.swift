@@ -2476,9 +2476,7 @@ enum CLI {
                 print("Restored “\(reference.label)”: \(report.summary).")
                 for path in report.restored.prefix(20) { print("  ← \(path)") }
                 for path in report.created.prefix(20) { print("  left in place: \(path)") }
-                if let safety = report.safety {
-                    print("Undo this restore with: gentlemerge snapshot restore \(safety.id)")
-                }
+                print("Undo this restore with: gentlemerge snapshot restore \(report.safety.id)")
                 return 0
             } catch {
                 FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8))

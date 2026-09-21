@@ -68,10 +68,9 @@ final class GitSnapshotTests: XCTestCase {
         try write("README.md", "rewritten by the agent\n")
         let report = try snapshot.restore(original)
 
-        let safety = try XCTUnwrap(report.safety, "the state being replaced must be captured first")
         XCTAssertEqual(read("README.md"), "hello\n")
 
-        _ = try snapshot.restore(safety)
+        _ = try snapshot.restore(report.safety)
         XCTAssertEqual(read("README.md"), "rewritten by the agent\n")
     }
 
@@ -134,5 +133,59 @@ final class GitSnapshotTests: XCTestCase {
 
         XCTAssertNil(GitSnapshot(anyPathInside: plain.path))
         XCTAssertFalse(GitSnapshot.isRepository(plain.path))
+    }
+
+    func testRestoreRefusesAFileSymlinkPointingOutside() throws {
+        let snapshot = try XCTUnwrap(GitSnapshot(anyPathInside: repository.path))
+        try write("file.txt", "original\n")
+        git(["add", "-A"])
+        git(["commit", "-q", "-m", "with file"])
+        let reference = try snapshot.create(label: "before")
+
+        // The file is now a symlink to the outside. Restoring must refuse
+        // instead of writing the snapshot bytes through it.
+        let outside = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("gentlemerge-outside-\(UUID().uuidString).txt")
+        try Data("do not touch\n".utf8).write(to: outside)
+        defer { try? FileManager.default.removeItem(at: outside) }
+        try FileManager.default.removeItem(at: repository.appendingPathComponent("file.txt"))
+        try FileManager.default.createSymbolicLink(
+            at: repository.appendingPathComponent("file.txt"),
+            withDestinationURL: outside
+        )
+
+        XCTAssertThrowsError(try snapshot.restore(reference)) { error in
+            guard case SnapshotError.refusesSymlink = error else {
+                return XCTFail("expected refusesSymlink, got \(error)")
+            }
+        }
+        XCTAssertEqual(try String(contentsOf: outside, encoding: .utf8), "do not touch\n")
+    }
+
+    func testRestoreRefusesADirectorySymlinkPointingOutside() throws {
+        let snapshot = try XCTUnwrap(GitSnapshot(anyPathInside: repository.path))
+        let reference = try snapshot.create(label: "before")
+
+        // Sources/ becomes a symlink outward. Anything restored under it
+        // would land outside the checkout.
+        let outsideDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("gentlemerge-outside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: outsideDir) }
+        try FileManager.default.removeItem(at: repository.appendingPathComponent("Sources"))
+        try FileManager.default.createSymbolicLink(
+            at: repository.appendingPathComponent("Sources"),
+            withDestinationURL: outsideDir
+        )
+
+        XCTAssertThrowsError(try snapshot.restore(reference)) { error in
+            guard case SnapshotError.refusesSymlink = error else {
+                return XCTFail("expected refusesSymlink, got \(error)")
+            }
+        }
+        XCTAssertTrue(
+            (try? FileManager.default.contentsOfDirectory(atPath: outsideDir.path))?.isEmpty ?? false,
+            "nothing may be written outside the checkout"
+        )
     }
 }

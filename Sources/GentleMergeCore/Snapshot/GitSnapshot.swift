@@ -18,7 +18,8 @@ public struct RestoreReport: Sendable, Equatable {
     /// Files the agent created after the snapshot. We never delete; you decide.
     public var created: [String]
     /// The snapshot taken of the current state before restoring, so this is undoable.
-    public var safety: SnapshotRef?
+    /// Restoring refuses (instead of returning nil here) when it cannot be taken.
+    public var safety: SnapshotRef
 
     public var summary: String {
         var parts = ["restored \(restored.count) \(restored.count == 1 ? "file" : "files")"]
@@ -152,7 +153,15 @@ public struct GitSnapshot: Sendable {
     // MARK: - Restoring
 
     public func restore(_ snapshot: SnapshotRef) throws -> RestoreReport {
-        let safety = try? create(label: "before restoring \(snapshot.label)")
+        // The safety capture is what makes a bad restore undoable. If it
+        // cannot be taken, there is nothing to fall back to — refuse loudly
+        // instead of replacing state with no way back.
+        let safety: SnapshotRef
+        do {
+            safety = try create(label: "before restoring \(snapshot.label)")
+        } catch {
+            throw SnapshotError.safetyFailed(snapshot.label)
+        }
 
         let diff = git(["diff", "--name-status", "-z", snapshot.commit])
         guard diff.succeeded else { throw SnapshotError.git(diff.text) }
@@ -186,12 +195,33 @@ public struct GitSnapshot: Sendable {
         let output = git(["show", "\(commit):\(path)"], timeout: 60)
         guard output.succeeded else { throw SnapshotError.git(output.text) }
 
-        let destination = repository.appendingPathComponent(path)
+        // The bytes must land inside the checkout. A symlink at the
+        // destination — or in any parent directory — would send them
+        // outside the repository, so refuse instead of following it.
+        let destination = try resolveWithinRepo(path)
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
         try output.stdoutData.write(to: destination)
+    }
+
+    /// Every component of `path` must resolve inside the repository, and
+    /// none of them may be a symlink. Git paths are relative, so an
+    /// absolute path or a `..` is a refusal, not a puzzle.
+    private func resolveWithinRepo(_ path: String) throws -> URL {
+        let components = path.split(separator: "/").map(String.init)
+        guard !path.hasPrefix("/"), !components.contains(".."), !components.isEmpty else {
+            throw SnapshotError.refusesSymlink(path)
+        }
+        var current = repository.standardized
+        for component in components {
+            current.appendPathComponent(component)
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: current.path)) != nil {
+                throw SnapshotError.refusesSymlink(path)
+            }
+        }
+        return repository.appendingPathComponent(path)
     }
 
     static func parseNameStatus(_ raw: String) -> [(status: String, path: String)] {
@@ -229,11 +259,17 @@ public struct GitSnapshot: Sendable {
 public enum SnapshotError: LocalizedError {
     case notARepository(String)
     case git(String)
+    case refusesSymlink(String)
+    case safetyFailed(String)
 
     public var errorDescription: String? {
         switch self {
         case .notARepository(let path): return "\(path) is not inside a git repository."
         case .git(let message): return message.isEmpty ? "git failed" : message
+        case .refusesSymlink(let path):
+            return "refusing to restore \(path): it (or a parent directory) is a symlink pointing outside the repository."
+        case .safetyFailed(let label):
+            return "refusing to restore \(label): the safety snapshot could not be taken, so there would be no way back."
         }
     }
 }

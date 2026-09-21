@@ -76,7 +76,7 @@ public enum Redactor {
     private static let rules: [(Kind, String)] = [
         (.privateKey, #"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"#),
         (.jwt, #"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}"#),
-        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,})"#),
+        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,})"#),
         (.credentialsInURL, #"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@"#),
         (.email, #"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#),
         // IBAN before card: "ES91 2100 0418 4502 0005 1332" is an account, not
@@ -89,12 +89,15 @@ public enum Redactor {
         (.longNumber, #"\b\d{7,}\b"#),
     ]
 
-    /// `password: hunter2`, `API_KEY=abc…`, `token = "…"` — the name gives it
-    /// away, so the value goes regardless of what it looks like. The name may
-    /// wear a snake_case prefix (`DB_PASSWORD`, `APP_SECRET_KEY`): the
-    /// trailing boundary still holds, so `bypass = true` does not match.
+    /// `password: hunter2`, `API_KEY=abc…`, `token = "…"`, `{"password":"…"}`
+    /// — the name gives it away, so the value goes regardless of what it
+    /// looks like. The name may wear a snake_case prefix (`DB_PASSWORD`,
+    /// `APP_SECRET_KEY`): the trailing boundary still holds, so
+    /// `bypass = true` does not match. JSON quotes the name
+    /// (`"password":`), so one optional closing quote is allowed between
+    /// the name and the separator.
     private static let assignment =
-        #"(?i)\b([A-Za-z_]*(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key))\b\s*[:=]\s*(?:"[^"\n]{1,200}"|'[^'\n]{1,200}'|[^\s,;)\]}]{3,200})"#
+        #"(?i)\b([A-Za-z_]*(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key))\b["']?\s*[:=]\s*(?:"[^"\n]{1,200}"|'[^'\n]{1,200}'|[^\s,;)\]}]{3,200})"#
 
     /// Every pattern, so a test can prove they all compile. A rule that does
     /// not compile is skipped at runtime, and skipping is invisible.

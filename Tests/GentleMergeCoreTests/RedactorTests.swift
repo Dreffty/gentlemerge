@@ -22,6 +22,10 @@ final class RedactorTests: XCTestCase {
             ("clona https://agent:FAKEPASSWORD123@github.com/org/repo", .credentialsInURL),
             ("password: fakepassword123", .assignedSecret),
             ("API_KEY=FAKEKEY1234567890", .assignedSecret),
+            ("la de openai es sk-proj-TEST0000000000000000FAKE", .apiKey),
+            ("cuenta de servicio sk-svcacct-TEST000000000000FAKE", .apiKey),
+            ("{\"password\":\"FAKEalphabeticpassword\"}", .assignedSecret),
+            ("{\"api_key\":\"FAKEKEY1234567890\"}", .assignedSecret),
             ("mi teléfono es 1234567890 por si acaso", .longNumber),
             ("la tarjeta 4242 4242 4242 4242 caducó", .card),
         ]

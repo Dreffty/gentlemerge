@@ -51,11 +51,9 @@ struct SnapshotsView: View {
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    if let safety = report.safety {
-                        Text("Undo this restore with “\(safety.label)”.")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.tertiary)
-                    }
+                    Text("Undo this restore with “\(report.safety.label)”.")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
                 }
                 .padding(14)
             }

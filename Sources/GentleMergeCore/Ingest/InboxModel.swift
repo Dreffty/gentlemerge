@@ -910,7 +910,7 @@ public final class InboxModel {
                     project: reference.repository,
                     title: "Restored “\(reference.label)”",
                     summary: report.summary,
-                    reason: report.safety.map { "undo with snapshot \($0.id)" }
+                    reason: "undo with snapshot \(report.safety.id)"
                 )
             )
             lastMessage = "Restored “\(reference.label)”: \(report.summary)."
