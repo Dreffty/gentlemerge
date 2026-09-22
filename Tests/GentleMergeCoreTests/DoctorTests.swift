@@ -53,8 +53,14 @@ final class DoctorTests: XCTestCase {
         _ = try GitHookInstaller(paths: paths).install(repo: repo)
         // Hermetic: the developer machine running this test may or may not
         // have a gate binary installed — point at a path that cannot exist.
+        // Save and restore: the outer environment may set GENTLEMERGE_BIN for
+        // other tests, and deleting it would break them.
+        let previous = getenv("GENTLEMERGE_BIN").map { String(cString: $0) }
         setenv("GENTLEMERGE_BIN", "/nonexistent-gentlemerge-binary", 1)
-        defer { unsetenv("GENTLEMERGE_BIN") }
+        defer {
+            if let previous { setenv("GENTLEMERGE_BIN", previous, 1) }
+            else { unsetenv("GENTLEMERGE_BIN") }
+        }
         let hooks = check("git-hooks", in: diagnose())
         XCTAssertEqual(hooks.level, .warn, hooks.detail)
         XCTAssertTrue(hooks.detail.contains("missing"), hooks.detail)
@@ -66,8 +72,12 @@ final class DoctorTests: XCTestCase {
         let fake = root.appendingPathComponent("gentlemerge")
         try Data("#!/bin/sh\nexit 0\n".utf8).write(to: fake)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fake.path)
+        let previous = getenv("GENTLEMERGE_BIN").map { String(cString: $0) }
         setenv("GENTLEMERGE_BIN", fake.path, 1)
-        defer { unsetenv("GENTLEMERGE_BIN") }
+        defer {
+            if let previous { setenv("GENTLEMERGE_BIN", previous, 1) }
+            else { unsetenv("GENTLEMERGE_BIN") }
+        }
         let hooks = check("git-hooks", in: diagnose())
         XCTAssertEqual(hooks.level, .ok, hooks.detail)
         XCTAssertTrue(hooks.detail.contains("post-commit"), hooks.detail)

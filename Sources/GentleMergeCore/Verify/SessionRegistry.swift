@@ -135,8 +135,30 @@ public struct SessionRegistry: Sendable {
         for id in doomed { sessions.removeValue(forKey: id) }
     }
 
-    private func save() {
+    private mutating func save() {
         do {
+            // Merge, not overwrite: concurrent drains (app tick vs headless
+            // CLI) read-modify-write this file, and the last writer must not
+            // erase sessions the other just saw. Newest sighting wins per
+            // session; a baseline the winner lacks survives from the loser.
+            if let data = try? Data(contentsOf: url),
+               let stored = try? JSONCoding.decoder().decode([String: SessionRecord].self, from: data) {
+                for record in stored.values {
+                    if let mine = sessions[record.id] {
+                        if record.lastSeenAt > mine.lastSeenAt {
+                            var winner = record
+                            if winner.baselineCommit == nil { winner.baselineCommit = mine.baselineCommit }
+                            sessions[record.id] = winner
+                        } else if mine.baselineCommit == nil {
+                            var mine = mine
+                            mine.baselineCommit = record.baselineCommit
+                            sessions[record.id] = mine
+                        }
+                    } else {
+                        sessions[record.id] = record
+                    }
+                }
+            }
             try AtomicFile.write(try JSONCoding.encoder().encode(sessions), to: url)
         } catch {
             Log.error("could not save sessions: \(error.localizedDescription)")

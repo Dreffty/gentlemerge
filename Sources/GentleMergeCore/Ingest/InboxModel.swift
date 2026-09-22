@@ -121,6 +121,11 @@ public final class InboxModel {
             model.loadState()
             model.drainNow()
             model.saveState()
+            // The app prunes on its tick; a headless machine has no tick, so
+            // the drain carries the cheap half (processed/ mtimes). The full
+            // sweep stays app-side: it rewrites the ledger archive and must
+            // not run on every keystroke.
+            model.spool.prune()
         }
     }
 
@@ -192,12 +197,32 @@ public final class InboxModel {
     // MARK: - Ingest
 
     public func drainNow() {
-        for envelope in spool.drain() {
-            ingest(envelope)
+        // Cross-process serialization: the app tick and any number of
+        // headless drains may overlap, and every one of them
+        // read-modify-writes state, sessions and projects. Without this,
+        // two drains interleave (load, load, save, save) and the last save
+        // erases what the other just ingested. The slow half — nudges,
+        // dispatch children, radar git — stays outside the lock.
+        do {
+            try LockedFile.withExclusiveLock(paths.home.appendingPathComponent("drain.lock")) {
+                for envelope in spool.drain() {
+                    ingest(envelope)
+                }
+                // After the events, so a session that reported and then died in the same
+                // three seconds is buried with its last words already recorded.
+                sweepDeadSessions()
+                saveState()
+            }
+        } catch {
+            // A lock that cannot be taken must not eat events: drain
+            // unlocked (merge-on-save still converges) and say so.
+            Log.error("drain lock failed — draining unlocked: \(error.localizedDescription)")
+            for envelope in spool.drain() {
+                ingest(envelope)
+            }
+            sweepDeadSessions()
+            saveState()
         }
-        // After the events, so a session that reported and then died in the same
-        // three seconds is buried with its last words already recorded.
-        sweepDeadSessions()
         // Delivery and dispatch depend on the session state this drain wrote.
         deliverNudges()
         refreshBus()
@@ -1158,7 +1183,9 @@ public final class InboxModel {
         items.removeAll { doomed.contains($0.id) }
     }
 
-    private func loadState() {
+    /// Internal (not private) so headless drains and tests can drive the same
+    /// lifecycle the app ticks: load, drain, save.
+    func loadState() {
         guard
             let data = try? Data(contentsOf: paths.state),
             let stored = try? JSONCoding.decoder().decode([InboxItem].self, from: data)
@@ -1166,8 +1193,24 @@ public final class InboxModel {
         items = stored
     }
 
-    private func saveState() {
+    /// Read-modify-write across processes: the app tick and a headless CLI
+    /// drain can interleave (two loads, two saves), and the last writer must
+    /// not erase rows the other just added. Merge by id, newest update wins;
+    /// rows are never deleted, only re-stated, so a union cannot resurrect.
+    func saveState() {
         do {
+            var byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+            if let data = try? Data(contentsOf: paths.state),
+               let stored = try? JSONCoding.decoder().decode([InboxItem].self, from: data) {
+                for row in stored {
+                    if let mine = byID[row.id] {
+                        if row.updatedAt > mine.updatedAt { byID[row.id] = row }
+                    } else {
+                        byID[row.id] = row
+                    }
+                }
+            }
+            items = Array(byID.values)
             try AtomicFile.write(try JSONCoding.encoder().encode(items), to: paths.state)
         } catch {
             Log.error("could not save state: \(error.localizedDescription)")

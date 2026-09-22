@@ -133,6 +133,11 @@ public struct ProjectRegistry: Sendable {
 
     private func save() {
         do {
+            // No merge here (unlike state/sessions): `forget` and `fold` are
+            // deliberate deletions, and a union would resurrect what they
+            // just removed. Concurrent drains serialize on the drain lock;
+            // a project entry lost to a race is re-seen on the next event,
+            // so this converges without fighting explicit removals.
             try AtomicFile.write(try JSONCoding.encoder(pretty: true).encode(projects), to: url)
         } catch {
             Log.error("could not save projects: \(error.localizedDescription)")

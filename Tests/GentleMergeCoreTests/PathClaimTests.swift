@@ -530,4 +530,35 @@ final class GitHookInstallerTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("core.hooksPath"), error.localizedDescription)
         }
     }
+
+    func testReinstallReplacesOurOwnOutdatedGateInsteadOfChainingIt() throws {
+        let dir = try GitHookInstaller(paths: Paths(home: root)).hooksDir(for: repo)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let hook = dir.appendingPathComponent("pre-commit")
+        // A gate from before markers carried a revision: silent old behavior.
+        try "#!/bin/sh\n# gentlemerge pre-commit\ntrue\n".write(to: hook, atomically: true, encoding: .utf8)
+
+        let installer = GitHookInstaller(paths: Paths(home: root))
+        _ = try installer.install(repo: repo)
+
+        let body = try String(contentsOf: hook, encoding: .utf8)
+        XCTAssertTrue(body.contains(GitHookInstaller.marker), "the current gate is in place")
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: hook.appendingPathExtension("gentlemerge-prev").path),
+            "our own outdated gate is replaced, never chained behind the new one"
+        )
+    }
+
+    func testCustomHomeBakesItsBinPathIntoTheHook() throws {
+        let installer = GitHookInstaller(paths: Paths(home: root))
+        _ = try installer.install(repo: repo)
+        let dir = try installer.hooksDir(for: repo)
+        let body = try String(contentsOf: dir.appendingPathComponent("pre-commit"), encoding: .utf8)
+        // The test home is never ~/.gentlemerge, so the hook must name the
+        // link `install` actually plants — not the fixed default path.
+        XCTAssertTrue(
+            body.contains(root.appendingPathComponent("bin/gentlemerge").path),
+            "hook looks where this install put the binary"
+        )
+    }
 }

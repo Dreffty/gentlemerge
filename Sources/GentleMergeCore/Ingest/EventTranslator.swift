@@ -149,6 +149,11 @@ public enum EventTranslator {
         toolName: String? = nil,
         paths: [String] = []
     ) -> InboxItem {
+        // Every translated item passes through here on its way to state, the
+        // ledger and the briefings. Scrub here and all three are clean; scrub
+        // anywhere later and one of them keeps the raw text. (The hook payload
+        // itself stays raw in the spool — owner-only files, pruned in days —
+        // because advise and the translators still need to read it.)
         InboxItem(
             id: envelope.id,
             sessionID: envelope.sessionID,
@@ -156,9 +161,9 @@ public enum EventTranslator {
             kind: kind,
             status: .pending,
             eventName: envelope.eventName,
-            title: title,
-            summary: summary,
-            detail: detail,
+            title: Redactor.scrub(title).text,
+            summary: Redactor.scrub(summary).text,
+            detail: detail.map { Redactor.scrub($0).text },
             toolName: toolName,
             projectPath: envelope.workingDirectory,
             tty: envelope.tty,

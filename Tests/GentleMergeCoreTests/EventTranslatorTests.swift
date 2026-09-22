@@ -111,3 +111,21 @@ final class EventTranslatorTests: XCTestCase {
     }
 
 }
+
+extension EventTranslatorTests {
+    /// A notification carrying a key must reach state, ledger and briefings
+    /// with the key taken out — the translator is the single choke point, so
+    /// scrubbing here covers all three at once.
+    func testTranslatedItemsCarryNoRawSecrets() throws {
+        let note = try envelope(payload: """
+        {"session_id":"s1","hook_event_name":"Notification",
+         "message":"deploy with sk-proj-TEST0000000000000000FAKE now"}
+        """)
+        guard case .item(let item) = EventTranslator.translate(note) else {
+            return XCTFail("expected an item")
+        }
+        XCTAssertFalse(item.summary.contains("sk-proj-TEST"), item.summary)
+        XCTAssertFalse(item.title.contains("sk-proj-TEST"), item.title)
+        XCTAssertTrue(item.summary.contains("deploy with"), item.summary)
+    }
+}

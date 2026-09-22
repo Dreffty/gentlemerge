@@ -17,37 +17,57 @@ import Foundation
 /// `post-commit`, releases the committer's claims on what just landed and
 /// can never block (git ignores its exit code; ours is 0 regardless).
 public struct GitHookInstaller: Sendable {
-    public static let marker = "# gentlemerge pre-commit"
+    /// Bump when `script`/`postCommitScript` change: a reinstall replaces an
+    /// outdated gate instead of leaving silent old behavior behind.
+    public static let gateRevision = 2
+    public static let marker = "# gentlemerge pre-commit (gate \(gateRevision))"
     public static let hookNames = ["pre-commit", "pre-merge-commit"]
-    public static let postCommitMarker = "# gentlemerge post-commit"
+    public static let postCommitMarker = "# gentlemerge post-commit (gate \(gateRevision))"
+    /// Any gate we ever installed, current or outdated. Outdated ones are
+    /// replaced, never chained — chaining is for foreign hooks.
+    static let legacyMarkers = ["# gentlemerge pre-commit", "# gentlemerge post-commit"]
     public let paths: Paths
     public init(paths: Paths) { self.paths = paths }
 
-    public static let script = """
-    #!/bin/sh
-    \(marker)
-    # Enforces PathClaims / Ownership / request.mayTouch on staged files. Deterministic, zero tokens.
-    # Escape hatch for humans: GENTLEMERGE_SKIP=1 git commit ...
-    # (handled inside the binary so the skip is published on the bus, never silent)
-    AI="${GENTLEMERGE_BIN:-$HOME/.gentlemerge/bin/gentlemerge}"
-    if [ -x "$AI" ]; then
-      "$AI" precommit --enforce --staged --project "$(git rev-parse --show-toplevel)" || exit 1
-    else
-      echo "gentlemerge: gate binary not found at $AI — this commit is NOT checked. Reinstall (gentlemerge install) or set GENTLEMERGE_BIN." >&2
-    fi
-    # Chain whatever was here before us (husky, lint-staged, ...).
-    PREV="$0.gentlemerge-prev"
-    [ -x "$PREV" ] && exec "$PREV" "$@"
-    exit 0
-    """
+    /// The gate binary this install resolves: the home's own bin link. Baked
+    /// into the script when the home is not the default one, so a custom
+    /// GENTLEMERGE_HOME install looks where `install` actually put the
+    /// binary instead of a fixed path that was never filled.
+    static func gateDefault(paths: Paths) -> String {
+        let link = paths.bin.appendingPathComponent("gentlemerge").path
+        let standard = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gentlemerge/bin/gentlemerge").path
+        return link == standard ? "$HOME/.gentlemerge/bin/gentlemerge" : link
+    }
 
-    public static let postCommitScript = """
-    #!/bin/sh
-    \(postCommitMarker)
+    public static func script(gateDefault: String = "$HOME/.gentlemerge/bin/gentlemerge") -> String {
+        """
+        #!/bin/sh
+        \(marker)
+        # Enforces PathClaims / Ownership / request.mayTouch on staged files. Deterministic, zero tokens.
+        # Escape hatch for humans: GENTLEMERGE_SKIP=1 git commit ...
+        # (handled inside the binary so the skip is published on the bus, never silent)
+        AI="${GENTLEMERGE_BIN:-\(gateDefault)}"
+        if [ -x "$AI" ]; then
+          "$AI" precommit --enforce --staged --project "$(git rev-parse --show-toplevel)" || exit 1
+        else
+          echo "gentlemerge: gate binary not found at $AI — this commit is NOT checked. Reinstall (gentlemerge install) or set GENTLEMERGE_BIN." >&2
+        fi
+        # Chain whatever was here before us (husky, lint-staged, ...).
+        PREV="$0.gentlemerge-prev"
+        [ -x "$PREV" ] && exec "$PREV" "$@"
+        exit 0
+        """
+    }
+
+    public static func postCommitScript(gateDefault: String = "$HOME/.gentlemerge/bin/gentlemerge") -> String {
+        """
+        #!/bin/sh
+        \(postCommitMarker)
     # Releases my claims on what just landed. Never blocks, never fails: git
     # ignores a post-commit exit code, and this exits 0 regardless.
     [ -n "$GENTLEMERGE_SKIP" ] && exit 0
-    AI="${GENTLEMERGE_BIN:-$HOME/.gentlemerge/bin/gentlemerge}"
+    AI="${GENTLEMERGE_BIN:-\(gateDefault)}"
     if [ -x "$AI" ]; then
       "$AI" postcommit --project "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true
     else
@@ -58,6 +78,7 @@ public struct GitHookInstaller: Sendable {
     [ -x "$PREV" ] && exec "$PREV" "$@"
     exit 0
     """
+    }
 
     public func hooksDir(for repo: URL) throws -> URL {
         let output = Shell.run(
@@ -126,9 +147,10 @@ public struct GitHookInstaller: Sendable {
 
     public func install(repo: URL, dryRun: Bool = false) throws -> String {
         let (directory, note) = try targetHooksDir(for: repo)
+        let gate = Self.gateDefault(paths: paths)
         let hooks: [(name: String, script: String, marker: String)] =
-            Self.hookNames.map { ($0, Self.script, Self.marker) }
-            + [("post-commit", Self.postCommitScript, Self.postCommitMarker)]
+            Self.hookNames.map { ($0, Self.script(gateDefault: gate), Self.marker) }
+            + [("post-commit", Self.postCommitScript(gateDefault: gate), Self.postCommitMarker)]
         if dryRun {
             for hook in hooks {
                 let path = directory.appendingPathComponent(hook.name)
@@ -175,11 +197,15 @@ public struct GitHookInstaller: Sendable {
     }
 
     /// Places one hook, chaining a foreign predecessor. Returns whether the
-    /// file is newly ours.
+    /// file is newly ours. Our own outdated gate is replaced, never chained:
+    /// chaining it would keep the old behavior alive behind the new one.
     private func placeHook(name: String, script: String, marker: String, in directory: URL) throws -> Bool {
         let hook = directory.appendingPathComponent(name)
-        if let existing = try? String(contentsOf: hook), existing.contains(marker) {
-            return false
+        if let existing = try? String(contentsOf: hook) {
+            if existing.contains(marker) { return false }
+            if Self.legacyMarkers.contains(where: existing.contains) {
+                try? FileManager.default.removeItem(at: hook)
+            }
         }
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         if FileManager.default.fileExists(atPath: hook.path) {

@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import GentleMergeCore
 
@@ -91,7 +92,78 @@ final class InboxModelTests: XCTestCase {
         )
     }
 
+    /// Two drains interleaved (app tick + headless CLI): both load the same
+    /// state, each ingests its own row, each saves. The last save must merge,
+    /// not erase what the other just wrote.
+    func testInterleavedSavesKeepBothSidesRows() throws {
+        let first = InboxModel(paths: paths)
+        first.loadState()
+        let second = InboxModel(paths: paths)
+        second.loadState()
+
+        first.ingest(envelope(id: "a", session: "sa", event: "Stop"))
+        first.saveState()
+        second.ingest(envelope(id: "b", session: "sb", event: "Stop"))
+        second.saveState()
+
+        let stored = try JSONCoding.decoder().decode(
+            [InboxItem].self,
+            from: Data(contentsOf: paths.state)
+        )
+        XCTAssertEqual(Set(stored.map(\.id)), ["a", "b"])
+    }
+
+    /// The audit's repro, as processes: 24 edit envelopes, 8 drains at once
+    /// through the real binary. The spool hands each envelope to exactly one
+    /// drainer and the drain lock serializes them — every edit becomes a
+    /// claim and a state row, none lost.
+    func testParallelDrainsLoseNoRows() throws {
+        let repo = root.appendingPathComponent("repo24")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        _ = Shell.run("/usr/bin/env", ["git", "init", "-q", repo.path], timeout: 15)
+        let lib = repo.appendingPathComponent("lib")
+        try FileManager.default.createDirectory(at: lib, withIntermediateDirectories: true)
+        let project = ProjectRegistry.canonicalPath(for: repo.path)
+        let store = SpoolStore(paths: paths)
+        for i in 0..<24 {
+            let file = lib.appendingPathComponent("f\(i).ts")
+            try Data("v1".utf8).write(to: file)
+            try store.enqueue(envelope(
+                id: "e\(i)", session: "s\(i % 4)", event: "PostToolUse", project: repo.path,
+                extra: [
+                    "tool_name": .string("Edit"),
+                    "tool_input": .object(["file_path": .string(file.path)]),
+                    "label": .string("hermes"),
+                ]
+            ))
+        }
+
+        let binary = URL(fileURLWithPath: ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"] ?? ".build/debug/gentlemerge").standardizedFileURL.path
+        let home = paths.home.path
+        let group = DispatchGroup()
+        for n in 0..<8 {
+            group.enter()
+            DispatchQueue.global().async {
+                _ = Shell.run(binary, ["brief", "--as", "drain\(n)", "--project", repo.path],
+                              environment: ["GENTLEMERGE_HOME": home], timeout: 120)
+                group.leave()
+            }
+        }
+        XCTAssertEqual(group.wait(timeout: .now() + 300), .success, "all drains finished")
+
+        let live = PathClaims(paths: paths).live(project: project)
+        XCTAssertEqual(live.count, 24, "every edit claimed: \(live.count)")
+        // PostToolUse edits leave no inbox rows (only claims + activities),
+        // but every envelope must be ingested exactly once: the ledger is
+        // append-only, so its received lines count the ingestions.
+        let ledgerLines = (try? String(contentsOf: paths.ledger, encoding: .utf8))?
+            .split(separator: "\n").filter { $0.contains("\"received\"") } ?? []
+        XCTAssertEqual(ledgerLines.count, 24, "every envelope ingested once: \(ledgerLines.count)")
+        XCTAssertTrue(store.drain().isEmpty)
+    }
+
     // MARK: - Rows
+
     func testOnlyTheNewestStateOfASessionStays() async throws {
         model.ingest(envelope(id: "old", event: "Stop"))
         model.ingest(envelope(id: "new", event: "Stop"))

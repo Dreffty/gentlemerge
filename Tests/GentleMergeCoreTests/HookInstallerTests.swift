@@ -136,12 +136,12 @@ final class HookInstallerTests: XCTestCase {
 /// passing silently.
 final class GitHookScriptTests: XCTestCase {
     func testPreCommitWarnsWhenTheBinaryIsMissing() {
-        XCTAssertTrue(GitHookInstaller.script.contains("NOT checked"))
-        XCTAssertTrue(GitHookInstaller.script.contains("GENTLEMERGE_BIN"))
+        XCTAssertTrue(GitHookInstaller.script().contains("NOT checked"))
+        XCTAssertTrue(GitHookInstaller.script().contains("GENTLEMERGE_BIN"))
     }
 
     func testPostCommitWarnsWhenTheBinaryIsMissing() {
-        XCTAssertTrue(GitHookInstaller.postCommitScript.contains("NOT released"))
+        XCTAssertTrue(GitHookInstaller.postCommitScript().contains("NOT released"))
     }
 
     func testHookPayloadsAreOwnerOnlyFromBirth() {
