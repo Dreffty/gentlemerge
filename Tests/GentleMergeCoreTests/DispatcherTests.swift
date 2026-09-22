@@ -2,8 +2,16 @@ import XCTest
 @testable import GentleMergeCore
 
 final class DispatcherTests: XCTestCase {
+    /// Unique but digit-free: dispatch output is scrubbed, and a random UUID
+    /// trips the long-number rule about one run in fourteen.
+    private func freshHome() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent(
+            "dispatch-test-" + UUID().uuidString.replacingOccurrences(of: "[0-9]", with: "a", options: .regularExpression)
+        )
+    }
+
     func testPromptAndPlaceholdersReachChild() async throws {
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let home = freshHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let paths = try Paths(home: home).createDirectories()
         let store = Requests(paths: paths)
@@ -23,11 +31,7 @@ final class DispatcherTests: XCTestCase {
     }
 
     func testChildReceivesTargetIdentity() async throws {
-        // No long digit runs in the home name: the dispatch log is scrubbed,
-        // and a random UUID trips the long-number rule one run in fourteen.
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "dispatch-test-" + UUID().uuidString.replacingOccurrences(of: "[0-9]", with: "a", options: .regularExpression)
-        )
+        let home = freshHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let paths = try Paths(home: home).createDirectories()
         let store = Requests(paths: paths)
@@ -43,7 +47,7 @@ final class DispatcherTests: XCTestCase {
     }
 
     func testFailedProcessProducesLogAndRejectsUnacceptedRequest() async throws {
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let home = freshHome()
         defer { try? FileManager.default.removeItem(at: home) }
         let paths = try Paths(home: home).createDirectories()
         let store = Requests(paths: paths)
