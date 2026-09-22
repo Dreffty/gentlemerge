@@ -95,7 +95,7 @@ final class InboxModelTests: XCTestCase {
     /// Two drains interleaved (app tick + headless CLI): both load the same
     /// state, each ingests its own row, each saves. The last save must merge,
     /// not erase what the other just wrote.
-    func testInterleavedSavesKeepBothSidesRows() throws {
+    func testInterleavedSavesKeepBothSidesRows() async throws {
         let first = InboxModel(paths: paths)
         first.loadState()
         let second = InboxModel(paths: paths)
@@ -117,7 +117,7 @@ final class InboxModelTests: XCTestCase {
     /// through the real binary. The spool hands each envelope to exactly one
     /// drainer and the drain lock serializes them — every edit becomes a
     /// claim and a state row, none lost.
-    func testParallelDrainsLoseNoRows() throws {
+    func testParallelDrainsLoseNoRows() async throws {
         let repo = root.appendingPathComponent("repo24")
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
         _ = Shell.run("/usr/bin/env", ["git", "init", "-q", repo.path], timeout: 15)
