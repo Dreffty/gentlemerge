@@ -154,7 +154,8 @@ public enum EventTranslator {
         // anywhere later and one of them keeps the raw text. (The hook payload
         // itself stays raw in the spool — owner-only files, pruned in days —
         // because advise and the translators still need to read it.)
-        InboxItem(
+        let safePayload = scrubbedPayload(envelope.payload)
+        return InboxItem(
             id: envelope.id,
             sessionID: envelope.sessionID,
             provider: envelope.provider,
@@ -172,9 +173,45 @@ public enum EventTranslator {
             transcriptPath: envelope.payload.string("transcript_path"),
             createdAt: envelope.receivedAt,
             updatedAt: envelope.receivedAt,
-            payload: envelope.payload,
+            payload: safePayload,
             touchedPaths: paths.isEmpty ? nil : paths,
             scope: PathExtractor.scope(of: paths, project: envelope.workingDirectory)
         )
+    }
+
+    /// The hook payload is intentionally raw only while it is in the short
+    /// lived spool, where `advise` and the translator still need the original
+    /// fields. Once an event becomes an inbox row, keeping the raw JSON in
+    /// `state.json` would bypass the redaction applied to title/summary/detail.
+    private static func scrubbedPayload(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .string(let text):
+            return .string(Redactor.scrub(text).text)
+        case .array(let values):
+            return .array(values.map(scrubbedPayload))
+        case .object(let values):
+            var scrubbed: [String: JSONValue] = [:]
+            for (key, value) in values {
+                scrubbed[key] = isSensitiveKey(key)
+                    ? .string(Redactor.Kind.assignedSecret.placeholder)
+                    : scrubbedPayload(value)
+            }
+            return .object(scrubbed)
+        case .null, .bool, .number:
+            return value
+        }
+    }
+
+    /// JSON fields can contain ordinary words that do not look secret to the
+    /// text redactor. Treat a field as sensitive when its name is a known
+    /// credential name, including prefixed forms such as `db_password`.
+    private static func isSensitiveKey(_ key: String) -> Bool {
+        let lowercased = key.lowercased()
+        let compact = lowercased.filter { $0.isLetter || $0.isNumber }
+        let names = [
+            "password", "passwd", "passphrase", "secret", "token", "auth",
+            "authorization", "bearer", "apikey", "accesskey", "privatekey"
+        ]
+        return names.contains { compact == $0 || compact.hasSuffix($0) }
     }
 }

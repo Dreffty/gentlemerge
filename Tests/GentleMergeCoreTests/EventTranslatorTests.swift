@@ -127,5 +127,24 @@ extension EventTranslatorTests {
         XCTAssertFalse(item.summary.contains("sk-proj-TEST"), item.summary)
         XCTAssertFalse(item.title.contains("sk-proj-TEST"), item.title)
         XCTAssertTrue(item.summary.contains("deploy with"), item.summary)
+        XCTAssertFalse(item.payload.displayText.contains("sk-proj-TEST"), item.payload.displayText)
+    }
+
+    func testTranslatedItemsRedactValuesUnderSensitiveKeysRecursively() throws {
+        let note = try envelope(payload: """
+        {"session_id":"s1","hook_event_name":"Notification",
+         "message":"safe message",
+         "nested":{"password":"FAKEalphabeticpassword"},
+         "db_api_key":"FAKEKEY1234567890"}
+        """)
+        guard case .item(let item) = EventTranslator.translate(note),
+              case .object(let payload) = item.payload,
+              case .object(let nested) = payload["nested"] else {
+            return XCTFail("expected a translated object payload")
+        }
+
+        XCTAssertEqual(nested["password"], .string("[redacted]"))
+        XCTAssertEqual(payload["db_api_key"], .string("[redacted]"))
+        XCTAssertFalse(item.payload.displayText.contains("FAKEalphabeticpassword"), item.payload.displayText)
     }
 }
