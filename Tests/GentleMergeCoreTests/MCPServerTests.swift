@@ -95,7 +95,7 @@ final class MCPServerTests: XCTestCase {
         let claim = try XCTUnwrap(tools.first { $0["name"]?.stringValue == "claim" })
         XCTAssertEqual(claim["inputSchema"]?["properties"]?["paths"]?["type"]?.stringValue, "array")
         XCTAssertEqual(claim["inputSchema"]?["required"]?.arrayValue, [.string("paths")])
-        for (name, args) in [("say", ["text": JSONValue.string("hello")]),
+        for (name, args) in [("say", ["to": JSONValue.string("b")]),
                              ("claim", ["paths": .array([.number(7)])]),
                              ("delegate", ["to": .string("a"), "title": .string("t"), "spec": .string("s"), "budget_minutes": .number(1e100)]),
                              ("release", ["paths": .string("assets/**")])] {
@@ -190,5 +190,52 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(response["result"]?["protocolVersion"]?.stringValue, "2024-11-05")
         XCTAssertNotNil(try rpc("ping")["result"]?.objectValue)
         XCTAssertNil(server.handle(line: #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#))
+    }
+
+    /// FASE 1 — `say` broadcast contract: `to` optional, `text` required.
+    func testSayBroadcastContract() throws {
+        let tools = try XCTUnwrap(rpc("tools/list")["result"]?["tools"]?.arrayValue)
+        let say = try XCTUnwrap(tools.first { $0["name"]?.stringValue == "say" })
+        // 1. `tools/list` declares `text` as required.
+        let required = say["inputSchema"]?["required"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        XCTAssertTrue(required.contains("text"), "say must require text, got \(required)")
+        // 2. `tools/list` does not declare `to` as required.
+        XCTAssertFalse(required.contains("to"), "say must not require to, got \(required)")
+        // `to` stays documented as an accepted field.
+        XCTAssertNotNil(say["inputSchema"]?["properties"]?["to"], "to must stay in fields")
+        XCTAssertNotNil(say["inputSchema"]?["properties"]?["text"], "text must stay in fields")
+
+        // 3. MCP call to `say` without `to` is accepted.
+        let broadcast = try call("say", ["text": .string("hello everyone")])
+        XCTAssertNil(broadcast["error"]?.objectValue, "broadcast say must not error: \(broadcast)")
+        XCTAssertEqual(text(broadcast), "sent")
+
+        // 4. Stored message has `to == nil`.
+        let stored = try XCTUnwrap(AgentBus(paths: paths).messages().last)
+        XCTAssertEqual(stored.text, "hello everyone")
+        XCTAssertNil(stored.to, "broadcast must store to == nil")
+
+        // 5. Directed say still reaches only its addressee.
+        let directed = try call("say", ["to": .string("codex"), "text": .string("only for codex")])
+        XCTAssertEqual(text(directed), "sent")
+        let bus = AgentBus(paths: paths)
+        let forCodex = try XCTUnwrap(bus.briefing(sessionID: "codex-1", me: "codex", project: nil))
+        XCTAssertTrue(forCodex.contains("only for codex"), forCodex)
+        // hermes still has the earlier broadcast pending, but must never see
+        // the note addressed to codex.
+        let forHermes = try XCTUnwrap(
+            bus.briefing(sessionID: "hermes-1", me: "hermes", project: nil),
+            "hermes should still see the earlier broadcast"
+        )
+        XCTAssertTrue(forHermes.contains("hello everyone"), forHermes)
+        XCTAssertFalse(forHermes.contains("only for codex"), "a note to codex must not leak to hermes: \(forHermes)")
+
+        // 6. Secrets are still filtered on the broadcast path.
+        let secret = "sk-abcdef1234567890"
+        let withSecret = try call("say", ["text": .string("please rotate \(secret) when you can, thanks team")])
+        XCTAssertEqual(text(withSecret), "sent")
+        let scrubbed = try XCTUnwrap(AgentBus(paths: paths).messages().last)
+        XCTAssertFalse(scrubbed.text.contains(secret), "secret must not be stored verbatim: \(scrubbed.text)")
+        XCTAssertTrue(scrubbed.text.contains("[redacted"), "secret must leave a redaction marker: \(scrubbed.text)")
     }
 }

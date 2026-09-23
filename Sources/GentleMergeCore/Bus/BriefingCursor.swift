@@ -15,12 +15,33 @@ public struct BriefingCursor: Codable, Sendable, Equatable {
     public var seenRequestStates: [String: String]
     /// Watch ids already announced.
     public var seenWatchIDs: Set<String>
+    /// Last message sequence delivered contiguously to this session.
+    /// Nil means nothing sequenced was ever delivered (every cursor written
+    /// before sequences). Kept alongside the timestamp marker so a session
+    /// that upgrades mid-log does not replay or lose mail.
+    /// Global fallback for migration: pre-per-project markers only have this.
+    /// New writes go per-project (see below); reads take max(perProject, global).
+    public var lastDeliveredSequence: UInt64?
+    /// Per-project watermark: project key (`projectPath ?? ""`, "" = global read)
+    /// -> last contiguous sequence delivered in that scope. Isolates projects:
+    /// advancing project A must never skip project B's pending. Missing key =
+    /// never read in that scope (fall back to global for migration, then deliver all).
+    public var lastDeliveredSequenceByProject: [String: UInt64]?
+    /// Per-project timestamp floor for pre-sequence lines, same keying.
+    /// Global `lastMessageAt` lives in DeliveryMarker (cursor has no message floor);
+    /// this dict mirrors it per-project for old nil-sequence mail.
+    /// Note: cursor never had a message timestamp floor; this is new for isolation.
+    /// Kept here (not only in marker) so both stores pin the log for prune.
+    public var lastMessageAtByProject: [String: Date]?
 
     public init(sessionID: String) {
         self.sessionID = sessionID
         self.seenClaimIDs = []
         self.seenRequestStates = [:]
         self.seenWatchIDs = []
+        self.lastDeliveredSequence = nil
+        self.lastDeliveredSequenceByProject = nil
+        self.lastMessageAtByProject = nil
     }
 
     // Forgiving decode: a cursor from an older binary must still load.
@@ -33,6 +54,9 @@ public struct BriefingCursor: Codable, Sendable, Equatable {
         seenClaimIDs = try c.decodeIfPresent(Set<String>.self, forKey: .seenClaimIDs) ?? []
         seenRequestStates = try c.decodeIfPresent([String: String].self, forKey: .seenRequestStates) ?? [:]
         seenWatchIDs = try c.decodeIfPresent(Set<String>.self, forKey: .seenWatchIDs) ?? []
+        lastDeliveredSequence = try c.decodeIfPresent(UInt64.self, forKey: .lastDeliveredSequence)
+        lastDeliveredSequenceByProject = try c.decodeIfPresent([String: UInt64].self, forKey: .lastDeliveredSequenceByProject)
+        lastMessageAtByProject = try c.decodeIfPresent([String: Date].self, forKey: .lastMessageAtByProject)
     }
 
     /// Anchor for "new since": the later of the two injections.

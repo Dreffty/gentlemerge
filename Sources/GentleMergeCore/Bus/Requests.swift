@@ -231,6 +231,7 @@ public enum RequestError: Error, CustomStringConvertible {
     case badTransition(from: RequestState, to: RequestState)
     case notAllowed(String)
     case noCapableAgent(String)
+    case noCapacity(String)
     case suppressed
     case unknownAction(String)
     case invalidID, invalidBudget
@@ -243,6 +244,7 @@ public enum RequestError: Error, CustomStringConvertible {
         case .badTransition(let from, let to): return "cannot go from \(from.rawValue) to \(to.rawValue)"
         case .notAllowed(let actor): return "\(actor) is not allowed to do that"
         case .noCapableAgent(let capability): return "no agent advertises capability '\(capability)'"
+        case .noCapacity(let capability): return "no agent with capability '\(capability)' has capacity right now"
         case .suppressed: return "text was almost entirely secrets; refusing to share"
         case .unknownAction(let action): return "unknown request action \(action)"
         }

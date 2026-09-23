@@ -278,4 +278,93 @@ final class BriefingTests: XCTestCase {
         XCTAssertEqual(stored, BriefingCursor(sessionID: "s4"),
                        "a read-only `brief` must not stamp the session's cursor")
     }
+
+    // MARK: - FASE 3: urgentes acotados
+
+    /// 100 urgents from one sender page bounded, lossless, FIFO within budget.
+    func testUrgentFloodPagesBoundedAndLossless() throws {
+        for i in 0..<100 {
+            bus.post(AgentMessage(from: "flooder", text: String(format: "urgent-%03d-bloqueo", i), kind: .urgent))
+        }
+        var appearances: [String: Int] = [:]
+        var briefings = 0
+        var sawCompact = false
+        while let output = bus.briefing(sessionID: "flood-reader", me: "reader", project: nil, mode: .delta) {
+            briefings += 1
+            // 2. Never exceeds the per-turn budget (allowance for the truncation notice itself).
+            XCTAssertLessThanOrEqual(output.count, BriefingBudget.deltaMaxChars + 200,
+                "turn \(briefings) cost \(output.count) chars, over delta budget")
+            if output.contains("urgentes pendientes") && output.contains("gentlemerge brief") { sawCompact = true }
+            for i in 0..<100 where output.contains(String(format: "urgent-%03d-bloqueo", i)) {
+                appearances[String(format: "urgent-%03d-bloqueo", i), default: 0] += 1
+            }
+            XCTAssertLessThanOrEqual(briefings, 30, "100 urgents at ~12 per turn must finish quickly")
+            if briefings > 30 { break }
+        }
+        XCTAssertTrue(sawCompact, "a flood must announce what stays pending with a compact line")
+        // 4. None lost.
+        XCTAssertEqual(appearances.count, 100, "every urgent must appear finally")
+        // No duplicates to the same session.
+        XCTAssertTrue(appearances.values.allSatisfy { $0 == 1 }, "no urgent may appear twice")
+        // 3. Omitted appear next: first turn cannot hold all 100.
+        XCTAssertGreaterThan(briefings, 1, "100 urgents must page over several turns, not one")
+    }
+
+    /// 5. Single emitter cannot fill context indefinitely: first turn bounded.
+    func testSingleEmitterFloodIsBoundedFirstTurn() throws {
+        for i in 0..<100 {
+            bus.post(AgentMessage(from: "solo", text: "solo-\(i) " + String(repeating: "x", count: 50), kind: .urgent))
+        }
+        let first = try XCTUnwrap(bus.briefing(sessionID: "solo-reader", me: "reader", project: nil, mode: .delta))
+        XCTAssertLessThanOrEqual(first.count, BriefingBudget.deltaMaxChars + 200,
+            "one sender's 100 urgents must not cost the whole turn: got \(first.count)")
+        XCTAssertTrue(first.contains("solo"), "first urgent always goes through complete")
+        XCTAssertTrue(first.contains("urgentes pendientes"), "the rest stays pending with a counter, not dropped")
+        XCTAssertTrue(first.contains("solo:"), "omitted grouped by emitter")
+        XCTAssertFalse(first.contains("solo-99"), "newest of a single-sender flood stays pending FIFO")
+    }
+
+    /// Fair across senders: alice's flood does not starve bob's blocker.
+    func testUrgentBudgetIsFairAcrossSenders() throws {
+        for i in 0..<50 {
+            bus.post(AgentMessage(from: "alice", text: "alice-\(i)", kind: .urgent))
+        }
+        for i in 0..<50 {
+            bus.post(AgentMessage(from: "bob", text: "bob-\(i)", kind: .urgent))
+        }
+        let first = try XCTUnwrap(bus.briefing(sessionID: "fair-reader", me: "reader", project: nil, mode: .delta))
+        XCTAssertTrue(first.contains("alice-0"), "oldest overall still first")
+        XCTAssertTrue(first.contains("bob-0"), "bob's blocker must appear first turn too, not after alice's 50")
+        XCTAssertTrue(first.contains("urgentes pendientes"), "remainder pages with a counter")
+    }
+
+    /// Full mode is also capped for agent persistent reads (4000): session start
+    /// is injected context too. Human anonymous reads stay uncapped.
+    func testFullBriefingRespectsFullBudget() throws {
+        for i in 0..<100 {
+            bus.post(AgentMessage(from: "flooder", text: String(format: "full-%03d-bloqueo", i), kind: .urgent))
+        }
+        // Long normals to force the total past 4000 without a full cap:
+        // 8 x ~550 chars = 4400 + priority + overhead.
+        for i in 0..<20 {
+            bus.post(AgentMessage(from: "chatter", text: "long-\(i)-" + String(repeating: "y", count: 500)))
+        }
+        var appearances: [String: Int] = [:]
+        var turns = 0
+        while let output = bus.briefing(sessionID: "full-reader", me: "reader", project: nil, mode: .full) {
+            turns += 1
+            XCTAssertLessThanOrEqual(output.count, BriefingBudget.fullMaxChars + 200,
+                "full turn \(turns) cost \(output.count) chars, over full budget")
+            for i in 0..<100 where output.contains(String(format: "full-%03d-bloqueo", i)) {
+                appearances[String(format: "full-%03d-bloqueo", i), default: 0] += 1
+            }
+            for i in 0..<20 where output.contains("long-\(i)-") {
+                appearances["long-\(i)", default: 0] += 1
+            }
+            if turns > 40 { break }
+        }
+        XCTAssertGreaterThan(turns, 1, "100 urgents + 20 longs must page even in full mode")
+        XCTAssertEqual(appearances.count, 120, "every urgent + long pages through full turns lossless, got \(appearances.count)")
+        XCTAssertTrue(appearances.values.allSatisfy { $0 == 1 }, "no duplicates across full turns")
+    }
 }

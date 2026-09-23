@@ -63,6 +63,12 @@ public struct Paths: Sendable {
     public var activities: URL { home.appendingPathComponent("activities.json") }
     /// Notes agents leave each other, append-only.
     public var messages: URL { home.appendingPathComponent("messages.jsonl") }
+    /// Monotonic counter for message delivery order. JSON `{"last": N}`.
+    /// Lives next to the log it numbers; readers never need it, writers hold
+    /// the messages lock while bumping it, so two posts never share a number.
+    /// Missing means no sequenced message was ever posted (every install that
+    /// predates sequences).
+    public var messageSequence: URL { home.appendingPathComponent("message-sequence.json") }
     /// Who is on which task, across every project. Kept here and not in the
     /// projects' own handoff files: a claim is coordination that goes stale in
     /// hours, not something worth committing next to the task list.

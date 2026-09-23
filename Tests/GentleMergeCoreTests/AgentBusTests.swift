@@ -579,8 +579,8 @@ final class AgentBusTests: XCTestCase {
                 kind: .urgent
             )
         )
-        // Twenty newer notes: under the old cap of the last eight, the blocker
-        // was pushed off the end by people saying they had finished something.
+        // Twenty newer notes: FIFO pages the oldest first so nothing is lost
+        // to the tail — the cap takes the head, the rest stays pending.
         for index in 0..<20 {
             bus.post(AgentMessage(at: now.addingTimeInterval(Double(index)), from: "claude", text: "fyi \(index)", kind: .fyi))
         }
@@ -595,8 +595,10 @@ final class AgentBusTests: XCTestCase {
         XCTAssertLessThan(urgent, ordinary, "read first, not last")
 
         // The chatter is still capped: the point is the blocker, not the log.
-        XCTAssertFalse(briefing.contains("fyi 0"))
-        XCTAssertTrue(briefing.contains("fyi 19"))
+        // FIFO takes the oldest pending (fyi 0..7); the newest stays pending
+        // for the next turn instead of pushing the head off the end.
+        XCTAssertTrue(briefing.contains("fyi 0"))
+        XCTAssertFalse(briefing.contains("fyi 19"))
     }
 
     func testAHandoffIsTaggedTooAndTheOrdinaryOnesAreNot() throws {
@@ -799,5 +801,221 @@ final class AgentBusTests: XCTestCase {
         XCTAssertEqual(AgentBus.label(in: ["CLAUDECODE": "1", "GENTLEMERGE_NAME": "  "]), "claude")
         XCTAssertEqual(AgentBus.label(in: ["CODEX_HOME": "/x"]), "codex")
         XCTAssertEqual(AgentBus.label(in: [:]), "you")
+    }
+
+    // MARK: - FASE 2A: entrega sin pérdidas (FIFO por secuencia)
+
+    /// 1-5. Mil mensajes normales paginan FIFO sin perder ni duplicar.
+    /// Recoge handles/textos por briefing y verifica cobertura total y única.
+    func testBulkFifoDeliversEveryMessageExactlyOnce() throws {
+        var ids: [String] = []
+        var texts: [String] = []
+        for i in 0..<1000 {
+            let text = String(format: "bulk-%04d-secuencia", i)
+            let message = AgentMessage(from: "writer", text: text)
+            ids.append(message.id)
+            texts.append(text)
+            bus.post(message)
+        }
+        let stored = bus.messagesForDelivery()
+        XCTAssertEqual(stored.count, 1000)
+        let seqs = stored.compactMap(\.sequence)
+        XCTAssertEqual(seqs.count, 1000, "every new post must carry a sequence")
+        XCTAssertEqual(Set(seqs).count, 1000, "sequences must be unique")
+
+        // Handles are 16-bit (collisions possible over 1000 ids), so coverage
+        // and uniqueness are verified over the unique texts; handles are
+        // verified for presence per delivered line.
+        var appearances: [String: Int] = [:]
+        var briefings = 0
+        while let output = bus.briefing(sessionID: "bulk-reader", me: "reader", project: nil) {
+            briefings += 1
+            XCTAssertLessThanOrEqual(briefings, 200, "1000 / 8 per turn must finish in ~125 briefings")
+            for text in texts where output.contains(text) {
+                appearances[text, default: 0] += 1
+            }
+            if briefings > 200 { break }
+        }
+        XCTAssertEqual(briefings, 125, "1000 messages at 8 per turn must take exactly 125 turns, got \(briefings)")
+        XCTAssertEqual(appearances.count, 1000, "every message must appear finally")
+        XCTAssertTrue(appearances.values.allSatisfy { $0 == 1 }, "no message may appear twice to the same session")
+
+        // Spot-check handles: the first and last bulk notes must show their
+        // handle alongside their text at least once across the run. Re-read
+        // with a fresh session to capture them deterministically.
+        let firstHandle = AgentMessage.handle(for: ids[0])
+        let lastHandle = AgentMessage.handle(for: ids[999])
+        var sawFirst = false
+        var sawLast = false
+        // Fresh reader replays the whole log (its own cursor starts at zero).
+        while let output = bus.briefing(sessionID: "bulk-handles", me: "handles", project: nil) {
+            if output.contains("bulk-0000-secuencia") && output.contains("#\(firstHandle)") { sawFirst = true }
+            if output.contains("bulk-0999-secuencia") && output.contains("#\(lastHandle)") { sawLast = true }
+        }
+        XCTAssertTrue(sawFirst, "first bulk note must show its handle #\(firstHandle)")
+        XCTAssertTrue(sawLast, "last bulk note must show its handle #\(lastHandle)")
+    }
+
+    /// 6. Un segundo lector independiente recibe también todo.
+    func testSecondReaderGetsFullHistoryIndependently() throws {
+        for i in 0..<20 {
+            bus.post(AgentMessage(from: "writer", text: "shared-\(i)"))
+        }
+        func drain(session: String, me: String) -> Set<String> {
+            var seen = Set<String>()
+            while let output = bus.briefing(sessionID: session, me: me, project: nil) {
+                for i in 0..<20 where output.contains("shared-\(i)") {
+                    seen.insert("shared-\(i)")
+                }
+            }
+            return seen
+        }
+        XCTAssertEqual(drain(session: "r-one", me: "one"), Set((0..<20).map { "shared-\($0)" }))
+        XCTAssertEqual(drain(session: "r-two", me: "two"), Set((0..<20).map { "shared-\($0)" }), "a second session starts from zero, not from the first reader's cursor")
+    }
+
+    /// 7. Dos escritores concurrentes nunca duplican sequence.
+    func testConcurrentWritersNeverDuplicateSequences() throws {
+        let bus = self.bus!
+        DispatchQueue.concurrentPerform(iterations: 50) { index in
+            for k in 0..<20 {
+                bus.post(AgentMessage(from: "writer-\(index)", text: "c-\(index)-\(k)"))
+            }
+        }
+        let all = bus.messagesForDelivery()
+        XCTAssertEqual(all.count, 1000)
+        let seqs = all.compactMap(\.sequence)
+        XCTAssertEqual(seqs.count, 1000)
+        XCTAssertEqual(Set(seqs).count, 1000, "concurrent posts under one lock must never share a number")
+    }
+
+    /// 8. Mensajes antiguos sin `sequence` siguen legibles y entregables.
+    func testMessagesWithoutSequenceStillDecodeAndDeliver() throws {
+        let at = ISO8601DateFormatter.gentleMerge.string(from: Date())
+        let line = #"{"id":"old-1","at":"\#(at)","from":"writer","text":"nota antigua"}"#
+        try AtomicFile.append(line, to: bus.paths.messages)
+
+        let stored = try XCTUnwrap(bus.messages().first { $0.id == "old-1" })
+        XCTAssertNil(stored.sequence, "old lines keep sequence == nil")
+        XCTAssertEqual(stored.text, "nota antigua")
+
+        let briefing = try XCTUnwrap(bus.briefing(sessionID: "old-reader", me: "reader", project: nil))
+        XCTAssertTrue(briefing.contains("nota antigua"), "old lines must still be delivered:\n\(briefing)")
+    }
+
+    /// 9. Un pendiente no desaparece cuando el primer briefing solo muestra 8.
+    func testPendingSurvivesFirstCappedBriefing() throws {
+        for i in 0..<9 {
+            bus.post(AgentMessage(from: "writer", text: "page-\(i)"))
+        }
+        let first = try XCTUnwrap(bus.briefing(sessionID: "pager", me: "reader", project: nil))
+        // FIFO: oldest 8 first.
+        for i in 0..<8 { XCTAssertTrue(first.contains("page-\(i)"), "first turn must carry oldest page-\(i):\n\(first)") }
+        XCTAssertFalse(first.contains("page-8"), "newest stays pending, it must not push the head off")
+
+        XCTAssertFalse(bus.undelivered(to: "pager", me: "reader", project: nil).isEmpty, "page-8 must still be pending")
+        let second = try XCTUnwrap(bus.briefing(sessionID: "pager", me: "reader", project: nil))
+        XCTAssertTrue(second.contains("page-8"), "second turn must carry what the cap left:\n\(second)")
+        XCTAssertTrue(bus.undelivered(to: "pager", me: "reader", project: nil).isEmpty)
+    }
+
+    /// 10. `pruneMessages` no elimina pendientes de una sesión viva.
+    func testPruneKeepsPendingForLiveSession() throws {
+        for i in 0..<10 {
+            bus.post(AgentMessage(from: "writer", text: "prune-\(i)"))
+        }
+        // Deliver oldest 8, leave prune-8 and prune-9 pending.
+        let first = try XCTUnwrap(bus.briefing(sessionID: "prune-reader", me: "reader", project: nil))
+        XCTAssertTrue(first.contains("prune-0"))
+        XCTAssertFalse(first.contains("prune-9"))
+
+        // Cap of 3 would keep only the newest 3 without live-reader protection.
+        // With same-second stamps the timestamp floor already pins everything;
+        // the sequence watermark pins the pending even when stamps differ.
+        _ = bus.pruneMessages(keepingAtMost: 3)
+        let left = bus.messagesForDelivery().map(\.text)
+        XCTAssertTrue(left.contains("prune-8"), "pending prune-8 must survive the cap")
+        XCTAssertTrue(left.contains("prune-9"), "pending prune-9 must survive the cap")
+
+        // And the pending is still deliverable afterwards.
+        let second = try XCTUnwrap(bus.briefing(sessionID: "prune-reader", me: "reader", project: nil))
+        XCTAssertTrue(second.contains("prune-8") || second.contains("prune-9"), "pending must still page after prune:\n\(second)")
+    }
+
+    // MARK: - Cursor por proyecto (riesgo watermark entre proyectos)
+
+    /// Decisión explícita: el cursor es por (sesión, proyecto). Leer A nunca
+    /// avanza B. Misma sesión cambia de proyecto sin perder pendientes.
+    /// Interleaved para cazar el bug global: con watermark global, leer gameapp
+    /// (seq impares) avanzaba a 9 y perdía clipapp 2..8.
+    func testProjectSwitchDoesNotLosePending() throws {
+        let gameapp = "/tmp/gameapp"
+        let clipapp = "/tmp/clipapp"
+        for i in 0..<5 {
+            bus.post(AgentMessage(from: "writer", projectPath: gameapp, text: "game-\(i)"))
+            bus.post(AgentMessage(from: "writer", projectPath: clipapp, text: "clip-\(i)"))
+        }
+        // Same session, same reader label, different projects.
+        let first = try XCTUnwrap(bus.briefing(sessionID: "switch-1", me: "reader", project: gameapp))
+        for i in 0..<5 { XCTAssertTrue(first.contains("game-\(i)"), "gameapp mail must all fit (5<8):\n\(first)") }
+        XCTAssertFalse(first.contains("clip-"), "other project's mail never leaks into this scope")
+
+        let second = try XCTUnwrap(bus.briefing(sessionID: "switch-1", me: "reader", project: clipapp))
+        for i in 0..<5 { XCTAssertTrue(second.contains("clip-\(i)"), "clipapp pending must survive the gameapp read:\n\(second)") }
+
+        XCTAssertNil(bus.briefing(sessionID: "switch-1", me: "reader", project: gameapp), "gameapp already consumed, silence now")
+        XCTAssertNil(bus.briefing(sessionID: "switch-1", me: "reader", project: clipapp), "clipapp already consumed, silence now")
+    }
+
+    // MARK: - Contador reforzado (riesgo reutilización al reemplazar log)
+
+    /// Log reemplazado con números mayores + contador viejo: el siguiente post
+    /// salta por encima (tail), nunca reutiliza.
+    func testCounterNeverReusesAfterLogReplacement() throws {
+        bus.post(AgentMessage(from: "writer", text: "orig-0"))
+        bus.post(AgentMessage(from: "writer", text: "orig-1"))
+        // Simulate operator replacing messages.jsonl with higher-numbered lines,
+        // counter file left stale at 2.
+        let at = ISO8601DateFormatter.gentleMerge.string(from: Date())
+        let injected = [
+            #"{"id":"inj-50","at":"\#(at)","from":"writer","text":"injected-50","sequence":50}"#,
+            #"{"id":"inj-51","at":"\#(at)","from":"writer","text":"injected-51","sequence":51}"#,
+        ].joined(separator: "\n") + "\n"
+        try Data(injected.utf8).write(to: bus.paths.messages)
+        // Counter still says 2 (stale). Next must be >51, not 3.
+        bus.post(AgentMessage(from: "writer", text: "after-replace"))
+        let all = bus.messagesForDelivery()
+        let after = try XCTUnwrap(all.first { $0.text == "after-replace" })
+        XCTAssertGreaterThan(after.sequence ?? 0, 51, "must jump past replaced tail, got \(String(describing: after.sequence))")
+        XCTAssertEqual(Set(all.compactMap(\.sequence)).count, all.compactMap(\.sequence).count, "no duplicate sequences")
+    }
+
+    /// Restore parcial (log+contador rebobinados, delivered/ conserva watermark):
+    /// el siguiente post salta por encima del watermark (gap permitido) en vez
+    /// de reutilizar y perderse como ya-entregado.
+    func testCounterJumpsPastDeliveredWatermarkAfterPartialRestore() throws {
+        for i in 0..<3 {
+            bus.post(AgentMessage(from: "writer", text: "wm-\(i)"))
+        }
+        // Deliver all to advance watermark to 3 (global read, project nil).
+        while bus.briefing(sessionID: "wm-reader", me: "reader", project: nil) != nil {}
+        let markBefore = bus.deliveryMarker(for: "wm-reader")
+        XCTAssertNotNil(markBefore?.lastDeliveredSequence ?? markBefore?.lastDeliveredSequenceByProject?[""])
+
+        // Rewind log+counter to 1 (old backup), keep delivered/ (watermark 3).
+        let first = try XCTUnwrap(bus.messagesForDelivery().first)
+        let single = try JSONCoding.encoder().encode(first)
+        let line = String(decoding: single, as: UTF8.self) + "\n"
+        try Data(line.utf8).write(to: bus.paths.messages)
+        try Data(#"{"last":1}"#.utf8).write(to: bus.paths.messageSequence)
+
+        bus.post(AgentMessage(from: "writer", text: "wm-new"))
+        let all = bus.messagesForDelivery()
+        let fresh = try XCTUnwrap(all.first { $0.text == "wm-new" })
+        XCTAssertGreaterThan(fresh.sequence ?? 0, 2, "must jump past delivered watermark 3, got \(String(describing: fresh.sequence))")
+
+        // And the fresh mail is actually delivered (not filtered as dup).
+        let out = try XCTUnwrap(bus.briefing(sessionID: "wm-reader", me: "reader", project: nil))
+        XCTAssertTrue(out.contains("wm-new"), "fresh post past watermark must be delivered:\n\(out)")
     }
 }

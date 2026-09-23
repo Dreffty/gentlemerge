@@ -125,7 +125,7 @@ final class RequestsTests: XCTestCase {
         XCTAssertNoThrow(try Requests(paths: paths).transition(request.id, to: .acked, by: "you", result: nil))
     }
 
-    func testCapabilityRouteRequiresALiveCapableAgentAndChoosesNewest() async throws {
+    func testCapabilityRouteRequiresALiveCapableAgentAndChoosesFairlyWhenIdle() async throws {
         XCTAssertThrowsError(try bus.delegate(
             from: "claude",
             fromVerified: true,
@@ -158,6 +158,8 @@ final class RequestsTests: XCTestCase {
             capabilities: ["image_generation"]
         )
 
+        // Fair, not newest-first: both idle (0 active, 0 total), oldest heartbeat
+        // wins. Newest-first starved the quiet agent with every task.
         let request = try bus.delegate(
             from: "claude",
             fromVerified: true,
@@ -170,7 +172,7 @@ final class RequestsTests: XCTestCase {
             mayTouch: [],
             budgetMinutes: 10
         )
-        XCTAssertEqual(request.resolvedTo, "new-codex")
+        XCTAssertEqual(request.resolvedTo, "old-codex")
     }
 
     func testHeartbeatPreservesCapabilitiesAndExplicitEmptyClearsThem() async {
@@ -318,5 +320,105 @@ final class RequestsTests: XCTestCase {
         XCTAssertEqual(violations.count, 1)
         XCTAssertTrue(violations[0].reason.contains("req-active"))
         XCTAssertTrue(violations[0].blocking)
+    }
+
+    // MARK: - FASE 4: reparto justo
+
+    private func recordFair(_ label: String, capability: String = "images") {
+        Presence.record(label: label, project: here, branch: nil, paths: paths,
+                        now: Date(), capabilities: [capability])
+    }
+
+    private func delegateFair(title: String) throws -> AgentRequest {
+        try bus.delegate(from: "boss", fromVerified: true, to: "capability:images",
+                         projectPath: here, title: title, spec: "spec \(title)",
+                         inputs: [], expectedOutput: nil, mayTouch: [], budgetMinutes: 10)
+    }
+
+    /// Tres agentes, nueve delegaciones: reparto equilibrado, sin capability ajena.
+    func testFairDistributionAcrossThreeAgents() async throws {
+        for label in ["agent-a", "agent-b", "agent-c"] { recordFair(label) }
+        // Sin capability: nunca recibe.
+        Presence.record(label: "other", project: here, branch: nil, paths: paths,
+                        now: Date(), capabilities: ["other-cap"])
+
+        var counts: [String: Int] = [:]
+        for i in 0..<9 {
+            let r = try delegateFair(title: "job-\(i)")
+            let target = try XCTUnwrap(r.resolvedTo)
+            XCTAssertNotEqual(target, "other", "an agent without the capability must never receive it")
+            counts[target, default: 0] += 1
+        }
+        // 9 / 3 = 3 cada uno (o al menos 2-4: razonablemente equilibrado, nunca 9-0-0).
+        for label in ["agent-a", "agent-b", "agent-c"] {
+            let c = counts[label, default: 0]
+            XCTAssertGreaterThanOrEqual(c, 2, "balanced, got \(counts)")
+            XCTAssertLessThanOrEqual(c, 4, "balanced, got \(counts)")
+        }
+        XCTAssertEqual(counts.values.reduce(0, +), 9)
+    }
+
+    /// Ocupado evita: con uno en in_progress, los nuevos van a los libres.
+    func testBusyAgentIsSkippedWhenFreeExists() async throws {
+        for label in ["free-a", "free-b", "busy-c"] { recordFair(label) }
+        // Llena un poco para que haya historial, luego marca busy-c ocupado.
+        var busyRequestID: String?
+        for i in 0..<3 {
+            let r = try delegateFair(title: "warm-\(i)")
+            if r.resolvedTo == "busy-c" && busyRequestID == nil { busyRequestID = r.id }
+        }
+        // Asegura un in_progress en busy-c (accept), aunque warm no lo tocara:
+        // delega directo a busy-c y acéptalo.
+        let direct = try bus.delegate(from: "boss", fromVerified: true, to: "busy-c",
+                                      projectPath: here, title: "occupy", spec: "hold",
+                                      inputs: [], expectedOutput: nil, mayTouch: [], budgetMinutes: 10)
+        _ = try Requests(paths: paths).transition(direct.id, to: .inProgress, by: "busy-c", result: nil)
+
+        for i in 0..<4 {
+            let r = try delegateFair(title: "fresh-\(i)")
+            XCTAssertNotEqual(r.resolvedTo, "busy-c", "busy must be skipped while free agents exist")
+        }
+    }
+
+    /// Todos ocupados: error explícito de capacidad, no asignación fingida.
+    func testAllBusyReturnsExplicitNoCapacity() async throws {
+        for label in ["solo-a", "solo-b"] { recordFair(label) }
+        for label in ["solo-a", "solo-b"] {
+            let r = try bus.delegate(from: "boss", fromVerified: true, to: label,
+                                     projectPath: here, title: "occupy \(label)", spec: "hold",
+                                     inputs: [], expectedOutput: nil, mayTouch: [], budgetMinutes: 10)
+            _ = try Requests(paths: paths).transition(r.id, to: .inProgress, by: label, result: nil)
+        }
+        XCTAssertThrowsError(try delegateFair(title: "overflow")) { error in
+            XCTAssertTrue("\(error)".contains("capacity"), "must say no capacity, got \(error)")
+        }
+    }
+
+    /// Dos delegaciones concurrentes no pisan al mismo libre habiendo otro.
+    func testConcurrentDelegatesDoNotPickSameFreeAgent() async throws {
+        for label in ["race-a", "race-b"] { recordFair(label) }
+        let bus = self.bus!
+        let here = self.here
+        let paths = self.paths!
+        // Dos hilos, una delegación cada uno, misma capability.
+        var targets = [String?](repeating: nil, count: 2)
+        let lock = NSLock()
+        DispatchQueue.concurrentPerform(iterations: 2) { index in
+            do {
+                let r = try bus.delegate(from: "boss", fromVerified: true, to: "capability:images",
+                                         projectPath: here, title: "race-\(index)", spec: "spec",
+                                         inputs: [], expectedOutput: nil, mayTouch: [], budgetMinutes: 10)
+                lock.lock(); targets[index] = r.resolvedTo; lock.unlock()
+            } catch {
+                lock.lock(); targets[index] = "ERROR:\(error)"; lock.unlock()
+            }
+        }
+        let resolved = try XCTUnwrap(targets[0]), resolved2 = try XCTUnwrap(targets[1])
+        XCTAssertFalse(resolved.hasPrefix("ERROR"), "first delegate failed: \(resolved)")
+        XCTAssertFalse(resolved2.hasPrefix("ERROR"), "second delegate failed: \(resolved2)")
+        XCTAssertNotEqual(resolved, resolved2, "two racers with two free agents must split, got \(targets)")
+        XCTAssertTrue(["race-a", "race-b"].contains(resolved))
+        XCTAssertTrue(["race-a", "race-b"].contains(resolved2))
+        _ = paths
     }
 }

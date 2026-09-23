@@ -120,6 +120,22 @@ docs/  # AGENT_PROTOCOL.md (the ~200-token agent contract),
   session confirms it, and every such gap has a named test or a docs note.
 - **Secrets never reach disk or another agent**: `Redactor.scrub` runs on
   write and on delivery; text that is mostly secrets is refused outright.
+- **Delivery cursor is per (session, project)**: reading project A advances
+  only A's watermark (`lastDeliveredSequenceByProject[A]`, `lastMessageAtByProject[A]`),
+  never global and never B. Reads take max(perProject, global) so pre-per-project
+  markers (global only) do not replay; writes advance only the read scope.
+  Global reads (project nil) advance global only. Prune pins on the min over all
+  scopes. Same session switching projects loses nothing (tested).
+- **Sequences never reused by `post`**: `next = max(counter, tail-of-log,
+  max-delivered-watermark)+1` under the messages lock. Crash leaves a gap
+  (allowed); concurrent writers never share; a replaced log with higher numbers
+  is jumped over via the tail; a partial restore (log+counter rewound, delivered/
+  kept) jumps past the watermark instead of reusing and being filtered as dup.
+  Hand-editing the middle of the log to reuse a number is operator error:
+  identity is (seq,id) but the watermark assumes seq monotonic — do not reuse.
+- **Full briefings are capped too**: agent persistent reads cap in both modes
+  (delta 1200, full 4000); anonymous/human (`sessionID nil` or `persistCursor false`)
+  stay uncapped. Priority has its own 800-char budget within the total.
 
 ## Known limits
 
@@ -134,3 +150,50 @@ docs/  # AGENT_PROTOCOL.md (the ~200-token agent contract),
   nobody. Sources are local `agent/*` branches plus the branches live
   sessions stand on, whatever they are called; remotes are invisible.
   Abandoned branches (90 days untouched) sit out the pair phase.
+
+## Transport boundary (local-only today)
+
+- The protocol coordinates agents that share one machine or one shared POSIX
+  filesystem (`~/.gentlemerge` / `GENTLEMERGE_HOME`). There is no cross-machine
+  transport yet.
+- Nothing is sent over the network. A future transport must not send
+  coordination data without authentication and encryption.
+- A future transport must replace the filesystem without changing the message,
+  claim and request model: same `AgentMessage`/`AgentRequest` shapes, same
+  delivery (at-most-once per session modulo explicit history), same claim and
+  request state machines — only the bytes' ride changes.
+- Not built here, deliberately: the project promises any language can read and
+  write the files, so SQLite (or any binary store) is out. Future scale work,
+  when needed: daily `messages.jsonl` segments, incremental reads by offset,
+  a sequence→offset index, lock/queue metrics, `gentlemerge doctor --scale`,
+  and simulations with 1, 10, 50 and 100 agents.
+
+## Session identity (design, not built)
+
+Phases 1–4 already changed delivery, budgeting and routing; session identity
+stays a design until those bake. The problem: the label (`claude`, `codex`,
+`hermes`) is the practical identity today, so two processes with the same
+label, project and branch overwrite each other's presence mark.
+
+Planned shape (backwards compatible, old label-only files keep decoding):
+
+- Each process gets a unique `sessionID` (e.g. UUIDv4 at startup, held in
+  memory and in the hook environment for its children; never reused).
+- The label stays the human-readable name and the logical destination.
+- Presence is stored by `sessionID`; a session belongs to one label.
+- Exact deliveries may target a session; normal deliveries target the label
+  (director plus its `#exec` executors per the existing `addresses` rule).
+- Resolution for label-addressed mail: all live sessions of that label
+  (and its executors) are pending; each session consumes through its own
+  marker/cursor, so one reader never eats another's mail.
+- Collision (two sessions, same label/project/branch): both stay live and
+  listed; mail to the label reaches both; `who` shows both with their ages;
+  claims stay per-label (cooperative, last-writer-wins under the existing
+  sidecar lock) until a per-session claim design lands.
+- Cleanup: presence marks still lapse by TTL; session markers/cursors are
+  swept by the existing `prune(olderThan:)` window. No migration: missing
+  `sessionID` reads as the old label-only shape.
+
+First code, when it lands, must be collision tests (two sessions, one label:
+both listed, both get label mail, independent cursors), keeping the old
+format. Not implemented in this change.

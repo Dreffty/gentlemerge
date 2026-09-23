@@ -16,6 +16,14 @@ public enum BriefingBudget {
     /// One peer message never costs more than this per line, however much log
     /// somebody pastes into it.
     public static let maxCharsPerLine = 500
+    /// Priority (urgent/handoff/request) budget per briefing, in characters.
+    /// ~800 chars ≈ 200 tokens: enough for a handful of blockers, small enough
+    /// to leave room for the rest in a delta turn. The first urgent always goes
+    /// through complete; the rest page FIFO within this budget, fairly across
+    /// senders, with a one-line counter for what stays pending. Without it, a
+    /// flood of urgents bypasses the total cap (they lead and are exempt from
+    /// the cut) and eats the turn.
+    public static let maxPriorityChars = 800
 }
 
 /// What this reader touches: their live claim patterns plus the scope of
