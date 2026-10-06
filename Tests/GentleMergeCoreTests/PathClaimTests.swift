@@ -260,11 +260,29 @@ final class PrecommitGateTests: XCTestCase {
         XCTAssertEqual(violations.count, 1, "history is not a decision")
     }
 
-    func testNoIdentityNeverBlocks() {
+    func testNoIdentityStillBlocksOnLiveClaims() {
+        let violations = PrecommitGate.evaluate(
+            staged: ["lib/store/a.swift"], me: nil,
+            claims: [claim("claude", "lib/**")], ownership: ownership
+        )
+        XCTAssertEqual(violations.count, 1, "the hook must reject invasions even without a label")
+        XCTAssertTrue(violations[0].reason.contains("claimed by claude"), "the holder is named")
+        XCTAssertTrue(violations[0].reason.contains("project init --label"), "the reason names the way out")
+        XCTAssertTrue(violations[0].blocking)
+    }
+
+    func testNoIdentityDoesNotBlockOnOwnershipZones() {
         XCTAssertTrue(PrecommitGate.evaluate(
             staged: ["assets/x.png"], me: nil,
-            claims: [claim("claude", "assets/**")], ownership: ownership
-        ).isEmpty, "enforcing claims against an unknown actor is a block we cannot justify")
+            claims: [], ownership: ownership
+        ).isEmpty, "zones need a label to tell the owner from the invader")
+    }
+
+    func testNoIdentityWithNoClaimsStillPasses() {
+        XCTAssertTrue(PrecommitGate.evaluate(
+            staged: ["lib/store/a.swift"], me: nil,
+            claims: [], ownership: ownership
+        ).isEmpty)
     }
 
     func testMyOwnClaimDoesNotBlockMe() {

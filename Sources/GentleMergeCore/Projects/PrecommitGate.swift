@@ -45,14 +45,18 @@ public struct PrecommitGate: Sendable {
 
     /// Pure. Given staged paths and the current world, list violations.
     ///
-    /// `me == nil` (no identity for this worktree) never blocks: enforcing
-    /// claims against an unknown actor would block a commit we cannot justify.
+    /// `me == nil` (no identity for this worktree) still blocks on live
+    /// claims: with no label there is no "mine" to compare against, and the
+    /// README's promise — the hook rejects invasions — cannot depend on every
+    /// worktree having run `project init --label` (audit 2026-10-06,
+    /// finding 4). It does not block on ownership zones, which do need a
+    /// label to tell the owner from an invader.
     ///
-    /// `presence` + `isPIDAlive` reap other labels' dead-owned claims before
-    /// rule 1 runs (see `PathClaims.reap`): a session that died without
-    /// releasing must not block the living until its TTL runs out. Both
-    /// default to "know nothing", which reaps nothing — the gate without
-    /// liveness behaves exactly as before.
+    /// `presence` + `isPIDAlive` reap dead-owned claims before rule 1 runs
+    /// (see `PathClaims.reap`): a session that died without releasing must
+    /// not block the living until its TTL runs out — with or without a label
+    /// on this worktree. Both default to "know nothing", which reaps nothing
+    /// — the gate without liveness behaves exactly as before.
     ///
     /// The delegated-request check (mayTouch) joins in step 3, once
     /// `AgentRequest` exists — commits stay green per step.
@@ -67,32 +71,37 @@ public struct PrecommitGate: Sendable {
         isPIDAlive: (@Sendable (Int) -> Bool?)? = nil
     ) -> [Violation] {
         let effective: [PathClaim]
-        if let me, let isPIDAlive {
+        if let isPIDAlive {
             let (live, _) = PathClaims.reap(
                 claims.filter { $0.label != me },
                 presence: presence, isPIDAlive: isPIDAlive, now: now
             )
-            effective = live + claims.filter { $0.label == me }
+            effective = live + claims.filter { me == $0.label }
         } else {
             effective = claims
         }
         var violations: [Violation] = []
         for path in staged {
-            // 1) Someone else holds a live claim on this path → block. Skipped
-            // when `me` is nil: a claim could be our own, and enforcing
-            // against an unknown actor would block a commit we cannot justify.
-            if me != nil {
-                let others = effective.filter {
-                    $0.isLive(at: now) && $0.label != me && Glob.matches($0.pattern, path)
+            // 1) A live claim on this path → block. With a label the holder
+            // must be somebody else; without one there is no "else" to compare
+            // against, so any live claim blocks — a commit we cannot justify
+            // is exactly what the gate is for. The reason names the way out:
+            // init a label (the holder's, if the claim is really ours).
+            let others = effective.filter {
+                $0.isLive(at: now) && (me == nil || $0.label != me) && Glob.matches($0.pattern, path)
+            }
+            if let holder = others.first {
+                var reason = ClaimRejection.plan(holder: holder, path: path, now: now)
+                if me == nil {
+                    reason += " This worktree has no label, so the claim cannot be verified as yours"
+                        + " — run `gentlemerge project init --label <name>` (the holder's, if the claim is yours)."
                 }
-                if let holder = others.first {
-                    violations.append(.init(
-                        path: path,
-                        reason: ClaimRejection.plan(holder: holder, path: path, now: now),
-                        blocking: true
-                    ))
-                    continue
-                }
+                violations.append(.init(
+                    path: path,
+                    reason: reason,
+                    blocking: true
+                ))
+                continue
             }
             // 2) Path in another agent's ownership zone and I hold no explicit
             // claim → block. An implicit claim (the app recorded an Edit we

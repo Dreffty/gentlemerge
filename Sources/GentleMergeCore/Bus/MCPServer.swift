@@ -5,9 +5,18 @@ public struct MCPServer {
     public let paths: Paths
     public let cwd: String
     public let identity: String
+    /// One delivery cursor per MCP process, not per label: two processes
+    /// sharing a label are two conversations — two worktrees, or two chats on
+    /// the same platform — and a shared cursor made the second one answer
+    /// `(nothing new)` while the first ate the mail (audit 2026-10-06,
+    /// finding 2). Same shape the hooks use: every session gets a unique id at
+    /// startup and consumes through its own delivery marker
+    /// (docs/ARCHITECTURE.md, "Session identity").
+    public let sessionID: String
     public var version = "1.0"
     public init(paths: Paths, cwd: String, identity: String) {
         self.paths = paths; self.cwd = cwd; self.identity = identity
+        self.sessionID = "mcp-\(identity)-\(UUID().uuidString.prefix(8).lowercased())"
     }
     public func handle(line: String) -> String? {
         guard let request = try? JSONCoding.decoder().decode(JSONValue.self, from: Data(line.utf8)),
@@ -96,7 +105,15 @@ public struct MCPServer {
                         _ = ProjectRegistry.addTask(args["text"]?.stringValue ?? "", to: project, by: identity)
                         text = "added"
                     case "task_done":
-                        _ = ProjectRegistry.setTask(args["id"]?.stringValue ?? "", done: true, in: project)
+                        // An id nobody issued must error, not answer `done`: an
+                        // agent that believes it closed work that never existed
+                        // reports completion upstream (audit 2026-10-06, finding 3).
+                        let doneID = args["id"]?.stringValue ?? ""
+                        let handoff = ProjectRegistry.handoff(for: project, refreshingCommits: false)
+                        guard handoff.tasks.contains(where: { $0.id == doneID }) else {
+                            throw TaskError.noSuchTask(doneID)
+                        }
+                        _ = ProjectRegistry.setTask(doneID, done: true, in: project)
                         text = "done"
                     case "say":
                         _ = try AgentBus(paths: paths).say(from: identity, to: args["to"]?.stringValue,
@@ -148,7 +165,7 @@ public struct MCPServer {
             }
             let mode: BriefingMode = name == "brief" ? .full : .delta
             let updates = AgentBus(paths: paths).briefing(
-                sessionID: "mcp-\(identity)", me: identity, project: project, mode: mode)
+                sessionID: sessionID, me: identity, project: project, mode: mode)
             var sections = [String]()
             if mode == .full, let context = ProjectRegistry.sessionContext(for: project) {
                 sections.append(context)
@@ -258,6 +275,17 @@ public struct MCPServer {
         let rule = WatchRule(owner: owner, projectPath: project, kind: resolved, target: ruleTarget, note: noteText)
         try Watches(paths: paths).add(rule)
         return "watching: \(subject) → \(owner) (id \(rule.shortID))"
+    }
+
+    /// `task_done` on an id that matches no task in the project.
+    enum TaskError: Error, CustomStringConvertible {
+        case noSuchTask(String)
+
+        var description: String {
+            switch self {
+            case .noSuchTask(let id): return "no task with id \"\(id)\" — call brief to see the open tasks and their ids"
+            }
+        }
     }
 
     enum WatchError: Error, CustomStringConvertible {

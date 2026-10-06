@@ -1220,20 +1220,20 @@ enum CLI {
         let ownership = Ownership.effective(project: project, paths: paths).ownership
         let active = label.flatMap { Requests(paths: paths).inProgress(assignedTo: $0, project: project).first }
         let presence = Presence.marks(paths: paths)
-        if let me = label {
-            let (_, reaped) = PathClaims.reap(
-                claims.filter { $0.label != me },
-                presence: presence, isPIDAlive: { Liveness.isProcessAlive($0) }, now: Date()
-            )
-            if !reaped.isEmpty {
-                Ledger(url: paths.ledger).append(LedgerEntry(
-                    at: Date(),
-                    kind: .note,
-                    project: project,
-                    title: "claim.reaped",
-                    summary: reaped.map { "\($0.label):\($0.pattern)" }.joined(separator: ", ")
-                ))
-            }
+        // Dead sessions lose their claims before the gate decides, labeled or
+        // not: an unlabeled commit must not stay blocked by a ghost either.
+        let (_, reaped) = PathClaims.reap(
+            claims.filter { $0.label != label },
+            presence: presence, isPIDAlive: { Liveness.isProcessAlive($0) }, now: Date()
+        )
+        if !reaped.isEmpty {
+            Ledger(url: paths.ledger).append(LedgerEntry(
+                at: Date(),
+                kind: .note,
+                project: project,
+                title: "claim.reaped",
+                summary: reaped.map { "\($0.label):\($0.pattern)" }.joined(separator: ", ")
+            ))
         }
         let violations = PrecommitGate.evaluate(
             staged: files,
@@ -1246,7 +1246,7 @@ enum CLI {
         )
 
         if label == nil {
-            print("gentlemerge: no label for this worktree (run `gentlemerge project init --label <name>`); claims not enforced")
+            print("gentlemerge: no label for this worktree (run `gentlemerge project init --label <name>`); live claims still block")
         }
         for violation in violations {
             print("✖ \(violation.path): \(violation.reason)")

@@ -1034,7 +1034,11 @@ public struct AgentBus: Sendable {
         // bus for `brief --as`, this just spends no turn tokens on them.
         var coalesced: [String: (count: Int, attachments: [String])] = [:]
         var urgentLines: [String] = []
-        var messageLines: [String] = []
+        // One rendered block per non-folded candidate (body + attachments), in
+        // render order, so the budget walk and the post-cap delivery check can
+        // tell a whole block from a cut one.
+        var messageBlocks: [[String]] = []
+        var blockByID: [String: [String]] = [:]
         // Which candidates were folded vs shown individually, so the post-cap
         // check knows what "survived" means for each.
         var coalescedIDs = Set<String>()
@@ -1077,9 +1081,10 @@ public struct AgentBus: Sendable {
                 } else if message.isPriority {
                     urgentLines.append(body)
                     urgentLines += attachments
+                    blockByID[message.id] = [body] + attachments
                 } else {
-                    messageLines.append(body)
-                    messageLines += attachments
+                    messageBlocks.append([body] + attachments)
+                    blockByID[message.id] = [body] + attachments
                 }
             }
             // Folded broadcasts, steadiest senders first — deterministic order
@@ -1087,27 +1092,61 @@ public struct AgentBus: Sendable {
             if let me {
                 for sender in coalesced.keys.sorted() {
                     let group = coalesced[sender]!
-                    messageLines.append(BriefingRelevance.coalescedLine(from: sender, count: group.count, me: me))
-                    messageLines += group.attachments
+                    messageBlocks.append(
+                        [BriefingRelevance.coalescedLine(from: sender, count: group.count, me: me)]
+                            + group.attachments
+                    )
                 }
-            }
-            if !messageLines.isEmpty {
-                if !lines.isEmpty { lines.append("") }
-                // An anonymous reader is looking at somebody else's post as well as
-                // its own, so the heading may not promise they are all for you.
-                lines.append(me == nil ? "Messages on the bus:" : "Messages left for you:")
-                lines += messageLines
             }
         }
         // Omitted priority stays pending with a one-line pointer, grouped by
         // sender so a flood reads as one line, not a hundred. No handle: the
-        // post-cap check marks delivered by handle presence, so these correctly
-        // stay pending for the next turn.
+        // post-cap check marks a message delivered only when its whole block
+        // survived, so these correctly stay pending for the next turn.
         if !omittedPriority.isEmpty {
             let bySender = Dictionary(grouping: omittedPriority, by: \.from)
                 .mapValues(\.count).sorted { $0.key < $1.key }
             let detail = bySender.map { "\($0.key): \($0.value)" }.joined(separator: ", ")
             urgentLines.append("+ \(omittedPriority.count) urgentes pendientes (\(detail)); ejecuta gentlemerge brief")
+        }
+
+        let urgentHead = urgentLines.isEmpty ? [] : ["Needs you now:"] + urgentLines + [""]
+        // How much of the briefing leads un-cut. Two rules, one per half of the
+        // old bug this fixes: `keeping` counts physical lines, not array
+        // elements — a multi-line body is one element but many rendered lines,
+        // and undercounting it let the cap cut a long urgent after its first
+        // lines while the handle in that first line still marked it delivered
+        // (audit 2026-10-06, finding 1). And message blocks lead un-cut while
+        // they fit, with the first non-fitting one still kept complete — the
+        // same rule that lets budgetPriority always take the first urgent —
+        // because a cut block could never deliver and would re-appear
+        // half-shown every turn. Everything after pages FIFO next turn.
+        var headParts = urgentHead + lines
+        if !messageBlocks.isEmpty {
+            if !lines.isEmpty { headParts.append("") }
+            // An anonymous reader is looking at somebody else's post as well as
+            // its own, so the heading may not promise they are all for you.
+            headParts.append(me == nil ? "Messages on the bus:" : "Messages left for you:")
+        }
+        let budgetChars = mode == .full ? BriefingBudget.fullMaxChars : BriefingBudget.deltaMaxChars
+        var spent = headParts.joined(separator: "\n").count
+        var keeping = headParts.reduce(0) { $0 + $1.components(separatedBy: "\n").count }
+        var oversizeKept = false
+        for block in messageBlocks {
+            let blockLines = block.reduce(0) { $0 + $1.components(separatedBy: "\n").count }
+            let blockChars = block.joined(separator: "\n").count + 1
+            let fits = spent + blockChars <= budgetChars
+            if !fits && oversizeKept { break }
+            spent += blockChars
+            keeping += blockLines
+            if !fits { oversizeKept = true }
+        }
+
+        let messageLines = messageBlocks.flatMap { $0 }
+        if !messageLines.isEmpty {
+            if !lines.isEmpty { lines.append("") }
+            lines.append(me == nil ? "Messages on the bus:" : "Messages left for you:")
+            lines += messageLines
         }
 
         lines.append("")
@@ -1174,10 +1213,9 @@ public struct AgentBus: Sendable {
         //
         // Conflict-class lines lead and are exempt from the cut: a warning
         // enters even when the rest of the budget is spent.
-        let urgentHead = urgentLines.isEmpty ? [] : ["Needs you now:"] + urgentLines + [""]
         let text = Redactor.scrub((urgentHead + lines).joined(separator: "\n")).text
         let output = persistCursor && sessionID != nil
-            ? BriefingRenderer.cap(text, mode: mode, keeping: urgentHead.count)
+            ? BriefingRenderer.cap(text, mode: mode, keeping: keeping)
             : text
         // A candidate is not delivered until its complete, scrubbed line survives
         // the final budget. Omitted updates stay pending for the next delta —
@@ -1190,8 +1228,14 @@ public struct AgentBus: Sendable {
                 cursor.seenRequestStates[update.id] = update.state
             }
         }
-        // Which candidates actually survived the final budget: individually
-        // shown lines by handle, folded broadcasts by their one-line summary.
+        // Which candidates actually survived the final budget: folded
+        // broadcasts by their one-line summary, everything else by its whole
+        // block. The handle is not enough: it sits at the front of the block,
+        // so a cap that cut everything after the first line still matched it
+        // and marked a truncated message delivered — its tail then never came
+        // back (audit 2026-10-06, finding 1). The output is the rendered text
+        // cut at a line boundary, so a block survived exactly when its last
+        // physical line did.
         var actuallyDelivered: [AgentMessage] = []
         for message in candidates {
             if coalescedIDs.contains(message.id) {
@@ -1202,8 +1246,10 @@ public struct AgentBus: Sendable {
                     || output.contains(folded) {
                     actuallyDelivered.append(message)
                 }
-            } else {
-                if output.contains("#\(message.handle)") {
+            } else if let block = blockByID[message.id],
+                      let last = block.last?.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) {
+                let scrubbedLast = Redactor.scrub(last).text
+                if deliveredLines.contains(scrubbedLast) || output.contains(scrubbedLast) {
                     actuallyDelivered.append(message)
                 }
             }

@@ -122,8 +122,11 @@ public struct BriefingRenderer: Sendable {
         let rest = lines.joined(separator: "\n")
         guard rest.count > budget else { return text }
         let cut = String(rest.prefix(max(budget, 0)))
-        // cut at the last complete line so we never emit half a bullet
-        let safe = cut.lastIndex(of: "\n").map { String(cut[..<$0]) } ?? cut
+        // cut at the last complete line so we never emit half a bullet. When
+        // the whole budget is shorter than the next line, that means emitting
+        // nothing here: a partial line would look like delivered mail to the
+        // post-cap check, which reads the output as a line-boundary prefix.
+        let safe = cut.lastIndex(of: "\n").map { String(cut[..<$0]) } ?? ""
         let tail = "\n- …truncated; run `gentlemerge brief` for the full picture"
         return kept.isEmpty ? safe + tail : kept + "\n" + safe + tail
     }
