@@ -973,7 +973,47 @@ public struct AgentBus: Sendable {
             }
         }
 
-        guard !peers.isEmpty || elsewhere > 0 || !pending.isEmpty || !requestBlocks.isEmpty else {
+        // Peers, pending mail, open requests and un-announced claims are all reasons
+        // to say something. Claims used to be missing from this guard, which is
+        // the earliest place the briefing can return nil — so a reader whose
+        // backlog had drained and whose peers had gone quiet never heard about a
+        // path another agent had claimed, which is the one thing worth hearing
+        // (audit 2026-10-07).
+        // What this reader touches — claims plus request scope. Empty means no
+        // signal, and a reader with no footprint gets everything, exactly as
+        // before. Delta only: a session start needs the whole map.
+        //
+        // Computed before the silence gate because the gate needs it: a peer
+        // claim this reader touches is news, and the gate used to be blind to
+        // it. It compared only `pending` messages and the peer fingerprint, so
+        // once the message backlog drained it returned nil — with the claim
+        // still un-announced because the budget had cut it. Nothing would ever
+        // change again, so the collision warning never arrived at all
+        // (audit 2026-10-07). Putting claims in the fingerprint instead of the
+        // gate does not help: the fingerprint is recorded each turn, so an
+        // unannounced claim matches itself.
+        let readerScope: [String] = {
+            guard mode == .delta, let me else { return [] }
+            let mine = (project.map { PathClaims(paths: paths).live(project: $0) }
+                ?? PathClaims(paths: paths).load()).filter { $0.label == me }.map(\.pattern)
+            let touch = project.flatMap {
+                Requests(paths: paths).inProgress(assignedTo: me, project: $0).first?.mayTouch
+            } ?? []
+            return BriefingRelevance.scope(myClaimPatterns: mine, mayTouch: touch)
+        }()
+        // Claims this reader has not been shown and that touch its scope. Full
+        // mode shows every live claim regardless, so scoping is delta-only.
+        let unannouncedClaims: [PathClaim] = {
+            guard let project else { return [] }
+            let others = PathClaims(paths: paths).live(project: project)
+                .filter { $0.label != me && !cursor.seenClaimIDs.contains($0.id) }
+            return readerScope.isEmpty ? others : others.filter {
+                BriefingRelevance.touchesScope(pattern: $0.pattern, scope: readerScope)
+            }
+        }()
+
+        guard !peers.isEmpty || elsewhere > 0 || !pending.isEmpty || !requestBlocks.isEmpty
+            || !unannouncedClaims.isEmpty else {
             stampCursor()
             return nil
         }
@@ -999,7 +1039,8 @@ public struct AgentBus: Sendable {
         var material = shown.map(\.fingerprintLine)
         if elsewhere > 0 { material.append("elsewhere:\(elsewhere)") }
         let fingerprint = Self.fingerprint(material.joined(separator: "\n"))
-        if pending.isEmpty, requestBlocks.isEmpty, let marker = deliveryMarker(for: sessionID), fingerprint == marker.lastFingerprint {
+        if pending.isEmpty, requestBlocks.isEmpty, unannouncedClaims.isEmpty,
+           let marker = deliveryMarker(for: sessionID), fingerprint == marker.lastFingerprint {
             return nil
         }
 
@@ -1018,18 +1059,6 @@ public struct AgentBus: Sendable {
         let allPriority = pending.filter(\.isPriority)
         let (selectedPriority, omittedPriority) = Self.budgetPriority(allPriority, me: me, now: now, paths: paths)
         let candidates = selectedPriority + Array(pending.filter { !$0.isPriority }.prefix(8))
-        // What this reader touches — claims plus request scope. Empty means no
-        // signal, and a reader with no footprint gets everything, exactly as
-        // before. Delta only: a session start needs the whole map.
-        let readerScope: [String] = {
-            guard mode == .delta, let me else { return [] }
-            let mine = (project.map { PathClaims(paths: paths).live(project: $0) }
-                ?? PathClaims(paths: paths).load()).filter { $0.label == me }.map(\.pattern)
-            let touch = project.flatMap {
-                Requests(paths: paths).inProgress(assignedTo: me, project: $0).first?.mayTouch
-            } ?? []
-            return BriefingRelevance.scope(myClaimPatterns: mine, mayTouch: touch)
-        }()
         // Out-of-scope broadcasts, folded per sender: the notes stay on the
         // bus for `brief --as`, this just spends no turn tokens on them.
         var coalesced: [String: (count: Int, attachments: [String])] = [:]
@@ -1168,21 +1197,31 @@ public struct AgentBus: Sendable {
         // that touch this reader's scope. An out-of-scope claim stays unseen
         // (never marked shown), so it costs this reader nothing and still
         // surfaces the moment their scope grows onto it.
+        // claim id -> its rendered, scrubbed line, checked against the final
+        // output below so the cursor only advances for lines that actually
+        // reached the reader.
+        var claimLines: [String: String] = [:]
         if let project {
             let all = PathClaims(paths: paths).live(project: project).filter { $0.label != me }
-            let unseen = (mode == .full) ? all : all.filter { !cursor.seenClaimIDs.contains($0.id) }
-            let shownClaims = (mode == .full || readerScope.isEmpty)
-                ? unseen
-                : unseen.filter { BriefingRelevance.touchesScope(pattern: $0.pattern, scope: readerScope) }
+            // Already computed above for the silence gate, so reuse it rather
+            // than filtering the same list twice with two subtly different rules.
+            let shownClaims = mode == .full ? all : unannouncedClaims
             if !shownClaims.isEmpty {
                 lines.append("")
                 lines.append(mode == .full ? "Others are editing:" : "Newly claimed by others:")
                 for claim in shownClaims {
                     let minutes = max(Int(claim.expires.timeIntervalSinceNow / 60), 0)
                     let why = claim.intent.map { " — \(BriefingRenderer.quote($0))" } ?? ""
-                    lines.append("- \(claim.label): `\(claim.pattern)`\(why) [\(minutes)m]")
+                    let line = "- \(claim.label): `\(claim.pattern)`\(why) [\(minutes)m]"
+                    lines.append(line)
+                    claimLines[claim.id] = Redactor.scrub(line).text
                 }
-                shownClaims.forEach { cursor.seenClaimIDs.insert($0.id) }
+                // Not marked seen here. This runs before the cap, so marking at
+                // this point records claims the budget then throws away — and a
+                // claim is never re-shown once seen, so it was lost outright,
+                // including via `brief --as` and via a later full briefing
+                // (audit 2026-10-07). Marked below, once we know the line
+                // survived, exactly like a message block.
             }
             // Ownership zones are worth their tokens once per session — full
             // mode only. Pinned zones say so: HANDOFF.md zones are conveniences
@@ -1228,6 +1267,14 @@ public struct AgentBus: Sendable {
                 cursor.seenRequestStates[update.id] = update.state
             }
         }
+        // Claims get the same treatment as messages and request updates: the
+        // cursor advances only for a line that is actually in the output. A
+        // claim cut by the budget stays unseen, so it is announced next turn
+        // instead of being recorded as delivered and never surfacing again
+        // (audit 2026-10-07).
+        for (id, line) in claimLines where deliveredLines.contains(line) {
+            cursor.seenClaimIDs.insert(id)
+        }
         // Which candidates actually survived the final budget: folded
         // broadcasts by their one-line summary, everything else by its whole
         // block. The handle is not enough: it sits at the front of the block,
@@ -1236,6 +1283,13 @@ public struct AgentBus: Sendable {
         // back (audit 2026-10-06, finding 1). The output is the rendered text
         // cut at a line boundary, so a block survived exactly when its last
         // physical line did.
+        //
+        // "Last physical line" has to skip blanks. `deliveredLines` contains ""
+        // for *any* output with a blank separator, which every briefing has, so
+        // a message whose text ends in a newline — `quote` preserves it, leaving
+        // "" as the block's final line — matched unconditionally and was
+        // recorded delivered although the cap had cut its body. It then never
+        // reappeared (audit 2026-10-07).
         var actuallyDelivered: [AgentMessage] = []
         for message in candidates {
             if coalescedIDs.contains(message.id) {
@@ -1247,7 +1301,7 @@ public struct AgentBus: Sendable {
                     actuallyDelivered.append(message)
                 }
             } else if let block = blockByID[message.id],
-                      let last = block.last?.split(separator: "\n", omittingEmptySubsequences: false).last.map(String.init) {
+                      let last = Self.lastMeaningfulLine(block) {
                 let scrubbedLast = Redactor.scrub(last).text
                 if deliveredLines.contains(scrubbedLast) || output.contains(scrubbedLast) {
                     actuallyDelivered.append(message)
@@ -1568,7 +1622,27 @@ public struct AgentBus: Sendable {
         return "reader-\(safe)"
     }
 
-    public static func label(for provider: AgentProvider) -> String {
+    /// The last physical line of a rendered block that carries content.
+///
+/// The post-cap check asks "did this block survive the budget?" and answers it
+/// by looking for one line of the block in the output. If the line it picks is
+/// blank the answer is meaningless: `deliveredLines` contains "" for any output
+/// with a blank separator, so the test passes for every briefing ever
+/// rendered. A message whose text ends in a newline leaves exactly such a
+/// trailing blank — `BriefingRenderer.quote` preserves it — and was recorded
+/// delivered although the cap had cut its body, so it never came back
+/// (audit 2026-10-07). Judging the last line with ink on it restores the check.
+static func lastMeaningfulLine(_ block: [String]) -> String? {
+    for element in block.reversed() {
+        for line in element.split(separator: "\n", omittingEmptySubsequences: false).reversed()
+        where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+            return String(line)
+        }
+    }
+    return nil
+}
+
+public static func label(for provider: AgentProvider) -> String {
         switch provider {
         case .claudeCode: return "claude"
         case .codex: return "codex"
