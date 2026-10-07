@@ -21,16 +21,49 @@ public struct PrecommitGate: Sendable {
     let paths: Paths
     public init(paths: Paths) { self.paths = paths }
 
+    /// `git diff --cached --name-status -z`, which is the one form of this
+    /// output that never quotes, escapes or truncates a path.
+    ///
+    /// Three deliberate choices, each of which was a live bypass before
+    /// (audit 2026-10-07):
+    ///
+    /// - **`-z`, not `--name-only`.** With `--name-only` git C-quotes any path
+    ///   holding a non-ASCII byte (`"lib/donn\303\251es/caf\303\251.txt"`), and
+    ///   no zone pattern but a bare `**` can match that literal string — so a
+    ///   claim on `lib/données/**` was silently not enforced for any file with
+    ///   an accent. `core.quotePath=false` is belt-and-braces for anything that
+    ///   shells out to git elsewhere.
+    /// - **`--name-status`, not `--name-only`.** A rename yields only its
+    ///   destination in `--name-only`; the old name is unrecoverable, so
+    ///   `git mv` — or simply deleting and re-adding a file that differs by one
+    ///   byte, which git reports as `R092` — moved a file *out of* somebody
+    ///   else's claim without ever naming it. We need both names.
+    /// - **`T` in the filter.** `ACMRD` skips a typechange, so replacing a
+    ///   claimed file with a symlink (100644 => 120000) listed nothing and the
+    ///   gate passed. `U` is in the filter too for symmetry, though git itself
+    ///   refuses to commit an unmerged index, so it is belt-and-braces.
     public func stagedFiles(repo: URL) -> [String] {
         let output = Shell.run(
             "/usr/bin/env",
-            ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMRD"],
+            ["git", "diff", "--cached", "--name-status", "-z", "--diff-filter=ACMRDTU"],
             in: repo,
-            environment: ["GIT_OPTIONAL_LOCKS": "0"],
+            environment: ["GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_COUNT": "1",
+                          "GIT_CONFIG_KEY_0": "core.quotePath", "GIT_CONFIG_VALUE_0": "false"],
             timeout: 10
         )
-        return output.lines.filter { !$0.isEmpty }
+        // Fail loud, not open. If git could not answer we know nothing about
+        // what is staged, and returning [] reads as "nothing is claimed" —
+        // which is how a gate that cannot see turns into a gate that says yes.
+        guard output.succeeded, !output.timedOut else {
+            Log.error("could not read the staged files in \(repo.path): \(output.stderr.isEmpty ? "git failed or timed out" : output.stderr)")
+            return ["\(PrecommitGate.unreadableIndexSentinel)"]
+        }
+        return PrecommitCheck.parseStagedNameStatus(output.stdout)
     }
+
+    /// A path nothing can own, so an unreadable index surfaces as a blocking
+    /// violation on every staged file rather than a silent pass.
+    static let unreadableIndexSentinel = "\u{0}gentlemerge: index unreadable"
 
     public func dirtyFiles(repo: URL) -> [String] {
         let output = Shell.run(
@@ -81,6 +114,17 @@ public struct PrecommitGate: Sendable {
             effective = claims
         }
         var violations: [Violation] = []
+        // An index we could not read is not an empty index. Say so loudly and
+        // block, rather than reporting "nothing is claimed" about a state we
+        // never observed.
+        if staged.contains(PrecommitGate.unreadableIndexSentinel) {
+            return [.init(
+                path: PrecommitGate.unreadableIndexSentinel,
+                reason: "could not read the staged files (git failed or timed out), so this commit is unchecked"
+                    + " — nothing was staged, or nothing was checked. Re-run with an explicit path list to proceed.",
+                blocking: true
+            )]
+        }
         for path in staged {
             // 1) A live claim on this path → block. With a label the holder
             // must be somebody else; without one there is no "else" to compare

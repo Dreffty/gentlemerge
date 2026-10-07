@@ -278,12 +278,28 @@ public struct PathClaims: Sendable {
         var live: [PathClaim] = []
         var reaped: [PathClaim] = []
         for claim in claims where claim.isLive(at: now) {
-            let marks = presence.filter { Self.ownerLabels($0.label).contains(claim.label)
-                || Self.ownerLabels(claim.label).contains($0.label) }
+            // Only marks from this claim's own repository may speak for it.
+            // Labels are reused across repos by design (`claude`, `codex` are
+            // just names), so matching on the label alone let a stale
+            // heartbeat left in a *different* repository unlock this repo's
+            // gate for the life of the claim (audit 2026-10-07). A mark with
+            // no project is treated as saying nothing, which keeps the claim
+            // alive — the conservative direction for an enforcement point.
+            let marks = presence.filter {
+                $0.projectPath == claim.projectPath
+                    && (Self.ownerLabels($0.label).contains(claim.label)
+                        || Self.ownerLabels(claim.label).contains($0.label))
+            }
             let dead: Bool = {
                 guard !marks.isEmpty else { return false }
                 if marks.contains(where: { $0.pid.map(isPIDAlive) == false }) { return true }
-                return marks.allSatisfy { now.timeIntervalSince($0.updatedAt) >= Presence.timeToLive }
+                // Staleness is not death. A session still running that has not
+                // written a heartbeat in a while must keep its claim; only
+                // marks whose process is gone *and* whose heartbeat is old
+                // count as evidence that the owner is gone.
+                return marks.allSatisfy {
+                    $0.pid.map(isPIDAlive) != true && now.timeIntervalSince($0.updatedAt) >= Presence.timeToLive
+                }
             }()
             if dead { reaped.append(claim) } else { live.append(claim) }
         }

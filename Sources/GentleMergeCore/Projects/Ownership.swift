@@ -88,12 +88,35 @@ public struct Ownership: Sendable, Equatable {
     }
 
     /// The rules in force plus where they came from. Pinned wins when present;
-    /// otherwise the HANDOFF.md section, exactly as before.
-    public static func effective(project: String, paths: Paths) -> (ownership: Ownership, authority: Authority) {
+    /// otherwise the HANDOFF.md section.
+    ///
+    /// `handoffIsStaged` is what makes the `Authority` doc comment true rather
+    /// than aspirational. HANDOFF.md is a tracked file that the committing
+    /// agent is itself editing, so treating its zones as authoritative let one
+    /// agent stage an invasion of somebody's zone *and* the deletion of that
+    /// zone's declaration in a single commit: the gate saw no zone, the commit
+    /// landed, and the declaration was then gone from history for everybody —
+    /// the next agent found the zone free (audit 2026-10-07). When the file is
+    /// part of this commit we honour only the pinned store, which lives in the
+    /// home and cannot be reached from the worktree. Pinning stays opt-in; this
+    /// just stops the unverified source from ruling when it is being rewritten
+    /// under the judge's feet.
+    public static func effective(
+        project: String,
+        paths: Paths,
+        handoffIsStaged: Bool = false
+    ) -> (ownership: Ownership, authority: Authority) {
         if let rules = loadPinned(paths: paths)[project], !rules.isEmpty {
             return (Ownership(rules: rules), .pinned)
         }
+        guard !handoffIsStaged else { return (Ownership(rules: []), .handoff) }
         return (from(handoff: ProjectRegistry.handoff(for: project, refreshingCommits: false)), .handoff)
+    }
+
+    /// The handoff file as git would name it in a diff — the one form the
+    /// caller compares against a staged path.
+    public static var handoffRelativePath: String {
+        "\(ProjectHandoff.directoryName)/\(ProjectHandoff.fileName)"
     }
 
     /// Copy the HANDOFF.md zones into the pinned authority. Returns what was

@@ -1193,11 +1193,16 @@ enum CLI {
         let repo = URL(fileURLWithPath: directory)
         let project = ProjectRegistry.canonicalPath(for: directory)
 
-        // Identity: the worktree's own label first, then the one live presence
-        // mark in this project — and none of the two means we say so once and
-        // do not block, because enforcing claims against an unknown actor
-        // would block a commit we cannot justify.
-        let label = WorktreeLabel.read(cwd: repo) ?? presenceIdentity(project: project, paths: paths)
+        // Identity for enforcement is the *worktree's own* label, and nothing
+        // else. We deliberately do not fall back to the project's single live
+        // presence mark: a mark belongs to a session, not to the directory
+        // committing here, so adopting one made `me` equal whoever happened to
+        // be alive. When that happened to be the claim holder, rule 1's
+        // `$0.label != me` skipped its own claim and the commit sailed through
+        // (audit 2026-10-07). With no label, `evaluate` still blocks on live
+        // claims — it just cannot apply ownership zones, which need somebody to
+        // tell owner from invader.
+        let label = WorktreeLabel.read(cwd: repo)
 
         // The existing overlap report, exactly as `precommit` prints it.
         let baseline = value(after: "--since", in: arguments)
@@ -1217,7 +1222,14 @@ enum CLI {
         let gate = PrecommitGate(paths: paths)
         let files = staged ? gate.stagedFiles(repo: repo) : gate.dirtyFiles(repo: repo)
         let claims = PathClaims(paths: paths).live(project: project)
-        let ownership = Ownership.effective(project: project, paths: paths).ownership
+        // A commit that rewrites HANDOFF.md cannot also be judged by it — the
+        // agent could stage the invasion and the deletion of the zone's
+        // declaration together. Only the pinned store rules in that case.
+        let ownership = Ownership.effective(
+            project: project,
+            paths: paths,
+            handoffIsStaged: files.contains(Ownership.handoffRelativePath)
+        ).ownership
         let active = label.flatMap { Requests(paths: paths).inProgress(assignedTo: $0, project: project).first }
         let presence = Presence.marks(paths: paths)
         // Dead sessions lose their claims before the gate decides, labeled or
@@ -1292,17 +1304,25 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         let directory = projectDirectory(arguments, allowPositional: false)
         let project = ProjectRegistry.canonicalPath(for: directory)
-        guard let label = WorktreeLabel.read(cwd: URL(fileURLWithPath: directory))
-            ?? presenceIdentity(project: project, paths: paths) else { return 0 }
+        // Only the worktree's own label releases claims. Falling back to the
+        // project's single live presence mark released *somebody else's*
+        // claims — unblocking other agents on files this worktree never owned.
+        // Without a label the claims simply wait out their TTL, which is the
+        // safe direction.
+        guard let label = WorktreeLabel.read(cwd: URL(fileURLWithPath: directory)) else { return 0 }
         let output = Shell.run(
             "/usr/bin/env",
-            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+            ["git", "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "HEAD"],
             in: URL(fileURLWithPath: directory),
-            environment: ["GIT_OPTIONAL_LOCKS": "0"],
+            environment: ["GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_COUNT": "1",
+                          "GIT_CONFIG_KEY_0": "core.quotePath", "GIT_CONFIG_VALUE_0": "false"],
             timeout: 10
         )
         guard output.succeeded else { return 0 }
-        let files = output.lines.filter { !$0.isEmpty }
+        // -z: with the default core.quotePath, a name holding a non-ASCII byte
+        // came back C-escaped and matched no claim pattern, so the claim was
+        // never released and stayed blocking until its TTL.
+        let files = output.stdout.components(separatedBy: "\0").filter { !$0.isEmpty }
         guard !files.isEmpty else { return 0 }
         let released = (try? PathClaims(paths: paths).releaseCovering(
             files: files, project: project, label: label
@@ -1317,13 +1337,6 @@ enum CLI {
             ))
         }
         return 0
-    }
-
-    /// The one live presence mark in a project, or nil — the weak identity of
-    /// an agent that said "I am here" and the only one that did.
-    private static func presenceIdentity(project: String, paths: Paths) -> String? {
-        let live = Presence.marks(paths: paths).filter { !$0.isExpired && $0.projectPath == project }
-        return live.count == 1 ? live[0].label : nil
     }
 
     /// The revision this session opened on, when GentleMerge saw it start.
@@ -1845,7 +1858,13 @@ enum CLI {
         // The same rules as the commit-time gate, decided before the edit
         // lands: a surprise at commit time is twenty minutes of wasted work.
         let claims = PathClaims(paths: paths).live(project: project)
-        let ownership = Ownership.effective(project: project, paths: paths).ownership
+        // Same reasoning as the commit-time gate: the file being edited cannot
+        // also be the authority judging it.
+        let ownership = Ownership.effective(
+            project: project,
+            paths: paths,
+            handoffIsStaged: rel == Ownership.handoffRelativePath
+        ).ownership
         let active = Requests(paths: paths).inProgress(assignedTo: me, project: project).first
         let notes = Advise.check(
             path: rel,
