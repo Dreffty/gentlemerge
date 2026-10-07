@@ -202,11 +202,22 @@ public struct Requests: Sendable {
             guard allowed[request.state]?.contains(new) == true else {
                 throw RequestError.badTransition(from: request.state, to: new)
             }
+            // Only the two parties to the contract may move it. There used to be an
+            // `|| actor == "you"` escape on both branches, and `"you"` is what
+            // `Identity.resolve` hands back whenever a worktree has no label,
+            // no env label, no name and the project does not have exactly one
+            // live presence mark — which is the README's own configuration
+            // minus `--label`. So any unlabelled agent could accept, reject,
+            // ack or complete somebody else's request, release the delegate's
+            // `may_touch` claims, tick its task, and post the result to the
+            // delegator as "you" (audit 2026-10-07). A human at a terminal is
+            // served by `gentlemerge request ... --as <label>`, not by trusting
+            // a magic actor.
             switch new {
             case .acked:
-                guard actor == request.from || actor == "you" else { throw RequestError.notAllowed(actor) }
+                guard actor == request.from else { throw RequestError.notAllowed(actor) }
             default:
-                guard actor == (request.resolvedTo ?? request.to) || actor == "you" else {
+                guard actor == (request.resolvedTo ?? request.to) else {
                     throw RequestError.notAllowed(actor)
                 }
             }

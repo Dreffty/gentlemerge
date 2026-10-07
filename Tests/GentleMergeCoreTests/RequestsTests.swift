@@ -104,7 +104,7 @@ final class RequestsTests: XCTestCase {
         XCTAssertEqual(Redactor.scrub("account 21452098").text, "account [redacted number]")
     }
 
-    func testInvalidTransitionsAndWrongActorThrowButYouCanAct() async throws {
+    func testInvalidTransitionsAndWrongActorsThrow() async throws {
         var request = AgentRequest(
             from: "claude",
             fromVerified: true,
@@ -116,13 +116,31 @@ final class RequestsTests: XCTestCase {
         request.resolvedTo = "codex"
         request.state = .assigned
         try Requests(paths: paths).save(request)
+        let store = Requests(paths: paths)
 
-        XCTAssertThrowsError(try Requests(paths: paths).transition(request.id, to: .done, by: "codex", result: nil))
-        XCTAssertThrowsError(try Requests(paths: paths).transition(request.id, to: .inProgress, by: "hermes", result: nil))
-        XCTAssertNoThrow(try Requests(paths: paths).transition(request.id, to: .inProgress, by: "you", result: nil))
-        XCTAssertNoThrow(try Requests(paths: paths).transition(request.id, to: .failed, by: "you", result: "stopped"))
-        XCTAssertThrowsError(try Requests(paths: paths).transition(request.id, to: .acked, by: "codex", result: nil))
-        XCTAssertNoThrow(try Requests(paths: paths).transition(request.id, to: .acked, by: "you", result: nil))
+        // Only the two parties to the contract may move it. This used to carry
+        // an `|| actor == "you"` escape on both branches, and "you" is exactly
+        // what an unlabelled worktree resolves to — no label, no env label, no
+        // name, not exactly one live presence mark. That is the README's own
+        // configuration minus `--label`, so any agent in it could accept,
+        // fail, ack or complete somebody else's request, release the delegate's
+        // may_touch claims and post the result to the delegator as "you"
+        // (audit 2026-10-07). The old name said `ButYouCanAct`: the escape was
+        // pinned as intentional, which is why the suite stayed green.
+        XCTAssertThrowsError(try store.transition(request.id, to: .done, by: "codex", result: nil),
+                             "assigned -> done is not a transition")
+        XCTAssertThrowsError(try store.transition(request.id, to: .inProgress, by: "hermes", result: nil),
+                             "hermes is not a party to this contract")
+        XCTAssertThrowsError(try store.transition(request.id, to: .inProgress, by: "you", result: nil),
+                             "an unlabelled agent is not a party")
+        XCTAssertThrowsError(try store.transition(request.id, to: .acked, by: "codex", result: nil),
+                             "only the requester acks, not the delegate")
+        XCTAssertThrowsError(try store.transition(request.id, to: .acked, by: "you", result: nil))
+
+        // And the two parties still can, so the machine still turns.
+        XCTAssertNoThrow(try store.transition(request.id, to: .inProgress, by: "codex", result: nil))
+        XCTAssertNoThrow(try store.transition(request.id, to: .failed, by: "codex", result: "stopped"))
+        XCTAssertNoThrow(try store.transition(request.id, to: .acked, by: "claude", result: nil))
     }
 
     func testCapabilityRouteRequiresALiveCapableAgentAndChoosesFairlyWhenIdle() async throws {
