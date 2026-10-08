@@ -302,7 +302,7 @@ enum CLI {
         print("codex:           \(codexInstalled ? "notify bridge installed" : "not installed")")
 
         if let pid = try? String(contentsOf: paths.appPID, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-           let value = Int32(pid), kill(value, 0) == 0 {
+           let value = Int32(pid), value > 0, kill(value, 0) == 0 {
             print("app:             running (pid \(value))")
         } else {
             print("app:             not running")
@@ -1985,8 +1985,13 @@ enum CLI {
 
         let project = ProjectRegistry.canonicalPath(for: directory)
         let intent = value(after: "--intent", in: arguments)
+        // `value(after:)` only rejects `--`-prefixed values, so `--ttl -5` parsed fine and
+        // recorded a claim that was **born expired** (`-5 * 60 = -300`), printing
+        // "0m left" while protecting nothing. Clamp rather than reject: a zero or
+        // negative ask is a mistake, but writing a claim that claims nothing is
+        // worse than writing one that expires (audit Tier 5 #26).
         let ttl = (value(after: "--ttl", in: arguments) ?? "")
-            .flatMap { Double($0) }.map { $0 * 60 } ?? PathClaims.explicitTTL
+            .flatMap { Double($0) }.map { max($0, 0) * 60 } ?? PathClaims.explicitTTL
 
         do {
             for pattern in patterns {

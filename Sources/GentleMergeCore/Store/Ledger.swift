@@ -121,18 +121,28 @@ public struct Ledger: Sendable {
     }
 
     /// Newest first, capped — the history pane never needs the whole file.
+    ///
+    /// `limit` is clamped once here rather than trusted, because it reaches two
+    /// length-parameterised operations. `prefix(limit)` traps outright on a
+    /// negative count — `gentlemerge history -n -5` killed the process with
+    /// SIGTRAP, exit 133 — and `limit * 2` overflows to the same trap on an absurd
+    /// one. Clamping at the call site was not enough: `prefix` sat three lines
+    /// below the `suffix` I had bounded, reading the raw value again. A pager
+    /// must never be able to kill the process that serves it.
     public func recent(limit: Int = 200) -> [LedgerEntry] {
         guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return [] }
         let decoder = JSONCoding.decoder()
+        // The upper bound keeps `want * 2` inside Int for any Int input.
+        let want = min(max(limit, 0), 100_000)
         return contents
             .split(separator: "\n")
-            .suffix(limit * 2)
+            .suffix(want * 2)
             .reversed()
             .compactMap { line -> LedgerEntry? in
                 guard let data = line.data(using: .utf8) else { return nil }
                 return try? decoder.decode(LedgerEntry.self, from: data)
             }
-            .prefix(limit)
+            .prefix(want)
             .map { $0 }
     }
 
