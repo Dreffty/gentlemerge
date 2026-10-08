@@ -794,7 +794,18 @@ public final class InboxModel {
 
     public func deny(_ id: String) {
         do {
-            _ = try Requests(paths: paths).transition(id, to: .rejected, by: "you", result: "denied by human")
+            // A human clicking Deny is not a party to the contract, and "you" is
+            // the label an unlabelled worktree resolves to — so the old
+            // `by: "you"` was relying on the escape hatch that let anybody move
+            // anybody's request (audit 2026-10-07). The human's intent is "do not
+            // run this", which is the assignee declining on the record: act as
+            // whichever agent was going to run it.
+            guard let request = Requests(paths: paths).all().first(where: { $0.id == id }) else {
+                lastMessage = "No such request: \(id)."
+                return
+            }
+            let assignee = request.resolvedTo ?? request.to
+            _ = try Requests(paths: paths).transition(id, to: .rejected, by: assignee, result: "denied by human")
             pendingApprovals.removeValue(forKey: id)
             try updateApprovals { $0.remove(id) }
             lastMessage = "Denied \(id)."

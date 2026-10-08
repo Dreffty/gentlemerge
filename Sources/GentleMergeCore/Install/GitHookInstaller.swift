@@ -40,6 +40,17 @@ public struct GitHookInstaller: Sendable {
         return link == standard ? "$HOME/.gentlemerge/bin/gentlemerge" : link
     }
 
+    /// Single-quote a value for a POSIX shell. Only `'` needs escaping inside.
+    ///
+    /// The gate path is interpolated into `${GENTLEMERGE_BIN:-...}`, and `word`
+    /// in that expansion is subject to command substitution and arithmetic — so a
+    /// home directory containing `$(...)` executed it on *every commit*, and one
+    /// containing `"` produced a hook that was a syntax error (audit 2026-10-07).
+    /// Assigning it through single quotes first removes the expansion entirely.
+    static func shellQuoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     public static func script(gateDefault: String = "$HOME/.gentlemerge/bin/gentlemerge") -> String {
         """
         #!/bin/sh
@@ -47,7 +58,8 @@ public struct GitHookInstaller: Sendable {
         # Enforces PathClaims / Ownership / request.mayTouch on staged files. Deterministic, zero tokens.
         # Escape hatch for humans: GENTLEMERGE_SKIP=1 git commit ...
         # (handled inside the binary so the skip is published on the bus, never silent)
-        AI="${GENTLEMERGE_BIN:-\(gateDefault)}"
+        AI_DEFAULT=\(shellQuoted(gateDefault))
+        AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
         if [ -x "$AI" ]; then
           "$AI" precommit --enforce --staged --project "$(git rev-parse --show-toplevel)" || exit 1
         else
@@ -67,7 +79,8 @@ public struct GitHookInstaller: Sendable {
     # Releases my claims on what just landed. Never blocks, never fails: git
     # ignores a post-commit exit code, and this exits 0 regardless.
     [ -n "$GENTLEMERGE_SKIP" ] && exit 0
-    AI="${GENTLEMERGE_BIN:-\(gateDefault)}"
+    AI_DEFAULT=\(shellQuoted(gateDefault))
+    AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
     if [ -x "$AI" ]; then
       "$AI" postcommit --project "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true
     else
