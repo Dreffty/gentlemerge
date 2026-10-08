@@ -586,7 +586,9 @@ public final class InboxModel {
     }
 
     public func clearHistory() {
+        let doomed = items.filter { !$0.isPending }.map(\.id)
         items.removeAll { !$0.isPending }
+        removedIDs.formUnion(doomed)
         saveState()
     }
 
@@ -1187,11 +1189,23 @@ public final class InboxModel {
 
     // MARK: - Persistence
 
-    private func trimHistory() {
+    /// Ids this process deliberately dropped.
+///
+/// `saveState` unions the on-disk rows back in so a headless drain cannot
+/// erase rows the menu-bar app just added. But that union also resurrected
+/// everything `clearHistory` and `trimHistory` had just removed — so "Clear
+/// history" came straight back on the next tick, and `state.json` accumulated
+/// every row ever ingested, re-encoded on every three-second drain, growing
+/// without bound (audit 2026-10-07). A removal is a decision, not a stale copy,
+/// so it has to be remembered across the merge that follows it.
+private var removedIDs: Set<String> = []
+
+private func trimHistory() {
         let resolved = items.filter { !$0.isPending }.sorted { $0.updatedAt > $1.updatedAt }
         guard resolved.count > config.historyLimit else { return }
         let doomed = Set(resolved.dropFirst(config.historyLimit).map(\.id))
         items.removeAll { doomed.contains($0.id) }
+        removedIDs.formUnion(doomed)
     }
 
     /// Internal (not private) so headless drains and tests can drive the same
@@ -1214,6 +1228,11 @@ public final class InboxModel {
             if let data = try? Data(contentsOf: paths.state),
                let stored = try? JSONCoding.decoder().decode([InboxItem].self, from: data) {
                 for row in stored {
+                    // A row we just decided to drop stays dropped. Anything we
+                    // still hold is newer than what is on disk, so it wins
+                    // regardless — which is what lets the same id come back
+                    // later as genuinely new.
+                    if byID[row.id] == nil, removedIDs.contains(row.id) { continue }
                     if let mine = byID[row.id] {
                         if row.updatedAt > mine.updatedAt { byID[row.id] = row }
                     } else {
@@ -1222,6 +1241,11 @@ public final class InboxModel {
                 }
             }
             items = Array(byID.values)
+            // An id that came back into `items` is genuinely live again, so stop
+            // treating it as removed — otherwise the removal ledger becomes the
+            // next thing that grows without bound.
+            let live = Set(items.map(\.id))
+            removedIDs = removedIDs.subtracting(live)
             try AtomicFile.write(try JSONCoding.encoder().encode(items), to: paths.state)
         } catch {
             Log.error("could not save state: \(error.localizedDescription)")
