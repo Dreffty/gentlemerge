@@ -23,9 +23,17 @@ public struct Identity: Sendable, Equatable {
            !name.isEmpty {
             return Identity(label: safe(name), source: .presence)
         }
-        let project = ProjectRegistry.canonicalPath(for: cwd)
-        let live = Presence.marks(paths: paths).filter { !$0.isExpired && $0.projectPath == project }
-        if live.count == 1 { return Identity(label: safe(live[0].label), source: .presence) }
+        // There used to be a branch here that adopted the label of the single
+        // live presence mark in the project. It is gone, deliberately: a mark
+        // belongs to a session, not to the directory resolving identity, so
+        // "exactly one agent is alive here" is evidence about *that* agent and
+        // none at all about the one asking. The result was a brand-new agent
+        // becoming the agent already working — it claimed paths as `alice`,
+        // renewed `alice`'s claim instead of conflicting with it, overwrote
+        // `alice`'s presence mark with its own heartbeat (so `who` stopped
+        // listing the real one), and could never be addressed separately
+        // (audit 2026-10-08). With nothing to identify us we answer "you",
+        // which is not anybody's name and so cannot be mistaken for theirs.
         if provider != .unknown { return Identity(label: AgentBus.label(for: provider), source: .provider) }
         return Identity(label: "you", source: .human)
     }

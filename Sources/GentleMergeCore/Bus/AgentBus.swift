@@ -452,11 +452,36 @@ public struct AgentBus: Sendable {
     /// One read of the activity file for both halves: this runs inside a hook,
     /// on every turn, and the two numbers have to come from the same snapshot
     /// or the count could disagree with the list it is appended to.
-    func peers(excluding sessionID: String?, project: String?) -> (here: [AgentActivity], elsewhere: Int) {
-        let live = others(excluding: sessionID)
+    ///
+    /// `me` is the reader's own label, and it removes the reader's own presence
+    /// mark from the list. `others(excluding:)` filters by *session id*, and a
+    /// reader's id is `reader-<label>` (CLI `brief --as`), `mcp-<label>-<uuid>`
+    /// (MCP) or the agent's own session id (hook) — none of which is ever equal
+    /// to the presence mark's `presence:<label>@<project>#<branch>`, so every
+    /// agent was told about itself under "Other agents you have running right
+    /// now": one phantom peer, a wrong headcount, and tokens spent on it every
+    /// turn (audit 2026-10-08). `who` passes no label and is unaffected — it is
+    /// you asking, and it should list everything.
+    func peers(excluding sessionID: String?, project: String?, me: String? = nil)
+        -> (here: [AgentActivity], elsewhere: Int)
+    {
+        let live = others(excluding: sessionID).filter { !Self.isOwnPresenceMark($0, me: me) }
         guard let project else { return (live, 0) }
         let here = live.filter { $0.projectPath == project }
         return (here, live.count - here.count)
+    }
+
+    /// Whether an activity is *this reader's own* presence mark.
+    ///
+    /// A presence row's id is `presence:<label>@<project>#<branch>`; the label
+    /// is the actor another agent addresses. Matched exactly, so an executor
+    /// (`claude#exec1`) still hears about its director (`claude`) — they are
+    /// two processes and two marks, and one is legitimately the other's news.
+    static func isOwnPresenceMark(_ activity: AgentActivity, me: String?) -> Bool {
+        guard let me, !me.isEmpty, activity.id.hasPrefix("presence:") else { return false }
+        let rest = activity.id.dropFirst("presence:".count)
+        guard let at = rest.firstIndex(of: "@") else { return false }
+        return String(rest[..<at]) == me
     }
 
     /// The single line a whole other project's worth of agents is allowed to
@@ -565,7 +590,7 @@ public struct AgentBus: Sendable {
                 }
 
                 let taskTitle = Redactor.scrub("[\(request.id)] \(request.title)").text
-                let handoff = ProjectRegistry.addTask(taskTitle, to: projectPath, by: from)
+                let handoff = ProjectRegistry.addTask(taskTitle, to: projectPath, by: from, paths: paths)
                 request.taskID = handoff.tasks.first { $0.text == taskTitle }?.id
 
                 if let taskID = request.taskID {
@@ -963,7 +988,7 @@ public struct AgentBus: Sendable {
         // Peers are the ones sharing this project. A session in `clipapp` was
         // being told about another project's simulator, and paying context
         // for it every turn.
-        let (peers, elsewhere) = self.peers(excluding: sessionID, project: project)
+        let (peers, elsewhere) = self.peers(excluding: sessionID, project: project, me: me)
         let pending = undelivered(to: sessionID, me: me, project: project, branch: branch, now: now)
 
         // Per-session cursor: what this session has already been told, beyond
