@@ -34,11 +34,23 @@ public enum DispatchGate {
         default:
             return .skip(reason: "unknown dispatch mode \"\(config.dispatchMode)\" — want off, delegated or strict")
         }
+        // An explicit human approval outranks the daily budget, and the check has to
+        // come before it. The budget exists to stop *unattended* spending; a
+        // person who read this specific request and said yes is not unattended.
+        //
+        // With the budget tested first, approval never got a chance:
+        // `InboxModel.approve` wrote the id and reported "Approved … the next
+        // drain will check the dispatch gate", the gate still answered
+        // needsApproval, and `approvalNotifiedIDs` suppressed re-notification —
+        // so the UI showed a pending approval the user had already granted, with
+        // no further feedback and no log line (audit Tier 4 #17). The spend
+        // still lands in the ledger either way, so the budget accounting stays
+        // honest; only the unattended gate is overridden.
+        if approved { return .dispatch(target) }
         if config.dispatchDailyBudgetMinutes > 0,
            spentTodayMinutes + request.budgetMinutes > config.dispatchDailyBudgetMinutes {
             return .needsApproval(target, reason: "daily budget \(config.dispatchDailyBudgetMinutes)m exhausted (\(spentTodayMinutes)m spent)")
         }
-        if approved { return .dispatch(target) }
         let tier = target.costTier ?? "normal"
         if request.budgetMinutes <= config.dispatchAutoApproveMinutes && config.dispatchAutoApproveTiers.contains(tier) {
             return .dispatch(target)

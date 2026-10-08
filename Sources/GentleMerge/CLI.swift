@@ -387,13 +387,24 @@ enum CLI {
                 return 64
             }
             config.dispatchMode = value
-        case "dispatchDailyBudgetMinutes", "retentionDays":
-            guard let minutes = Int(value), minutes > 0 else {
-                FileHandle.standardError.write(Data("\(key) wants a positive integer\n".utf8))
+        case "dispatchDailyBudgetMinutes":
+            // The field is documented as "<= 0 means uncapped" and the gate reads
+            // it as `> 0`, so 0 is the only way to turn the cap off — and the
+            // shared positive-integer guard used to reject it, making the
+            // documented value unreachable (audit Tier 5 #43). Zero is accepted;
+            // a negative stays refused, because that is a typo rather than an
+            // intention.
+            guard let minutes = Int(value), minutes >= 0 else {
+                FileHandle.standardError.write(Data("\(key) wants 0 (uncapped) or a positive integer\n".utf8))
                 return 64
             }
-            if key == "dispatchDailyBudgetMinutes" { config.dispatchDailyBudgetMinutes = minutes }
-            else { config.retentionDays = minutes }
+            config.dispatchDailyBudgetMinutes = minutes
+        case "retentionDays":
+            guard let days = Int(value), days > 0 else {
+                FileHandle.standardError.write(Data("retentionDays wants a positive integer\n".utf8))
+                return 64
+            }
+            config.retentionDays = days
         case "claimsPolicy":
             guard ["warn", "deny", "off"].contains(value) else {
                 FileHandle.standardError.write(Data("claimsPolicy wants warn, deny or off\n".utf8))
@@ -410,7 +421,15 @@ enum CLI {
             FileHandle.standardError.write(Data("unknown key \"\(key)\"\n".utf8))
             return 64
         }
-        config.save(to: paths.config)
+        // Report the failure instead of printing the new value and exiting 0. A read-only
+        // or full home used to make `config set` claim success while persisting
+        // nothing, so the user believed a setting had changed (audit Tier 5 #31).
+        do {
+            try config.save(to: paths.config)
+        } catch {
+            FileHandle.standardError.write(Data("could not save \(key): \(error.localizedDescription)\n".utf8))
+            return 1
+        }
         return show(key)
     }
 

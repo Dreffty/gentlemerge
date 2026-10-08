@@ -68,10 +68,31 @@ public struct Dispatcher: Sendable {
             try? AtomicFile.write(Data(Redactor.scrub(output.stdout + "\n--- stderr ---\n" + output.stderr).text.utf8), to: log)
             let store = Requests(paths: paths)
             if let current = store.load(request.id), current.state == .assigned || current.state == .inProgress {
-                _ = try? store.transition(request.id, to: current.state == .assigned ? .rejected : .failed,
-                    by: target.label, result: output.succeeded
-                        ? "process exited without reporting; see \(log.lastPathComponent)"
-                        : "process failed/timed out (exit \(output.status)); see \(log.lastPathComponent)")
+                let note = output.succeeded
+                    ? "process exited without reporting; see \(log.lastPathComponent)"
+                    : "process failed/timed out (exit \(output.status)); see \(log.lastPathComponent)"
+                // Through RequestActions, not `store.transition`. Every other
+                // state change on a request also releases the delegate's
+                // may_touch claims, ticks the backing task and posts a result
+                // back to the delegator; going straight to the store did none of
+                // the three. So a headless delegate that timed out left its
+                // claims blocking other agents until their TTL, its task open,
+                // and the requester with no result line — the README's
+                // "automatic callback" never fired for the most common dispatch
+                // failure (audit Tier 4 #18).
+                do {
+                    _ = try RequestActions.perform(
+                        action: current.state == .assigned ? "reject" : "fail",
+                        id: request.id,
+                        by: target.label,
+                        result: note,
+                        paths: paths
+                    )
+                } catch {
+                    // The process is gone either way; failing to record that is
+                    // worth a line, not a crash in a detached task.
+                    Log.error("could not record the end of \(request.id): \(error.localizedDescription)")
+                }
             }
             Ledger(url: paths.ledger).append(LedgerEntry(kind: .note, itemID: request.id,
                 title: "dispatch.end", summary: "exit \(output.status)"))

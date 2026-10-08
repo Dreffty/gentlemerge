@@ -17,7 +17,16 @@ public final class InboxModel {
     public var config: AppConfig {
         didSet {
             guard config != oldValue else { return }
-            config.save(to: paths.config)
+            // Best effort here — this is a property observer on a model the user
+            // is looking at, and there is nowhere useful to surface a throw. The
+            // CLI's own `config set` path does report its failure instead, which
+            // is the case that matters (audit Tier 5 #31).
+            do {
+                try config.save(to: paths.config)
+            } catch {
+                Log.error("could not save config: \(error.localizedDescription)")
+                lastMessage = "Could not save settings: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -849,11 +858,17 @@ public final class InboxModel {
         }
         let live = Set(liveActivities.map { AgentBus.label(for: $0.provider) })
             .union(Presence.marks(paths: paths).filter { !$0.isExpired }.map(\.label))
+        // Read the ledger once for the whole sweep, not once per assigned request.
+        // `spentTodayMinutes` reads and JSON-decodes every line of ledger.jsonl,
+        // and it was evaluated inside the loop, so N assigned requests meant N ×
+        // L decodes every 3-second tick — the app's quiet background cost
+        // scaling with work it was not doing (audit Tier 4 #21).
+        let spentToday = Dispatcher.spentTodayMinutes(paths: paths, now: now)
         for request in assigned {
             guard !dispatchedRequestIDs.contains(request.id) else { continue }
             switch DispatchGate.decide(request: request, config: config, liveLabels: live,
                 lastDispatched: lastDispatched, approved: approvedRequestIDs.contains(request.id),
-                spentTodayMinutes: Dispatcher.spentTodayMinutes(paths: paths, now: now), now: now) {
+                spentTodayMinutes: spentToday, now: now) {
             case .dispatch(let target):
                 // Mark before starting: a slow child may stay assigned past the
                 // quiet period. Neither another tick nor a start failure retries it.

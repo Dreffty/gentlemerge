@@ -156,7 +156,7 @@ final class SimAgentTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = Paths(home: root.appendingPathComponent("home"))
         try paths.createDirectories()
-        AppConfig(reviewOnSessionEnd: true).save(to: paths.config)
+        try AppConfig(reviewOnSessionEnd: true).save(to: paths.config)
         let original = try Data(contentsOf: paths.config)
         let model = InboxModel(paths: paths)
         model.ingest(SpoolEnvelope(cwd: root.path, payload: .object([
