@@ -215,7 +215,23 @@ public struct GitHookInstaller: Sendable {
     private func placeHook(name: String, script: String, marker: String, in directory: URL) throws -> Bool {
         let hook = directory.appendingPathComponent(name)
         if let existing = try? String(contentsOf: hook) {
-            if existing.contains(marker) { return false }
+            // Identity is the *whole body*, not just the marker. The marker is a
+            // compile-time constant while the body varies per install — it bakes
+            // in the resolved gate path — so an install that found the marker
+            // reported "already installed" and left the hook pointing at the
+            // previous home. `ensureBinaryLink` re-links the binary in the *new*
+            // home, so the hook could not find it: every commit then printed
+            // "gate binary not found … this commit is NOT checked" and passed
+            // unchecked (audit Tier 5 #38).
+            if existing.contains(marker) {
+                if existing == script { return false }
+                // Ours, but stale. Rewrite in place — never chain ourselves — and
+                // report it as a change, so "already installed" means the body on
+                // disk is byte-identical to what we would write.
+                try AtomicFile.write(Data(script.utf8), to: hook)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+                return true
+            }
             if Self.legacyMarkers.contains(where: existing.contains) {
                 try? FileManager.default.removeItem(at: hook)
             }
@@ -224,7 +240,15 @@ public struct GitHookInstaller: Sendable {
         if FileManager.default.fileExists(atPath: hook.path) {
             // Keep the foreign hook and chain it; never destroy someone else's
             // tooling — a hook we moved over would be husky silently disabled.
-            try FileManager.default.moveItem(at: hook, to: hook.appendingPathExtension("gentlemerge-prev"))
+            // A stale `*.gentlemerge-prev` from an earlier chain must go first:
+            // `moveItem` refuses to overwrite, so the throw used to escape the
+            // install loop and leave *nothing* installed, with a message naming
+            // the collision instead of the cause (audit Tier 5 #39).
+            let previous = hook.appendingPathExtension("gentlemerge-prev")
+            if FileManager.default.fileExists(atPath: previous.path) {
+                try? FileManager.default.removeItem(at: previous)
+            }
+            try FileManager.default.moveItem(at: hook, to: previous)
         }
         try AtomicFile.write(Data(script.utf8), to: hook)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)

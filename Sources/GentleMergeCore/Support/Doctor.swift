@@ -124,9 +124,15 @@ public struct Doctor: Sendable {
         if missing.isEmpty {
             // Hooks without a gate binary warn on every commit but check
             // nothing. That is exactly the state worth shouting about.
+            // `paths.bin`, not `homeDirectoryForCurrentUser`: that is where
+            // `GitHookInstaller.gateDefault` actually resolves the binary, so
+            // with `GENTLEMERGE_HOME` set — or on Linux under `XDG_STATE_HOME` —
+            // doctor used to look in the real home, find nothing, and report
+            // "commits pass unchecked" for a perfectly healthy install. Its own
+            // `DoctorTests` only ever set `GENTLEMERGE_BIN`, so the path was
+            // never exercised (audit Tier 5 #44).
             let gate = ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"]
-                ?? (FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent(".gentlemerge/bin/gentlemerge").path)
+                ?? paths.bin.appendingPathComponent("gentlemerge").path
             if !FileManager.default.isExecutableFile(atPath: gate) {
                 return Check(name: "git-hooks", level: .warn,
                     detail: "hooks live in \(directory.path) but the gate binary is missing at \(gate) — commits pass unchecked. Reinstall (`gentlemerge install`) or set GENTLEMERGE_BIN.")
