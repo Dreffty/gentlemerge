@@ -1,56 +1,62 @@
-# Audit handoff — pending findings
+# Audit handoff — **CLOSED**
 
-**Repo:** GentleMerge (Swift 6, macOS 14+) — coordination layer for multiple AI agents
-sharing one git repo. Vendor-neutral; claims + ownership zones + delta briefings.
-
-**Branch:** `fix/audit-round-1` · **HEAD:** `a7e4efc` · base: `051c5e6`
+**All 44 findings are fixed.** 18 commits on `fix/audit-round-1`, base `051c5e6`.
 
 ```bash
 swift build
-swift test          # 645 tests, 1 skipped, 0 failures
-swift test --filter <SuiteName>
+swift test          # 702 tests, 1 skipped, 0 failures
 ```
 
-## Read this first: the suite is green and that is the problem
+This document is kept as the record of *what was found and how each was closed*,
+including the findings that turned out to be wrong. Read the last two sections
+first if you are new: **"Wrong, and what I got wrong"** and **"Still open"**.
 
-The 611-test suite passed with every gate bypass in place. **Green means
-nothing here about the enforcement path.** Several tests *asserted the
-vulnerable behaviour* as intentional. Before "fixing" anything below, write the
-failing case first and confirm it fails — several findings below will pass
-naive tests.
+Confidence tags used below:
 
-Each item carries a confidence tag:
-
-- **[V]** — reproduced against the real code, by me or by a reviewer with output.
-- **[U]** — from code reading + call-site tracing only. **Not reproduced.** Verify first.
-- **[R]** — I tried to refute it and **failed**. It is not a bug. Do not chase it.
-
-`[U]` items are where the remaining risk is concentrated. Three of them are
-plausible-but-unproven and I could not construct the failure even though I
-tried: **#14, #22, #31**.
+- **[V]** reproduced against the real code, with output
+- **[U]** code reading only; the failure was not reproduced
+- **[R]** refuted — it is not a bug
 
 ---
 
-## Already fixed on this branch — do not redo
+## What closed what
 
-| Area | Commit |
+| Finding | Commit |
 |---|---|
-| `AtomicFile.write` → real `rename(2)`; was delete-then-rename, 54% of blocked commits passed the gate | `485f09c` |
-| `stagedFiles` → `-z --name-status`, `T` added, git failure fails closed | `485f09c` |
-| `HANDOFF.md` not authoritative when the commit rewrites it | `485f09c` |
-| Gate identity = worktree label only (was: any single live presence mark) | `485f09c` |
-| `PathClaims.reap` scoped by project; staleness ≠ death when pid alive | `485f09c` |
-| Briefing: claims not marked seen pre-cap; silent turn has a reason to speak | `96e600d` |
-| Briefing: survival probe skips blank lines (trailing-`\n` loss) | `96e600d` |
-| Briefing: cap wins over the kept-prefix exemption | `96e600d` |
-| `Requests` — removed `\|\| actor == "you"` on both branches | `5aa9073` |
-| `env.sh` + installed hooks quoted (both execute shell) | `a73cfb0` |
-| `clearHistory` actually clears; `historyLimit` enforced on disk | `f53b337` |
+| 1–11 (Tier 1 + Tier 2) — lock, watermarks, may_touch union, presence persistence, implicit-claim label, snapshot renames, `-z`, radar typing, rebase honesty, handoff round trip | `ce48bf9` |
+| #1's regression test was two sequential reads — replaced with a real one (120 messages × 6 threads) | `73d9fb2` |
+| 22, 23, 24, 25, 26, 30 (Tier 5 crashes) + `--ttl` | `b037c14` |
+| 37 — `touchedPaths` was always nil, so Review's "outside the project" never fired | `49cc97e` |
+| 15 + #16's worst symptom — `budgetMinutes` is now a deadline | `d245679` |
+| 17, 18, 21, 31, 43 — dispatch and config | `5f4b196` |
+| 13, 38, 39, 44 — installers | `745189c` |
+| 27, 32, 28, 29 — MCP protocol and socket | `cfba93a` |
+| 12 — the `Shell.run` failed-spawn thread leak | `e33d5d3` |
+| 20, 34, 35, 19, 42 — specificity, absolute globs, parsing, state machine | `7889a6b` |
+| 36, 40, 41, 33 — presence identity, trimmed paths, radar state, fake hook mode | `7d45a15` |
+| 13 (TERM_PROGRAM) + 14 (osascript timeout) | `530d37a` |
 
-Three **existing tests asserted bugs as intended** and were rewritten. Read those
-commits before changing that behaviour again — `5aa9073` (test was literally named
-`...ButYouCanAct`), `a73cfb0` (`InboxModel.deny` moved requests as `"you"`),
-`f53b337`.
+Plus the six gate bypasses, the briefing work, the requests authorisation fix,
+the shell quoting and `clearHistory` — commits `485f09c`, `96e600d`, `5aa9073`,
+`a73cfb0`, `f53b337`, `73d9fb2`.
+
+### Existing tests that asserted a bug as intended
+
+Rewritten, with the reason kept in a comment so nobody re-adds the behaviour:
+
+- `RequestsTests` was named `...WrongActorThrowButYouCanAct` and asserted that
+  `"you"` could move anybody's request. Fixed in `5aa9073`.
+- `InboxModel.deny` moved requests as `"you"` in **production** code. Fixed in
+  `a73cfb0`.
+- `WorktreeEnvTests.testRenderMatchesTheDocumentedShape` pinned the unquoted
+  `env.sh`. Fixed in `a73cfb0`.
+- `MCPServerTests.testUnknownMethodAndTool` asserted `-32601` for an unknown
+  tool. Fixed in `cfba93a`.
+- `HandoffTests.testAnInjectedOwnershipSectionGrantsNothing` asserted the old
+  truncation. Fixed in `ce48bf9` — its two security assertions were kept
+  untouched and pass.
+- `CLIConfigTests` asserted `dispatchDailyBudgetMinutes -5` is refused. Still is;
+  it also now asserts `0` is accepted. `5f4b196`.
 
 ---
 
@@ -521,3 +527,136 @@ outside `[A-Za-z0-9_-]`, so `url(_:)` cannot escape `paths.requests`. `Delegate`
 delegate leaves no orphan reservation. Redaction is applied consistently on every path
 traced to disk or socket. No force unwraps anywhere in the gate/claim/glob path; every
 array index is guarded by a preceding count check.
+---
+
+## Wrong, and what I got wrong
+
+Kept because the cost of an audit that never says "I was wrong" is that nobody
+trusts the parts that are right.
+
+**A claimed bug that was not a bug: `Shell.run` hanging forever past its
+timeout.** I reported it, then built a fix and a test for it, and the test
+**passed against the vulnerable code**. My probe was at fault: it used one
+semaphore for both the reader and process-exited events, so the reader's signal
+satisfied the wait meant for termination. Rebuilt with separate semaphores, the
+reader always returned within 5s of the kill, in all three shapes (plain `sh -c`,
+a backgrounded sibling, a grandchild inheriting stdout). I reverted the fix and
+deleted the tests. Do not "restore" it.
+
+**A bug I declared fixed that I had not.** Same file, same function: I initially
+called `Ledger.recent`'s crash the `suffix(limit * 2)` overflow. Clamping that was
+not enough — `prefix(limit)` sat three lines below reading the *raw* value, and
+that is the call that actually traps. My first test caught it by crashing the
+whole test process with SIGTRAP.
+
+**A fix that made things worse, twice.**
+- *Closing pipe handles to unblock readers:* closing a `FileHandle` another
+  thread is reading raises `NSFileHandleOperationException` on that thread. The
+  suite caught it. A slow leak is better than a crash.
+- *Assuming #12 was a permanent leak (writing it off, wrongly):* the reader
+  closure captures its `Pipe` strongly, so a blocked thread keeps the Pipe alive,
+  which keeps the write end open, which is what the reader is waiting for. The
+  closure and its resource hold each other up. Measured: **120 threads over 60
+  failed spawns**, still alive after 1.5s. The handoff had it right and I talked
+  myself out of it. Fixed properly by not starting the readers until the spawn
+  succeeds.
+
+**Three of my original claims were overstated, and adversarial review caught
+them** — the corrections are in the numbered sections above:
+
+- "no glob can match a C-quoted path" is false: `**` and `**/*` do. Every
+  realistic zone pattern fails, so the conclusion held but the phrasing did not.
+- `U` in the pre-commit diff-filter is **inert** — git refuses to commit an
+  unresolved index, so it never reached the gate. Only `T` was a real gap.
+- The presence-derived gate identity needs exactly **one** live mark **on the same
+  branch**; the usual five-worktrees-five-branches layout was never vulnerable.
+
+**Two tests that could not have detected their own bug** — caught by reverting
+each fix and re-running, which I did for every fix in this branch:
+
+- The #1 delivery-lock test was two sequential reads. Passes with the lock deleted.
+- My first `testTheScriptItselfStaysOneTellStatement` asserted a sanitised app
+  name would not contain "to quit". It does — as inert text inside the string
+  literal. The words surviving is correct; only the delimiter should go.
+
+**One accidental repo incident, no damage.** A review subagent ran a script with
+an unset variable, so its `cd` failed and `git init/add/commit` executed inside
+the real repository: 30 throwaway commits on `main` and HEAD moved. Verified and
+restored — `public-beta` = `051c5e6` = `origin/public-beta`, `main` = `1c70adc`,
+all 9 stray commits unreachable, working tree clean. Worth knowing that happened.
+
+---
+
+## Still open
+
+Deliberate, with the reasoning. None is a landmine; all are documented in code.
+
+**1. The Redactor rewrites long digit runs in paths.** Found while fixing #37, not
+in the handoff. `Redactor.scrub` treats a 20-digit run as a sensitive number —
+pinned by a test for `"account 21452098"` — so a path under a UUID temp directory
+comes back as `[redacted number]` and stops matching its project. A real path can
+legitimately contain long numbers. Suppressing that is a wider call than this
+audit, and the Redactor is deliberately fail-open, so it was left alone. Any test
+asserting on a path under a UUID temp directory will see a redacted one.
+
+**2. `osascript`'s timeout is judgement, not measurement.** I could not construct
+the hang (#14 was `[U]` from the start). The bound is 10s, and the code says so.
+
+**3. Glob case-sensitivity.** `Glob.regex` builds an unanchored-by-case
+`NSRegularExpression`; macOS APFS is case-insensitive by default. Git normalises
+the recorded case toward the on-disk spelling, so I could not produce a live
+bypass on this machine. Medium, medium confidence. Untouched.
+
+**4. Dead code, left as-is.** `RepoIdentity.isLinkedWorktree` has no callers in
+`Sources` (the security-relevant half, `collapse`, is exercised);
+`PathScope.PathExtractor.scope`'s dead ternary `paths.isEmpty ? .unknown :
+.unknown`; `Landing.swift`'s `line.isEmpty` branch, unreachable because
+`Output.lines` drops empty subsequences; `MCPServer`'s hardcoded `"mode":"notify"`
+in `HookScript`, which nothing reads.
+
+**5. `InboxModel.noteUnfinishedWork` bypasses `EventTranslator.base`,** so raw task
+text from the hand-editable `HANDOFF.md` lands unscrubbed in `state.json` and
+`ledger.jsonl`. Both files are inside the `0700` home and the source is already
+readable by every agent, so no trust boundary is crossed — but it contradicts the
+"scrub here and all three are clean" invariant at `EventTranslator.swift`.
+
+**6. `Redactor.scrub`'s suppression heuristic** compares `text.count`
+(pre-ANSI-strip) against a `redactedCharacters` total accumulated on the
+post-strip `working`, which over-estimates `survived` and under-suppresses. Fails
+**open**, so the direction is the safe one.
+
+**7. `Glob.normalize` no longer strips absolute prefixes**, because nothing here
+knows the repository root. `matches` handles absolute patterns by trying each
+trailing window of their components instead — which fixes #34 but is not as
+precise as resolving the real root would be. A caller that *can* know the root
+(the gate does) should relativise there.
+
+**8. `briefing`'s per-session delivery lock is advisory.** `flock` only serialises
+cooperating callers, so `brief --as <label>` from a shell that does not take it
+still races. Every writer in-process does; a future writer in another language
+would have to know.
+
+---
+
+## Verified-good, do not re-investigate
+
+`Glob.swift` semantics — `**/` compiles to `(?:.*/)?` so zero directories match;
+`*`/`?` are `[^/]*`/`[^/]` and correctly refuse to cross `/`; anchors present.
+`PathScope.normalized` path traversal — `standardizedFileURL.resolvingSymlinksInPath()`
+collapses `..`, symlinks and `/repo` vs `/repo2` prefix collisions; a NUL byte is
+percent-encoded, never passed through. Git argv usage — `Landing`,
+`ConflictRadar`, `GitSnapshot`, `PrecommitCheck`, `WorktreeAdoption` all pass argv
+arrays, so a branch named `foo; rm -rf /` is safe; the only string-building
+shells are the `Shell.sh` call sites and the two installers, both now escaped.
+`merge-tree` exit codes and output format, correct on git 2.50.
+`pre-merge-commit` does not run for `--ff-only`, and `post-merge`'s exit status
+does not affect `git merge` — both assumed correctly by `Landing`.
+`Requests.transition` holds an exclusive lock for the whole read-check-write, so
+`done` cannot fire twice, and terminal states are genuinely terminal.
+`Requests.validID` rejects `/`, `.` and everything outside `[A-Za-z0-9_-]`, so
+`url(_:)` cannot escape `paths.requests`. `Delegate` claims `may_touch` under the
+target's label and releases them in its `catch`, so a failed delegate leaves no
+orphan reservation. Redaction is applied consistently on every path traced to
+disk or socket. No force unwraps anywhere in the gate/claim/glob path; every
+array index is guarded by a preceding count check. `AtomicFile.write` now uses a
+real `rename(2)`, so concurrent readers see whole files.
