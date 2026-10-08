@@ -111,6 +111,22 @@ public struct AgentRequest: Codable, Sendable, Identifiable, Equatable {
         watchID = try c.decodeIfPresent(String.self, forKey: .watchID)
     }
 
+    /// True once the request's own time budget has run out.
+    ///
+    /// `budgetMinutes` is the "time budget" the README sells as part of the
+    /// contract, and until now nothing compared it to the clock — it was advisory
+    /// for everything except the headless dispatcher's own timeout. A request
+    /// created three days ago with a 30-minute budget still showed up in every
+    /// briefing and could still be accepted at any later date (audit Tier 4 #15).
+    ///
+    /// Measured from `createdAt`, not `updatedAt`: the budget covers the whole
+    /// delegation, and resetting it on every state change would let a request
+    /// live forever as long as somebody kept touching it. Zero or negative means
+    /// no deadline, matching how `budgetMinutes` is validated elsewhere.
+    public func isPastBudget(at now: Date = Date()) -> Bool {
+        budgetMinutes > 0 && now.timeIntervalSince(createdAt) > Double(budgetMinutes) * 60
+    }
+
     public var busSummary: String {
         var s = "[\(id)] \(title)"
         if let expectedOutput { s += " -> \(expectedOutput)" }
@@ -173,6 +189,7 @@ public struct Requests: Sendable {
         all().filter {
             ($0.resolvedTo == label || $0.to == label)
                 && ($0.state == .queued || $0.state == .assigned)
+                && !$0.isPastBudget()
                 && (project == nil || $0.projectPath == project)
         }
     }
@@ -191,6 +208,15 @@ public struct Requests: Sendable {
         try FileManager.default.createDirectory(at: paths.requests, withIntermediateDirectories: true)
         return try LockedFile.withExclusiveLock(url(id)) {
             guard var request = load(id) else { throw RequestError.notFound(id) }
+            // A request nobody started cannot be started after its budget ran
+            // out. Work already in progress is deliberately exempt: the budget
+            // is for picking the task up, and killing a delegate mid-flight would
+            // strand the edits it has already made. A delegate that goes quiet
+            // is handled by its own timeout, not by this.
+            if !new.isTerminal && new != .rejected && new != .acked,
+               request.isPastBudget() {
+                throw RequestError.pastBudget(id: id, minutes: request.budgetMinutes)
+            }
             let allowed: [RequestState: Set<RequestState>] = [
                 .queued: [.assigned, .rejected],
                 .assigned: [.inProgress, .rejected],
@@ -246,6 +272,8 @@ public enum RequestError: Error, CustomStringConvertible {
     case suppressed
     case unknownAction(String)
     case invalidID, invalidBudget
+    /// The delegation's own time budget ran out before anybody started it.
+    case pastBudget(id: String, minutes: Int)
 
     public var description: String {
         switch self {
@@ -258,6 +286,8 @@ public enum RequestError: Error, CustomStringConvertible {
         case .noCapacity(let capability): return "no agent with capability '\(capability)' has capacity right now"
         case .suppressed: return "text was almost entirely secrets; refusing to share"
         case .unknownAction(let action): return "unknown request action \(action)"
+        case .pastBudget(let id, let minutes):
+            return "\(id) is past its \(minutes)m budget and nobody picked it up — delegate again if it still matters"
         }
     }
 }
