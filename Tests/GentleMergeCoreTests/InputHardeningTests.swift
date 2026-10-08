@@ -105,12 +105,64 @@ final class InputHardeningTests: XCTestCase {
         XCTAssertEqual(CommandArguments(["a", "--json", "--pretty", "b"]).positional, ["a", "b"])
     }
 
+    // MARK: - #37 touchedPaths must actually be populated
+
+/// `EventTranslator.base` took a `paths:` parameter that defaulted to `[]`, and
+    /// no call site passed one — so every translated inbox row had
+    /// `touchedPaths == nil` and `scope == .unknown`. That silently disabled the
+    /// README's third Review bullet: "what nobody verified" could never include
+    /// "edited a file outside the project", because the paths to check were never
+    /// recorded. `PathExtractor.paths` had zero callers anywhere.
+    func testAnEditRecordsThePathsItTouchedAndItsScope() throws {
+        // Plain paths, no UUID: the Redactor treats a long digit run as a
+        // sensitive number (there is a test pinning that for "account 21452098"),
+        // so a temp path's UUID comes back as "[redacted number]" and no longer
+        // matches the project. `PathExtractor.scope` is pure path arithmetic, so
+        // nothing needs to exist on disk here.
+        let project = "/Users/dev/code/app"
+        let inside = "/Users/dev/code/app/lib/a.dart"
+        let outside = "/Users/dev/elsewhere/b.dart"
+
+        func item(for path: String) throws -> InboxItem {
+            // `.unknown` so the generic translator runs: Claude Code's
+            // PreToolUse is deliberately `.ignore` (tool events are not inbox
+            // rows), and the generic path is the one that carries a tool payload
+            // through to `base`.
+            let outcome = EventTranslator.translate(SpoolEnvelope(
+                provider: .unknown,
+                cwd: project,
+                payload: JSONValue.object([
+                    "message": .string("edited a file"),
+                    "tool_name": .string("Edit"),
+                    "tool_input": .object(["file_path": .string(path)]),
+                ])
+            ))
+            guard case .item(let translated) = outcome else {
+                throw XCTSkip("an Edit must translate to an item, got \(outcome)")
+            }
+            return translated
+        }
+
+        let edit = try item(for: inside)
+        XCTAssertEqual(edit.touchedPaths, [inside], "the edited path must be recorded")
+        XCTAssertEqual(edit.scope, .inside, "a path under the project is inside it")
+
+        let escaped = try item(for: outside)
+        XCTAssertEqual(escaped.touchedPaths, [outside])
+        XCTAssertNotEqual(
+            escaped.scope, .inside,
+            "a path outside the project must not be reported as inside it"
+        )
+    }
+
     // MARK: - #30 kill(pid, 0) needs the positivity guard
 
-    /// `kill(-1, 0)` returns 0 — it reports "some process may be signalled" — so
-    /// a corrupt `app.pid` printed "running (pid -1)". `0` signals the caller's
-    /// whole process group. `Liveness` already guards this; doctor and `status`
-    /// did not.
+    /// `pid > 0` before `kill`, exactly as `Liveness.isProcessAlive` does and
+    /// for the same stated reason: nothing above the pid_t range was ever a pid.
+    /// A hand-edited or corrupt `app.pid` of `-1` made `kill(-1, 0)` return 0 —
+    /// it reports success for "any process may be signalled" — so both doctor
+    /// and `status` printed "running (pid -1)"; `0` signals the caller's whole
+    /// process group (audit Tier 5 #30).
     func testANonPositivePidIsNeverReportedAsRunning() throws {
         let paths = Paths(home: root.appendingPathComponent("home-\(UUID())"))
         try paths.createDirectories()
