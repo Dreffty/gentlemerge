@@ -297,6 +297,16 @@ public struct ProjectRegistry: Sendable {
 
     // MARK: - Tasks
 
+    /// What `addTask` actually did. The returned handoff alone cannot say: it is
+    /// the handoff either way, so a caller that did not count tasks was told
+    /// "added" for text that had been refused (audit Tier 5 #32).
+    public enum TaskAddOutcome: String, Sendable {
+        case added
+        case alreadyThere
+        case refusedAsSecret
+        case empty
+    }
+
     @discardableResult
     public static func addTask(
         _ text: String,
@@ -304,6 +314,23 @@ public struct ProjectRegistry: Sendable {
         by author: String?,
         steps: [String] = []
     ) -> ProjectHandoff {
+        addTaskReporting(text, to: projectPath, by: author, steps: steps).handoff
+    }
+
+    /// `addTask`, but saying which of the four things happened.
+    ///
+    /// The MCP `task_add` tool answered "added" for text the redactor had
+    /// refused as almost entirely secret. The agent then believed the task was
+    /// on the board — it never retried, never mentioned it, and simply moved on
+    /// with work nobody was tracking (audit Tier 5 #32). The same class the code
+    /// already fixes for `task_done`, where "an id nobody issued must error".
+    @discardableResult
+    public static func addTaskReporting(
+        _ text: String,
+        to projectPath: String,
+        by author: String?,
+        steps: [String] = []
+    ) -> (handoff: ProjectHandoff, outcome: TaskAddOutcome) {
         var handoff = handoff(for: projectPath)
 
         // This file gets committed and read by every agent. A key written into
@@ -311,17 +338,19 @@ public struct ProjectRegistry: Sendable {
         let scrubbed = Redactor.scrub(text)
         guard !scrubbed.isSuppressed else {
             Log.error("refused to add a task: it was almost entirely \(scrubbed.summary)")
-            return handoff
+            return (handoff, .refusedAsSecret)
         }
         let trimmed = scrubbed.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty,
-           !handoff.tasks.contains(where: { $0.text.caseInsensitiveCompare(trimmed) == .orderedSame }) {
-            handoff.tasks.append(
-                TaskItem(text: trimmed, steps: cleanedSteps(steps), addedBy: author)
-            )
+        guard !trimmed.isEmpty else { return (handoff, .empty) }
+        guard !handoff.tasks.contains(where: { $0.text.caseInsensitiveCompare(trimmed) == .orderedSame }) else {
+            // Already on the board is not a failure, but it is not "added" either.
+            return (handoff, .alreadyThere)
         }
+        handoff.tasks.append(
+            TaskItem(text: trimmed, steps: cleanedSteps(steps), addedBy: author)
+        )
         save(handoff)
-        return handoff
+        return (handoff, .added)
     }
 
     /// Every point goes through the same filter as the task itself, and one

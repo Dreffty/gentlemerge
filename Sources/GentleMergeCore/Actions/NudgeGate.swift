@@ -87,6 +87,14 @@ public enum NudgeGate {
         // process and the quiet period. When there is no socket, the rules
         // below decide about the terminal exactly as before.
         if let socket = activity.socketPath, !socket.isEmpty {
+            // `.working` and `.waiting` are genuinely fine here: a socket
+            // message queues without interrupting a turn or answering a dialog,
+            // which is the whole reason the socket needs no `.idle` whitelist.
+            // `.ended` is not — the tty path below spells out why ("nothing at
+            // the other end but a shell"), and the socket is no better. With
+            // pid reuse acknowledged in `Liveness`, that is a notice delivered
+            // to whatever inherited the socket (audit Tier 5 #29).
+            guard activity.state != .ended else { return .skipped("recipient has ended") }
             guard Liveness.isProcessAlive(activity.pid) == true else { return .skipped("process is gone") }
             if let lastNudgedAt, now.timeIntervalSince(lastNudgedAt) < quietPeriod {
                 return .skipped("nudged \(RelativeTime.compact(from: lastNudgedAt, to: now)) ago")

@@ -105,8 +105,62 @@ final class MCPServerTests: XCTestCase {
         XCTAssertTrue(Requests(paths: paths).mine(from: "a", project: project.path).isEmpty)
     }
     func testUnknownMethodAndTool() throws {
-        XCTAssertEqual(try call("missing")["error"]?["code"]?.intValue, -32601)
+        // -32601 is "unknown JSON-RPC *method*". An unrecognised tool name is
+        // invalid params, and MCP says so; the old code answered -32601 for both,
+        // so a client could not tell "bad method" from "bad tool"
+        // (audit Tier 5 #27).
         XCTAssertEqual(try rpc("missing")["error"]?["code"]?.intValue, -32601)
+        XCTAssertEqual(try call("missing")["error"]?["code"]?.intValue, -32602)
+    }
+
+    /// JSON-RPC §5: unparseable input is an error, not silence. Returning nil
+    /// left a client that emitted one malformed line waiting forever for a
+    /// response that would never come.
+    func testMalformedInputGetsAParseErrorRatherThanNoReply() throws {
+        let server = MCPServer(paths: paths, cwd: project.path, identity: "a")
+        for malformed in ["{not json", "", "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]"] {
+            let reply = server.handle(line: malformed)
+            let parsed = try JSONCoding.decoder().decode(JSONValue.self, from: Data((reply ?? "").utf8))
+            XCTAssertEqual(
+                parsed["error"]?["code"]?.intValue, -32700,
+                "expected a parse error for \(malformed.debugDescription), got \(reply ?? "nil")"
+            )
+            XCTAssertEqual(parsed["jsonrpc"]?.stringValue, "2.0")
+        }
+    }
+
+    /// A notification has no id and gets no reply — that must survive the
+    /// parse-error change above.
+    func testANotificationStillGetsNoReply() throws {
+        let server = MCPServer(paths: paths, cwd: project.path, identity: "a")
+        XCTAssertNil(server.handle(line: #"{"jsonrpc":"2.0","method":"ping"}"#))
+    }
+
+    /// #32 — `task_add` answered "added" for text the redactor had refused, so
+    /// the agent believed the task was on the board and never retried or said
+    /// anything.
+    func testTaskAddSaysSoWhenItRefusedTheText() throws {
+        let secret = "rotate key sk-ant-api03-" + String(repeating: "a", count: 40)
+        let reply = try call("task_add", ["text": .string(secret)])
+
+        XCTAssertEqual(reply["result"]?["isError"]?.boolValue, true, "a refusal must be an error, not a success")
+        let said = try XCTUnwrap(text(reply).lowercased())
+        XCTAssertTrue(said.contains("not added"), "the reply must say it did not add it: \(said)")
+        XCTAssertFalse(
+            ProjectRegistry.handoff(for: project.path, refreshingCommits: false).tasks
+                .contains { $0.text.contains("sk-ant") },
+            "and nothing may be written"
+        )
+    }
+
+    /// And a genuine add still says "added".
+    func testTaskAddStillConfirmsARealAdd() throws {
+        let reply = try call("task_add", ["text": .string("write the migration note")])
+        XCTAssertEqual(text(reply), "added")
+        XCTAssertTrue(
+            ProjectRegistry.handoff(for: project.path, refreshingCommits: false).tasks
+                .contains { $0.text == "write the migration note" }
+        )
     }
 
     /// The CLI's `watch` without a terminal: add by session and by task, list,
