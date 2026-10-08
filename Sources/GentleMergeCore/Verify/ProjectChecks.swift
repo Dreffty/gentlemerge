@@ -120,7 +120,14 @@ public enum ProjectChecks {
             checks.append(
                 Check(
                     name: "xcodebuild \(scheme)",
-                    command: "xcodebuild -scheme '\(scheme)' -destination 'platform=macOS' build",
+                    // The scheme is a *filename inside the repository*, and this
+                    // command runs through `/bin/sh -lc`. Quoting it is not
+                    // cosmetic: a scheme file named
+                    // `ok'; touch PWNED; echo '.xcscheme` used to execute
+                    // whatever its name said, as the committing agent, the first
+                    // time anybody ran `gentlemerge review` or `land`
+                    // (audit 2026-10-08).
+                    command: "xcodebuild -scheme \(Shell.quoted(scheme)) -destination 'platform=macOS' build",
                     kind: .build,
                     timeout: 900,
                     optional: true
@@ -197,7 +204,7 @@ public enum ProjectChecks {
             guard let files = try? manager.contentsOfDirectory(atPath: schemes.path) else { continue }
 
             let names = files
-                .filter { $0.hasSuffix(".xcscheme") }
+                .filter { $0.hasSuffix(".xcscheme") && !$0.contains("\n") }
                 .map { String($0.dropLast(".xcscheme".count)) }
                 .sorted()
             // The scheme named after the project is the app itself; anything

@@ -31,6 +31,20 @@ final class GlobTests: XCTestCase {
         XCTAssertTrue(Glob.matches("lib/", "lib/x"))
     }
 
+    /// A `.` segment in the middle means "this directory", exactly as at the
+    /// front. Keeping it made `src/./**` name a directory no repository has, so
+    /// the claim was accepted, reported as claimed, and matched nothing — a
+    /// protection that silently did not protect (audit 2026-10-08).
+    func testNormalizeStripsDotSegmentsAnywhere() {
+        XCTAssertTrue(Glob.matches("src/./**", "src/a.dart"))
+        XCTAssertTrue(Glob.matches("lib//store/**", "lib/store/a.dart"))
+        XCTAssertTrue(Glob.matches("./lib/./store/**", "lib/store/a.dart"))
+        // And the claim machinery agrees with `matches`: two spellings of the
+        // same pattern are one pattern, so claiming one renews the other rather
+        // than colliding with it.
+        XCTAssertTrue(Glob.mayOverlap("src/./**", "src/**"))
+    }
+
     func testQuestionMatchesExactlyOneCharacter() {
         XCTAssertTrue(Glob.matches("lib/?.dart", "lib/a.dart"))
         XCTAssertFalse(Glob.matches("lib/?.dart", "lib/ab.dart"))

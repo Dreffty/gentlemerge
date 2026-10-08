@@ -71,8 +71,14 @@ public struct GitSnapshot: Sendable {
             .appendingPathComponent("gentlemerge-index-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: indexFile) }
 
-        let head = git(["rev-parse", "HEAD"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasHead = !head.isEmpty
+        // `output.succeeded`, not just "is stdout empty": in a repository with no
+        // commits git prints `HEAD` on stdout *and* exits 128, so the old
+        // `!head.isEmpty` check took "HEAD" for a revision and the whole
+        // snapshot died on a raw `fatal: Not a valid object name HEAD`
+        // (audit 2026-10-08).
+        let revision = git(["rev-parse", "HEAD"])
+        let head = revision.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasHead = revision.succeeded && !head.isEmpty && head != "HEAD"
 
         if hasHead {
             let read = git(["read-tree", head], index: indexFile)
@@ -195,8 +201,13 @@ public struct GitSnapshot: Sendable {
 
         // Untracked files never appear in a diff; they are the agent's new
         // files, and deleting them silently is exactly what we refuse to do.
+        // Minus the ones we have just written back ourselves: a restored
+        // `d/old.txt` shows up as untracked against the index (the rename is
+        // still staged), and reporting it under both "restored" and "left in
+        // place" described one file as two (audit 2026-10-08).
         for line in git(["status", "--porcelain"]).lines where line.hasPrefix("??") {
-            created.append(String(line.dropFirst(3)))
+            let path = String(line.dropFirst(3))
+            if !restored.contains(path) { created.append(path) }
         }
 
         return RestoreReport(restored: restored, created: created.sorted(), safety: safety)

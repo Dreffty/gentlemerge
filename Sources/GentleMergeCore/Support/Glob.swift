@@ -64,16 +64,26 @@ public enum Glob {
         case disjoint
     }
 
-    /// Tail-normalizing: `./` prefixes and trailing slashes are noise.
+    /// Tail-normalizing: `.` segments and trailing slashes are noise.
     ///
     /// Absolute patterns are *not* normalized here — nothing here knows the
     /// repository root, so `matches` handles them by trying each trailing window
     /// of their components instead.
+    ///
+    /// `.` segments are removed *anywhere*, not only at the front. `src/./**`
+    /// used to keep its middle dot, so it named a directory no repository has
+    /// and matched nothing: the claim was accepted, reported as claimed, and
+    /// protected nothing — the worst kind of failure, because it looks like
+    /// protection (audit 2026-10-08). `.` means "this directory" wherever it
+    /// appears, and a doubled `/` is a `.` you did not have to type.
     static func normalize(_ s: String) -> String {
         var t = s
         while t.hasPrefix("./") { t.removeFirst(2) }
         while t.hasSuffix("/") { t.removeLast() }
-        return t
+        guard t.contains("/./") || t.contains("//") else { return t }
+        let kept = t.split(separator: "/", omittingEmptySubsequences: true)
+            .filter { $0 != "." }
+        return kept.joined(separator: "/")
     }
 
     /// How tightly a pattern pins a path, as a comparable tuple.

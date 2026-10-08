@@ -141,6 +141,23 @@ public enum Shell {
         run("/bin/sh", ["-lc", command], in: directory, timeout: timeout, onStart: onStart)
     }
 
+    /// Single-quote a value for a POSIX shell.
+    ///
+    /// Single quotes are literal in sh, so the only character that has to be
+    /// escaped is `'` itself — as `'\''`, which closes the quoted run, emits a
+    /// quoted quote, and reopens. Nothing else can escape: `$`, `` ` ``, `"`,
+    /// `\`, `;` and `&` are all inert inside single quotes.
+    ///
+    /// This exists for the values we interpolate into a command string, and it
+    /// is the difference between a command and a shell injection. An Xcode
+    /// scheme name read out of the repository was interpolated bare into
+    /// `xcodebuild -scheme '<name>'`, so a scheme file called
+    /// `ok'; touch PWNED; echo '` ran `touch PWNED` the next time anybody ran
+    /// `gentlemerge review` or `gentlemerge land` (audit 2026-10-08).
+    public static func quoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     /// Cancellable variant: cancelling the task terminates the process.
     public static func runAsync(
         _ executable: String,

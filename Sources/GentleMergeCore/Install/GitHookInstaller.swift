@@ -40,16 +40,14 @@ public struct GitHookInstaller: Sendable {
         return link == standard ? "$HOME/.gentlemerge/bin/gentlemerge" : link
     }
 
-    /// Single-quote a value for a POSIX shell. Only `'` needs escaping inside.
+    /// Single-quote a value for a POSIX shell — the shared primitive.
     ///
     /// The gate path is interpolated into `${GENTLEMERGE_BIN:-...}`, and `word`
     /// in that expansion is subject to command substitution and arithmetic — so a
     /// home directory containing `$(...)` executed it on *every commit*, and one
     /// containing `"` produced a hook that was a syntax error (audit 2026-10-07).
     /// Assigning it through single quotes first removes the expansion entirely.
-    static func shellQuoted(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
+    static func shellQuoted(_ value: String) -> String { Shell.quoted(value) }
 
     public static func script(gateDefault: String = "$HOME/.gentlemerge/bin/gentlemerge") -> String {
         """
@@ -149,9 +147,15 @@ public struct GitHookInstaller: Sendable {
         let custom = configured.hasPrefix("/")
             ? URL(fileURLWithPath: configured)
             : toplevel.appendingPathComponent(configured)
-        let customPath = custom.standardizedFileURL.path
-        if customPath == classic.standardizedFileURL.path { return (classic, nil) }
-        let topPath = toplevel.standardizedFileURL.path
+        // Symlinks resolved, not just `.`/`..`: `standardizedFileURL` collapses
+        // the lexical form and leaves a link alone, so `core.hooksPath=.link`
+        // pointing at `/tmp/shared` compared as inside the repo while git ran
+        // our gate from a directory every repository on the machine shares —
+        // exactly what this error exists to prevent (audit 2026-10-08).
+        let customPath = custom.resolvingSymlinksInPath().standardizedFileURL.path
+        let classicPath = classic.resolvingSymlinksInPath().standardizedFileURL.path
+        if customPath == classicPath { return (classic, nil) }
+        let topPath = toplevel.resolvingSymlinksInPath().standardizedFileURL.path
         guard customPath == topPath || customPath.hasPrefix(topPath + "/") else {
             throw InstallError.hooksPathOutsideRepo(path: customPath, configured: configured)
         }

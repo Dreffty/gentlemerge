@@ -156,4 +156,29 @@ final class ShellQuotingTests: XCTestCase {
         XCTAssertEqual(WorktreeEnv.shellQuoted("a'b"), "'a'\\''b'")
         XCTAssertEqual(GitHookInstaller.shellQuoted("$(id)"), "'$(id)'")
     }
+
+    // MARK: - the shared primitive
+
+    /// One quoting function, used by the generated files *and* by anything that
+    /// interpolates a value into a command string. An Xcode scheme name read out
+    /// of the repository used to go in bare, so a scheme file named
+    /// `ok'; touch PWNED; echo '` ran its own name (audit 2026-10-08).
+    func testTheSharedPrimitiveQuotesForAShell() {
+        XCTAssertEqual(Shell.quoted("plain"), "'plain'")
+        XCTAssertEqual(Shell.quoted("a'b"), "'a'\\''b'")
+        XCTAssertEqual(Shell.quoted("$(id)"), "'$(id)'")
+        XCTAssertEqual(Shell.quoted("App`id`"), "'App`id`'")
+    }
+
+    /// …and a value quoted with it survives a real shell as data, not as code.
+    func testAQuotedSchemeNameDoesNotExecute() {
+        let marker = root.appendingPathComponent("SCHEME-PWNED").path
+        let hostile = "ok'; touch \(marker); echo '"
+        let body = shebang + "printf '%s' \(Shell.quoted(hostile))\n"
+
+        let (status, _) = runShell(body)
+
+        XCTAssertEqual(status, 0, "the snippet must parse")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker), "the scheme name executed a command")
+    }
 }
