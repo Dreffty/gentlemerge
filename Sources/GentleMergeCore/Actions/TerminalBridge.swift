@@ -104,6 +104,20 @@ public struct TerminalBridge: Sendable {
         case failure(String)
     }
 
+    /// How long an AppleScript gets before we stop waiting for it.
+    ///
+    /// `osascript` has no timeout of its own, and these calls run on the
+    /// MainActor from the app's three-second timer. If `tell application
+    /// "Terminal" to activate` meets a modal sheet, the call never returns and
+    /// the MainActor wedges: the app stops draining the spool, stops writing
+    /// state, stops the delivery timer, with nothing to notice.
+    ///
+    /// `TerminalBridge` already turns `-1743` into "macOS blocked automation",
+    /// so the failure mode is known to be reachable — a hang is the same
+    /// condition with worse manners. I could not construct the hang, so this is
+    /// bounded by judgement rather than measurement (audit Tier 3 #14).
+    static let scriptTimeout: TimeInterval = 10
+
     private func run(_ script: String) -> ScriptResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
@@ -114,10 +128,25 @@ public struct TerminalBridge: Sendable {
         process.standardOutput = output
         process.standardError = errors
 
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
+
         do {
             try process.run()
         } catch {
             return .failure(error.localizedDescription)
+        }
+
+        // Wait on the process with a bound rather than reading to EOF first: a
+        // hung osascript holds its pipes open, so an unbounded read is exactly
+        // the thing that never returns.
+        if finished.wait(timeout: .now() + Self.scriptTimeout) == .timedOut {
+            process.terminate()
+            if finished.wait(timeout: .now() + 2) == .timedOut {
+                kill(process.processIdentifier, SIGKILL)
+                _ = finished.wait(timeout: .now() + 1)
+            }
+            return .failure("the terminal did not answer within \(Int(Self.scriptTimeout))s — giving up")
         }
 
         let outputData = output.fileHandleForReading.readDataToEndOfFile()
@@ -149,12 +178,27 @@ enum ScriptableTerminal: Sendable {
     }
 
     /// `TERM_PROGRAM` values map onto scripting names.
+    ///
+    /// The fallback used to pass the value through with only `.app` stripped, and
+    /// the result is interpolated into `tell application "<name>"`. `TERM_PROGRAM`
+    /// arrives from the hook payload and travels through `activities.json` and
+    /// `state.json`, so a value like `evil" to quit` produced
+    /// `tell application "evil" to quit to activate` and `osascript` ran it with
+    /// the app's Automation grant (audit Tier 3 #13).
+    ///
+    /// Mitigating factor: the home is `0700`, so this needed same-user access;
+    /// it is medium for that reason rather than high. Kept anyway, because a
+    /// value we do not recognise has no business naming an application at all.
     static func applicationName(for termProgram: String) -> String {
         switch termProgram.lowercased() {
         case "iterm.app", "iterm2", "iterm": return "iTerm2"
         case "apple_terminal", "terminal": return "Terminal"
-        default: return termProgram.replacingOccurrences(of: ".app", with: "")
+        default: break
         }
+        // Unrecognised: allow only characters an application name can contain.
+        let stripped = termProgram.replacingOccurrences(of: ".app", with: "")
+        let safe = stripped.filter { $0.isLetter || $0.isNumber || $0 == " " || $0 == "-" }
+        return safe.isEmpty ? "Terminal" : safe
     }
 
     /// Try the reported terminal first, then the other one — a session can be
