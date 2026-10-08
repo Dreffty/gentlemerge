@@ -13,10 +13,25 @@ public enum WorktreeEnv {
     /// Ports per label. The step between two labels' bases, so index-derived
     /// ranges never overlap.
     public static let rangeSize = 100
-    /// Buckets for labels the config never heard of. Fifty buckets of a
-    /// hundred ports: collisions are possible in theory, and in practice the
-    /// fix is one line in config.json.
-    public static let fallbackBuckets = 50
+    /// The highest port the 16-bit space allows.
+    public static let highestPort = 65_535
+
+    /// Buckets for labels the config never heard of.
+    ///
+    /// Fifty buckets of a hundred ports look generous and are not: a pair of
+    /// labels collides with probability 1/50, and realistic ones land on each
+    /// other — `gemini` and `gpt` both hashed to 3800, `opencode` and `qwen` to
+    /// 6800, so two agents ran one dev-server port range exactly as the README
+    /// promises they would not (audit 2026-10-08). 256 buckets makes that
+    /// ~1/256, and `usableBuckets` keeps the arithmetic inside the port range
+    /// whatever `basePort` is, degrading toward the old density rather than
+    /// emitting an invalid port.
+    public static let fallbackBuckets = 256
+
+    /// How many buckets fit above `basePort` without leaving the port range.
+    static func usableBuckets(basePort: Int) -> Int {
+        max(1, min(fallbackBuckets, (highestPort - basePort + 1) / rangeSize))
+    }
 
     public struct Allocation: Sendable, Equatable {
         public var label: String
@@ -53,11 +68,12 @@ public enum WorktreeEnv {
         if let index = config.agents.firstIndex(where: { $0.label == label }) {
             return Allocation(label: label, base: config.basePort + rangeSize * index)
         }
-        let bucket = Int(stableHash(label) % UInt32(fallbackBuckets))
+        let bucket = Int(stableHash(label) % UInt32(usableBuckets(basePort: config.basePort)))
         return Allocation(label: label, base: config.basePort + rangeSize * bucket)
     }
 
-    /// Single-quote a value for a POSIX shell.
+    /// Single-quote a value for a POSIX shell — the shared primitive, kept as a
+    /// name so the generated file reads the way it always has.
     ///
     /// This file exists to be `source`d, so every value in it is shell code, not
     /// a string. The label used to be interpolated bare, and it reaches here
@@ -65,11 +81,8 @@ public enum WorktreeEnv {
     /// `GENTLEMERGE_NAME` raw; `Identity.safe` is applied to env and presence
     /// labels but never to the worktree label. A label of `$(id)` therefore
     /// wrote `export GENTLEMERGE_LABEL=$(id)` and ran `id` on the next `source`
-    /// (audit 2026-10-07). Single quotes are literal in sh; the only escape
-    /// inside them is `'\''`.
-    static func shellQuoted(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
+    /// (audit 2026-10-07).
+    static func shellQuoted(_ value: String) -> String { Shell.quoted(value) }
 
     public static func render(_ allocation: Allocation) -> String {
         let label = shellQuoted(allocation.label)

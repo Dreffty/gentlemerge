@@ -36,7 +36,36 @@ final class WorktreeEnvTests: XCTestCase {
         let second = WorktreeEnv.allocation(label: "hermes", config: config)
         XCTAssertEqual(first, second)
         XCTAssertEqual(first.base % 100, 0)
-        XCTAssertTrue((3000...7900).contains(first.base))
+        XCTAssertTrue((3000...WorktreeEnv.highestPort).contains(first.base))
+    }
+
+    /// The fallback space used to be 50 buckets of a hundred ports, which
+    /// collides for realistic labels: `gemini` and `gpt` shared a base, and so
+    /// did `opencode` and `qwen` — two agents on one dev-server port range, the
+    /// exact thing this module exists to prevent (audit 2026-10-08).
+    func testRealisticUnconfiguredLabelsDoNotShareAPortRange() {
+        let config = config()
+        var bases: [String: Int] = [:]
+        for label in ["claude", "codex", "hermes", "gemini", "opencode", "qwen",
+                      "gpt", "aider", "cursor", "cline", "continue", "amp", "droid"] {
+            let base = WorktreeEnv.allocation(label: label, config: config).base
+            if let clash = bases.first(where: { $0.value == base }) {
+                XCTFail("\(label) and \(clash.key) share port base \(base)")
+            }
+            bases[label] = base
+        }
+    }
+
+    /// A high `basePort` must not push a range past the port space: the bucket
+    /// arithmetic degrades toward the old density instead of emitting an
+    /// impossible port.
+    func testAHighBasePortStillYieldsAValidPort() {
+        let config = config(basePort: 65_000)
+        for label in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+            let found = WorktreeEnv.allocation(label: label, config: config)
+            XCTAssertTrue((65_000...WorktreeEnv.highestPort).contains(found.range.upperBound),
+                          "\(label) -> \(found.range) leaves the port range")
+        }
     }
 
     func testRenderMatchesTheDocumentedShape() {
