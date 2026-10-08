@@ -153,9 +153,22 @@ public struct Ownership: Sendable, Equatable {
     }
 
     /// Most specific rule wins (longest literal prefix).
+    /// The most specific matching zone wins.
+    ///
+    /// "Specific" is `Glob.specificity`, not the literal prefix alone: ranking by
+    /// the prefix threw away everything after the first wildcard, so a pattern
+    /// naming an exact file could lose to one naming a directory, and two
+    /// different patterns could tie and be separated only by their order in the
+    /// file (audit Tier 4 #20). Ties keep the earliest declaration, as before.
     public func owner(of path: String) -> String? {
         rules.filter { Glob.matches($0.pattern, path) }
-            .max { Glob.literalPrefix($0.pattern).count < Glob.literalPrefix($1.pattern).count }?
+            .max {
+                let a = Glob.specificity(of: $0.pattern)
+                let b = Glob.specificity(of: $1.pattern)
+                if a.longestRun != b.longestRun { return a.longestRun < b.longestRun }
+                if a.literalCount != b.literalCount { return a.literalCount < b.literalCount }
+                return a.prefix < b.prefix
+            }?
             .owner
     }
 

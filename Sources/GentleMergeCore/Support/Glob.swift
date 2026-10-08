@@ -4,14 +4,35 @@ import Foundation
 /// A pattern without wildcards also matches everything under it as a directory.
 public enum Glob {
     public static func matches(_ pattern: String, _ path: String) -> Bool {
-        let p = normalize(pattern), s = normalize(path)
-        if p == s { return true }
+        let s = normalize(path)
+        // An absolute pattern has no business matching a repo-relative path — and
+        // matched nothing at all, so a claim written that way (which is what an
+        // agent gets from the path extractor, since it returns absolute paths)
+        // silently protected nothing and could not conflict-detect either
+        // (audit Tier 5 #34). Nothing here knows the repository root, so each
+        // trailing window of the pattern's components is tried in turn: for
+        // `/Users/dev/app/lib/store/**` the window `lib/store/**` is the claim the
+        // author meant. Each window is still anchored, so this cannot match a
+        // path that merely *contains* the window.
+        if pattern.hasPrefix("/") {
+            let parts = pattern.split(separator: "/").map(String.init)
+            for start in 0..<parts.count {
+                if matchesOnce(parts[start...].joined(separator: "/"), s) { return true }
+            }
+            return false
+        }
+        return matchesOnce(pattern, s)
+    }
+
+    private static func matchesOnce(_ pattern: String, _ path: String) -> Bool {
+        let p = normalize(pattern)
+        if p == path { return true }
         if !p.contains("*") && !p.contains("?") {
-            return s.hasPrefix(p + "/")     // "lib/store" covers "lib/store/x.dart"
+            return path.hasPrefix(p + "/")     // "lib/store" covers "lib/store/x.dart"
         }
         guard let re = regex(for: p) else { return false }
-        let range = NSRange(s.startIndex..., in: s)
-        return re.firstMatch(in: s, range: range) != nil
+        let range = NSRange(path.startIndex..., in: path)
+        return re.firstMatch(in: path, range: range) != nil
     }
 
     /// Longest wildcard-free directory prefix. Used for cheap overlap checks.
@@ -44,11 +65,46 @@ public enum Glob {
     }
 
     /// Tail-normalizing: `./` prefixes and trailing slashes are noise.
+    ///
+    /// Absolute patterns are *not* normalized here — nothing here knows the
+    /// repository root, so `matches` handles them by trying each trailing window
+    /// of their components instead.
     static func normalize(_ s: String) -> String {
         var t = s
         while t.hasPrefix("./") { t.removeFirst(2) }
         while t.hasSuffix("/") { t.removeLast() }
         return t
+    }
+
+    /// How tightly a pattern pins a path, as a comparable tuple.
+    ///
+    /// Ranking only by `literalPrefix` — the run of characters before the first
+    /// wildcard — threw away everything after it, so any pattern starting with a
+    /// wildcard scored zero and two genuinely different patterns could tie at
+    /// the same number and be separated by nothing but their order in the file.
+    /// Confirmed: `**/models.dart` lost to `lib/**` on `lib/models.dart`;
+    /// `lib/store/**` tied with `lib/*` at 4.
+    ///
+    /// The dominant term is the **longest literal run anywhere** in the pattern,
+    /// because that is what names something specific: `models.dart` names a
+    /// file, `lib/` names a directory. Total literal characters break ties
+    /// between patterns with equally long runs, and the leading prefix settles
+    /// what is left.
+    static func specificity(of pattern: String) -> (longestRun: Int, literalCount: Int, prefix: Int) {
+        var longestRun = 0
+        var run = 0
+        var literalCount = 0
+        for character in pattern {
+            if character == "*" || character == "?" {
+                longestRun = max(longestRun, run)
+                run = 0
+            } else {
+                run += 1
+                literalCount += 1
+            }
+        }
+        longestRun = max(longestRun, run)
+        return (longestRun, literalCount, literalPrefix(pattern).count)
     }
 
     static func regex(for pattern: String) -> NSRegularExpression? {

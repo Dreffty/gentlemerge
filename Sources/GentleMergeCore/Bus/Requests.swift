@@ -218,7 +218,14 @@ public struct Requests: Sendable {
                 throw RequestError.pastBudget(id: id, minutes: request.budgetMinutes)
             }
             let allowed: [RequestState: Set<RequestState>] = [
-                .queued: [.assigned, .rejected],
+                // `.queued` reaches `.inProgress` directly, because that is what
+                // `accept` does. Without it, a request file whose `state` was
+                // absent or unrecognised — decoded as `.queued` — could never be
+                // accepted at all: `accept` threw "cannot go from queued to
+                // in_progress", and `.queued` was reachable by no other route, so
+                // it sat in every briefing forever and could only be rejected
+                // (audit Tier 4 #19).
+                .queued: [.assigned, .inProgress, .rejected],
                 .assigned: [.inProgress, .rejected],
                 .inProgress: [.done, .failed],
                 .done: [.acked],
