@@ -27,7 +27,7 @@ public enum RequestActions {
                 requestID: request.id
             )
             if let taskID = request.taskID {
-                _ = ProjectRegistry.setTask(taskID, done: state == .done, in: request.projectPath)
+                _ = ProjectRegistry.setTask(taskID, done: state == .done, in: request.projectPath, paths: paths)
             }
             try bus.say(
                 from: me,

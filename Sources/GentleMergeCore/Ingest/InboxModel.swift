@@ -814,20 +814,28 @@ public final class InboxModel {
         } catch { lastMessage = "Could not save approval: \(error)" }
     }
 
+    /// A human says "do not run this".
+    ///
+    /// A human is not a party to the contract, and `"you"` is the label an
+    /// unlabelled worktree resolves to — so acting as `"you"` relied on the
+    /// escape hatch that let anybody move anybody's request (audit
+    /// 2026-10-07). The human's intent is "do not run this", which is the
+    /// assignee declining on the record: act as whichever agent was going to
+    /// run it.
+    ///
+    /// Through `RequestActions.perform` rather than a bare `transition`, so a
+    /// refusal also releases the `may_touch` claims `delegate` reserved when it
+    /// created the request and tells the delegator it is not happening. Without
+    /// that, a denied request still blocked those paths for its whole TTL.
     public func deny(_ id: String) {
         do {
-            // A human clicking Deny is not a party to the contract, and "you" is
-            // the label an unlabelled worktree resolves to — so the old
-            // `by: "you"` was relying on the escape hatch that let anybody move
-            // anybody's request (audit 2026-10-07). The human's intent is "do not
-            // run this", which is the assignee declining on the record: act as
-            // whichever agent was going to run it.
             guard let request = Requests(paths: paths).all().first(where: { $0.id == id }) else {
                 lastMessage = "No such request: \(id)."
                 return
             }
             let assignee = request.resolvedTo ?? request.to
-            _ = try Requests(paths: paths).transition(id, to: .rejected, by: assignee, result: "denied by human")
+            _ = try RequestActions.perform(action: "reject", id: id, by: assignee,
+                                           result: "denied by human", paths: paths)
             pendingApprovals.removeValue(forKey: id)
             try updateApprovals { $0.remove(id) }
             lastMessage = "Denied \(id)."
@@ -907,9 +915,29 @@ public final class InboxModel {
         ProjectRegistry.handoff(for: projectPath)
     }
 
+    /// What the shared list actually did, in `lastMessage`.
+    ///
+    /// This used to call `addTask` and then say "Added to X." unconditionally:
+    /// `addTaskReporting` exists precisely to distinguish "added" from "already
+    /// on the board", "refused as a secret" and "I could not write the file",
+    /// and throwing that away meant the window claimed a task was on the board
+    /// while the board did not have it (audit 2026-10-08).
     public func addTask(_ text: String, to projectPath: String, by author: String = "you") {
-        _ = ProjectRegistry.addTask(text, to: projectPath, by: author)
-        lastMessage = "Added to \(URL(fileURLWithPath: projectPath).lastPathComponent)."
+        let (_, outcome) = ProjectRegistry.addTaskReporting(
+            text, to: projectPath, by: author, paths: paths
+        )
+        lastMessage = switch outcome {
+        case .added:
+            "Added to \(URL(fileURLWithPath: projectPath).lastPathComponent)."
+        case .alreadyThere:
+            "Already on the list — nothing was changed."
+        case .empty:
+            "Nothing to add: the text was empty."
+        case .refusedAsSecret:
+            "Not added: that looked almost entirely like a secret."
+        case .writeFailed:
+            "Not added: the task list could not be written. `gentlemerge doctor` says why."
+        }
     }
 
     /// Who is on which task here, the lapsed claims already gone.
@@ -921,20 +949,23 @@ public final class InboxModel {
     }
 
     public func setTask(_ task: TaskItem, done: Bool, in projectPath: String) {
-        _ = ProjectRegistry.setTask(task.id, done: done, in: projectPath)
+        _ = ProjectRegistry.setTask(task.id, done: done, in: projectPath, paths: paths)
         // Same rule as the CLI: ticking it off ends whatever claim was on it,
         // so nobody is left waiting for a task that no longer exists.
         if done { _ = try? TaskClaims(paths: paths).releaseAll(task.id, in: projectPath) }
     }
 
     public func removeTask(_ task: TaskItem, in projectPath: String) {
-        _ = ProjectRegistry.removeTask(task.id, in: projectPath)
+        _ = ProjectRegistry.removeTask(task.id, in: projectPath, paths: paths)
     }
 
     public func setNotes(_ notes: String, in projectPath: String) {
-        var handoff = ProjectRegistry.handoff(for: projectPath)
-        handoff.notes = notes
-        _ = ProjectRegistry.save(handoff)
+        // The same lock the task list takes: this is another read-modify-write of
+        // the same shared file, and a note typed while an agent adds a task must
+        // not overwrite it (audit 2026-10-08).
+        _ = ProjectRegistry.mutateHandoff(projectPath, in: paths) { handoff in
+            handoff.notes = notes
+        }
     }
 
     /// Writes the handoff file and points the project's CLAUDE.md / AGENTS.md at

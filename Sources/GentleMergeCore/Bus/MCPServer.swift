@@ -127,12 +127,18 @@ public struct MCPServer {
                         // on the board, without retrying or mentioning it
                         // (audit Tier 5 #32).
                         let outcome = ProjectRegistry.addTaskReporting(
-                            args["text"]?.stringValue ?? "", to: project, by: identity
+                            args["text"]?.stringValue ?? "", to: project, by: identity, paths: paths
                         ).outcome
                         switch outcome {
                         case .added: text = "added"
                         case .alreadyThere: text = "already on the board"
                         case .empty: text = "not added: the text was empty"
+                        case .writeFailed:
+                            // Honest, and an error: "added" for a write that did
+                            // not land is how an agent ends up moving on with
+                            // work nobody is tracking (audit 2026-10-08).
+                            text = "not added: the task list could not be written"
+                            isError = true
                         case .refusedAsSecret:
                             text = "not added: the text looked almost entirely like a secret, so it was refused"
                             isError = true
@@ -146,7 +152,7 @@ public struct MCPServer {
                         guard handoff.tasks.contains(where: { $0.id == doneID }) else {
                             throw TaskError.noSuchTask(doneID)
                         }
-                        _ = ProjectRegistry.setTask(doneID, done: true, in: project)
+                        _ = ProjectRegistry.setTask(doneID, done: true, in: project, paths: paths)
                         text = "done"
                     case "say":
                         _ = try AgentBus(paths: paths).say(from: identity, to: args["to"]?.stringValue,

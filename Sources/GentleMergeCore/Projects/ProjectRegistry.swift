@@ -184,6 +184,57 @@ public struct ProjectRegistry: Sendable {
         }
     }
 
+    /// The sidecar that serialises the shared task list's read-modify-write.
+    ///
+    /// It lives in the home, not beside the file: a `.gentlemerge/HANDOFF.md.lock`
+    /// would sit in the repository's working tree, where `git status` shows it and
+    /// `gentlemerge land`'s clean-tree check refuses the repo. Named by a digest
+    /// of the project path so two projects never share one.
+    static func handoffLock(_ projectPath: String, in paths: Paths) -> URL {
+        paths.home.appendingPathComponent(
+            "handoff-\(PortableSHA256.digest(Data(projectPath.utf8)).prefix(16))"
+        )
+    }
+
+    /// The result of one locked mutation of the shared list.
+    struct HandoffMutation: Sendable, Equatable {
+        var handoff: ProjectHandoff
+        /// False when the write did not land: the caller was told what it asked,
+        /// but nothing on disk changed.
+        var written: Bool
+    }
+
+    /// Read the shared list, change it, write it back — under the lock, so two
+    /// agents doing it in the same second both survive.
+    ///
+    /// Every task mutation used to be a bare `handoff(for:)` → mutate →
+    /// `save`, which is a lost update: eight concurrent `gentlemerge task add`
+    /// reported "Added to repo" eight times and left one task on the board, the
+    /// other seven overwritten by whichever process wrote last (audit
+    /// 2026-10-08). That is the exact failure class `PathClaims.mutate` takes a
+    /// sidecar lock to prevent — the shared list simply had no such guard.
+    static func mutateHandoff(
+        _ projectPath: String,
+        in paths: Paths = .fromEnvironment(),
+        _ body: (inout ProjectHandoff) -> Void
+    ) -> HandoffMutation {
+        var result = HandoffMutation(handoff: handoff(for: projectPath), written: false)
+        body(&result.handoff)
+        do {
+            try LockedFile.withExclusiveLock(handoffLock(projectPath, in: paths)) {
+                // Re-read under the lock: the point is not to keep two writers
+                // apart, it is to apply this change to what is on disk *now*.
+                var current = handoff(for: projectPath)
+                body(&current)
+                guard save(current) else { return }
+                result = HandoffMutation(handoff: current, written: true)
+            }
+        } catch {
+            Log.error("could not lock handoff: \(error.localizedDescription)")
+        }
+        return result
+    }
+
     public static func exists(for projectPath: String) -> Bool {
         FileManager.default.fileExists(
             atPath: ProjectHandoff.fileURL(for: canonicalPath(for: projectPath)).path
@@ -304,9 +355,15 @@ public struct ProjectRegistry: Sendable {
     /// What `addTask` actually did. The returned handoff alone cannot say: it is
     /// the handoff either way, so a caller that did not count tasks was told
     /// "added" for text that had been refused (audit Tier 5 #32).
-    public enum TaskAddOutcome: String, Sendable {
+    ///
+    /// `writeFailed` is the same class one level down: the write is best-effort
+    /// by design — the shared list must never break a command — and an agent
+    /// told "added" for a write that did not land believes work is being
+    /// tracked when nothing is (audit 2026-10-08).
+    public enum TaskAddOutcome: String, Sendable, Equatable {
         case added
         case alreadyThere
+        case writeFailed
         case refusedAsSecret
         case empty
     }
@@ -316,9 +373,10 @@ public struct ProjectRegistry: Sendable {
         _ text: String,
         to projectPath: String,
         by author: String?,
-        steps: [String] = []
+        steps: [String] = [],
+        paths: Paths = .fromEnvironment()
     ) -> ProjectHandoff {
-        addTaskReporting(text, to: projectPath, by: author, steps: steps).handoff
+        addTaskReporting(text, to: projectPath, by: author, steps: steps, paths: paths).handoff
     }
 
     /// `addTask`, but saying which of the four things happened.
@@ -333,8 +391,12 @@ public struct ProjectRegistry: Sendable {
         _ text: String,
         to projectPath: String,
         by author: String?,
-        steps: [String] = []
+        steps: [String] = [],
+        paths: Paths = .fromEnvironment()
     ) -> (handoff: ProjectHandoff, outcome: TaskAddOutcome) {
+        // Read outside the lock for the early answers — they are refusals, and a
+        // refusal writes nothing, so it cannot race. The write itself re-reads
+        // under the lock through `mutateHandoff`.
         var handoff = handoff(for: projectPath)
 
         // This file gets committed and read by every agent. A key written into
@@ -350,11 +412,19 @@ public struct ProjectRegistry: Sendable {
             // Already on the board is not a failure, but it is not "added" either.
             return (handoff, .alreadyThere)
         }
-        handoff.tasks.append(
-            TaskItem(text: trimmed, steps: cleanedSteps(steps), addedBy: author)
-        )
-        save(handoff)
-        return (handoff, .added)
+        var outcome: TaskAddOutcome = .added
+        let mutation = mutateHandoff(projectPath, in: paths) { current in
+            // The duplicate check again, on what is on disk now: two agents
+            // adding the same task in the same second would otherwise both land.
+            guard !current.tasks.contains(where: { $0.text.caseInsensitiveCompare(trimmed) == .orderedSame }) else {
+                outcome = .alreadyThere
+                return
+            }
+            current.tasks.append(TaskItem(text: trimmed, steps: cleanedSteps(steps), addedBy: author))
+        }
+        if mutation.written { handoff = mutation.handoff }
+        if outcome == .added, !mutation.written { outcome = .writeFailed }
+        return (handoff, outcome)
     }
 
     /// Every point goes through the same filter as the task itself, and one
@@ -414,21 +484,21 @@ public struct ProjectRegistry: Sendable {
     }
 
     @discardableResult
-    public static func setTask(_ id: String, done: Bool, in projectPath: String) -> ProjectHandoff {
-        var handoff = handoff(for: projectPath)
-        if let index = handoff.tasks.firstIndex(where: { $0.id == id }) {
-            handoff.tasks[index].done = done
-        }
-        save(handoff)
-        return handoff
+    public static func setTask(_ id: String, done: Bool, in projectPath: String,
+                               paths: Paths = .fromEnvironment()) -> ProjectHandoff {
+        mutateHandoff(projectPath, in: paths) { handoff in
+            if let index = handoff.tasks.firstIndex(where: { $0.id == id }) {
+                handoff.tasks[index].done = done
+            }
+        }.handoff
     }
 
     @discardableResult
-    public static func removeTask(_ id: String, in projectPath: String) -> ProjectHandoff {
-        var handoff = handoff(for: projectPath)
-        handoff.tasks.removeAll { $0.id == id }
-        save(handoff)
-        return handoff
+    public static func removeTask(_ id: String, in projectPath: String,
+                                  paths: Paths = .fromEnvironment()) -> ProjectHandoff {
+        mutateHandoff(projectPath, in: paths) { handoff in
+            handoff.tasks.removeAll { $0.id == id }
+        }.handoff
     }
 
     // MARK: - Session context
@@ -599,7 +669,13 @@ public struct ProjectRegistry: Sendable {
     public static func initialize(projectPath: String, instructionFiles: [String] = ["CLAUDE.md", "AGENTS.md"]) throws -> ProjectHandoff {
         let path = canonicalPath(for: projectPath)
         var handoff = handoff(for: path)
-        _ = save(handoff)
+        // Report a write that did not land rather than printing "Handoff ready"
+        // over a file that is not there: an agent that believes the shared list
+        // exists will not create it, and will keep asking for one that never
+        // appears (audit 2026-10-08).
+        guard save(handoff) else {
+            throw InitializeError.unwritable(ProjectHandoff.fileURL(for: path).path)
+        }
         handoff = self.handoff(for: path)
 
         for name in instructionFiles {
@@ -613,5 +689,18 @@ public struct ProjectRegistry: Sendable {
         }
 
         return handoff
+    }
+}
+
+/// `project init` failed to write the shared list.
+public enum InitializeError: Error, LocalizedError, CustomStringConvertible {
+    case unwritable(String)
+    public var description: String { errorDescription ?? "" }
+    public var errorDescription: String? {
+        switch self {
+        case .unwritable(let path):
+            return "could not write \(path) — the directory is read-only, or a file "
+                + "is in the way. Nothing was set up."
+        }
     }
 }
