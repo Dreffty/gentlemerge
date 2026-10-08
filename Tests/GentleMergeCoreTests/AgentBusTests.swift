@@ -1047,4 +1047,53 @@ final class AgentBusTests: XCTestCase {
         // Serial second read is silent: the marker was recorded.
         XCTAssertNil(bus.briefing(sessionID: "race-1", me: "reader", project: nil))
     }
+
+    /// Tier 1 #1, for real this time. The test above is serial: it only shows
+    /// that the marker works, and it passes with the delivery lock deleted
+    /// (verified by reverting it). The defect needs genuine overlap, because the
+    /// window is the whole read-compute-write — read the cursor, render, record.
+    ///
+    /// Six threads released together by a barrier, each draining the same
+    /// session. Every message must appear in exactly one output.
+    func testGenuinelyConcurrentBriefsDeliverEachMessageOnce() throws {
+        let count = 120
+        for i in 0..<count {
+            bus.post(AgentMessage(from: "peer\(i % 4)", text: "concurrent-\(i)-" + String(repeating: "x", count: 120)))
+        }
+
+        let readers = 6
+        let queue = DispatchQueue(label: "brief-race", attributes: .concurrent)
+        let start = DispatchSemaphore(value: 0)
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var perMessage = [Int](repeating: 0, count: count)
+
+        for _ in 0..<readers {
+            queue.async(group: group) {
+                start.wait()
+                // Keep draining: each brief pages a little and the next one
+                // continues. The point is that they interleave.
+                for _ in 0..<60 {
+                    guard let out = self.bus.briefing(
+                        sessionID: "race-real", me: "reader", project: nil, mode: .delta
+                    ) else { break }
+                    lock.lock()
+                    for i in 0..<count where out.contains("concurrent-\(i)-") { perMessage[i] += 1 }
+                    lock.unlock()
+                }
+            }
+        }
+        for _ in 0..<readers { start.signal() }
+        group.wait()
+
+        let duplicated = perMessage.enumerated().filter { $0.element > 1 }.map(\.offset)
+        XCTAssertEqual(
+            duplicated, [],
+            "\(duplicated.count) message(s) delivered more than once across concurrent readers"
+        )
+        XCTAssertEqual(
+            perMessage.filter { $0 == 0 }.count, 0,
+            "some messages were never delivered at all"
+        )
+    }
 }
