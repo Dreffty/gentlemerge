@@ -2548,6 +2548,25 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         let installer = HookInstaller(paths: paths)
         let blocking = arguments.contains("--blocking")
+        // Refused rather than faked. The hook script has three modes — notify,
+        // context and advise — and a fourth named `blocking` was passed here and
+        // silently ignored, so `--blocking` produced an ordinary notify and then
+        // reported success (audit Tier 5 #33).
+        //
+        // It stays unimplemented on purpose: a blocking mode answers a
+        // permission prompt on the agent's behalf, and "GentleMerge approving
+        // tool calls on its own" is named in NudgeGate as precisely the failure
+        // this project exists to avoid. So the flag says no.
+        if blocking {
+            FileHandle.standardError.write(Data("""
+            test-event --blocking is not supported: the hook has no blocking mode.
+            \nA blocking hook answers a permission prompt for the agent, which is exactly what this
+            project refuses to do. Use `gentlemerge advise` to see what would be
+            blocked before you commit, or the pre-commit gate to enforce it.
+
+            """.utf8))
+            return 64
+        }
 
         do {
             try installer.writeScripts()
@@ -2557,27 +2576,20 @@ enum CLI {
         }
 
         let payload: String
-        if blocking {
-            payload = """
-            {"session_id":"test-session","hook_event_name":"PreToolUse","cwd":"\(FileManager.default.currentDirectoryPath)",\
-            "tool_name":"Bash","tool_input":{"command":"rm -rf build/ && swift build -c release",\
-            "description":"Rebuild from scratch"},"permission_mode":"default"}
-            """
-        } else {
-            payload = """
+        payload = """
             {"session_id":"test-session","hook_event_name":"Notification",\
             "cwd":"\(FileManager.default.currentDirectoryPath)",\
             "message":"Claude needs your permission to use Bash"}
             """
-        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = [
             paths.hookScript.path,
             "--provider", "claude-code",
-            "--mode", blocking ? "blocking" : "notify",
-            "--timeout", "60",
+            // No `--timeout`: the script's argument loop discards it, so passing
+            // one only looked like configuration (audit Tier 5 #33).
+            "--mode", "notify",
         ]
         let input = Pipe()
         let output = Pipe()

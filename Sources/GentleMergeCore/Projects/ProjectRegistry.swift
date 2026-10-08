@@ -253,8 +253,12 @@ public struct ProjectRegistry: Sendable {
                 subject: fields[2],
                 author: fields.count > 3 && !fields[3].isEmpty ? fields[3] : nil,
                 // A merge lists nothing here, and that is the truth: it changed
-                // no file on its own.
-                files: lines.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                // no file on its own. Only the empty separator lines are dropped
+                // — trimming each line corrupted filenames with leading or
+                // trailing spaces, and the overlap report then compared a
+                // trimmed path from here against an untrimmed one from
+                // `parseStatus`, so they never matched (audit Tier 5 #40).
+                files: lines.filter { !$0.isEmpty }
             )
         }
     }

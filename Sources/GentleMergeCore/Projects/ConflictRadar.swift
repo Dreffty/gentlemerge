@@ -302,6 +302,20 @@ public enum ConflictRadar {
             let cutoff = state.lastRun.values.sorted().suffix(200).first ?? .distantPast
             state.lastRun = state.lastRun.filter { $0.value >= cutoff }
         }
+        // The same cap the other two maps get. `lastAutoNote` was one key per
+        // project *and branch*, and `pairOffset` one per project, neither ever
+        // pruned — so the file grew for as long as the machine kept branching,
+        // which is the growth the other two lines were written to prevent
+        // (audit Tier 5 #41).
+        if state.lastAutoNote.count > 200 {
+            let cutoff = state.lastAutoNote.values.sorted().suffix(200).first ?? .distantPast
+            state.lastAutoNote = state.lastAutoNote.filter { $0.value >= cutoff }
+        }
+        // Projects disappear; their offsets do not need to outlive them by much.
+        if state.pairOffset.count > 100 {
+            let cutoff = state.pairOffset.values.sorted().suffix(100).first ?? 0
+            state.pairOffset = state.pairOffset.filter { $0.value >= cutoff }
+        }
         do {
             try AtomicFile.write(try JSONCoding.encoder(pretty: true).encode(state), to: paths.radar)
         } catch {
