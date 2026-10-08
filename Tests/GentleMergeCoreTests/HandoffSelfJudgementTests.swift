@@ -122,3 +122,88 @@ final class HandoffSelfJudgementTests: XCTestCase {
         XCTAssertTrue(blocking[0].blocking)
     }
 }
+
+/// The narrowing: what must stop ruling is a commit that *rewrites the zones*,
+/// not any commit that touches HANDOFF.md. The task list lives in the same file
+/// and AGENT_PROTOCOL.md tells every agent to write there, so disarming on the
+/// file's presence switched the whole ownership layer off for the ordinary
+/// "I finished something, let me record it" commit (audit 2026-10-08).
+///
+/// Real git repository on purpose: `rulesAtHead` reads `git show HEAD:…`, so a
+/// test over a hand-written directory would exercise none of it.
+final class HandoffSelfJudgementNarrowingTests: XCTestCase {
+    private var root: URL!
+    private var paths: Paths!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("handoffnarrow-\(UUID())")
+        paths = Paths(home: root.appendingPathComponent("home"))
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.email", "t@example.com"])
+        try git(["config", "user.name", "t"])
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    @discardableResult
+    private func git(_ args: [String]) throws -> String {
+        let out = Shell.run("/usr/bin/env", ["git"] + args, in: root, timeout: 30)
+        guard out.succeeded else {
+            throw NSError(domain: "git", code: Int(out.status), userInfo: [NSLocalizedDescriptionKey: out.stderr])
+        }
+        return out.stdout
+    }
+
+    private func writeHandoff(_ text: String) throws {
+        let url = ProjectHandoff.fileURL(for: root.path)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try text.write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    private let zonesAtHead = """
+    # Project
+
+    ## Ownership
+    - hermes_zone/** → hermes
+    """
+
+    /// The ordinary commit: a task line added, zones untouched.
+    func testACommitThatOnlyAddsATaskStillEnforcesTheZones() throws {
+        try writeHandoff(zonesAtHead)
+        try git(["add", "-A"]); try git(["commit", "-qm", "zones"])
+
+        try writeHandoff(zonesAtHead + "\n## Open tasks\n\n- [ ] finished the migration\n")
+        try git(["add", "-A"])
+
+        let effective = Ownership.effective(project: root.path, paths: paths, handoffIsStaged: true)
+        XCTAssertEqual(effective.authority, .handoff)
+        XCTAssertEqual(
+            effective.ownership.owner(of: "hermes_zone/models.dart"), "hermes",
+            "recording what I did must not switch off somebody else's zone"
+        )
+    }
+
+    /// The threat the rule was written for, still covered.
+    func testACommitThatRewritesTheZonesIsNotJudgedByThem() throws {
+        try writeHandoff(zonesAtHead)
+        try git(["add", "-A"]); try git(["commit", "-qm", "zones"])
+
+        try writeHandoff("# Project\n\n## Ownership\n")
+        try git(["add", "-A"])
+
+        let effective = Ownership.effective(project: root.path, paths: paths, handoffIsStaged: true)
+        XCTAssertEqual(effective.authority, .handoff)
+        XCTAssertNil(effective.ownership.owner(of: "hermes_zone/models.dart"))
+    }
+
+    /// Nothing to compare against reads as "rewriting" — fail closed, which is
+    /// what a directory that is not a repository has always done.
+    func testNoHeadToCompareAgainstDisarms() throws {
+        try writeHandoff(zonesAtHead)   // never committed: unborn HEAD
+        let effective = Ownership.effective(project: root.path, paths: paths, handoffIsStaged: true)
+        XCTAssertEqual(effective.ownership.rules, [])
+    }
+}
