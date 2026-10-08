@@ -61,10 +61,36 @@ public enum Shell {
         let outBox = DataBox()
         let errBox = DataBox()
         let readers = DispatchGroup()
+        let finished = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in finished.signal() }
+
+        do {
+            try process.run()
+        } catch {
+            // No reader threads exist yet, so there is nothing to leak — which is
+            // the entire point of starting them after the spawn.
+            return Output(
+                status: 127,
+                stdoutData: Data(),
+                stderr: "could not run \(executable): \(error.localizedDescription)",
+                timedOut: false,
+                duration: Date().timeIntervalSince(started)
+            )
+        }
+
         // Two detached threads, not the global dispatch pool: readDataToEndOfFile
         // blocks, and once enough Shell.run calls stack up (every ingest that
         // canonicalizes a path spawns git), the pool's blocked readers starve the
         // very handlers needed to unblock them — a deadlock of our own making.
+        //
+        // Started only once the spawn succeeded. Each closure captures its Pipe
+        // strongly, so a thread that is still blocked keeps that Pipe alive,
+        // which keeps the write end open, so the reader never sees EOF: start
+        // them first and a failed spawn leaked two threads and two descriptors
+        // *permanently* (120 threads over 60 failures, measured audit Tier 2
+        // #12). Closing the read handles instead is not an option — closing a
+        // FileHandle another thread is reading raises on that thread, which the
+        // suite caught when it turned the leak into a crash.
         readers.enter()
         let outReader = Thread {
             outBox.set(outPipe.fileHandleForReading.readDataToEndOfFile())
@@ -80,20 +106,6 @@ public enum Shell {
         errReader.name = "gentlemerge.shell.stderr"
         errReader.start()
 
-        let finished = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in finished.signal() }
-
-        do {
-            try process.run()
-        } catch {
-            return Output(
-                status: 127,
-                stdoutData: Data(),
-                stderr: "could not run \(executable): \(error.localizedDescription)",
-                timedOut: false,
-                duration: Date().timeIntervalSince(started)
-            )
-        }
         onStart?(process)
 
         var timedOut = false
