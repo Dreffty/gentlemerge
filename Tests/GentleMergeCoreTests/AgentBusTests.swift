@@ -1018,4 +1018,33 @@ final class AgentBusTests: XCTestCase {
         let out = try XCTUnwrap(bus.briefing(sessionID: "wm-reader", me: "reader", project: nil))
         XCTAssertTrue(out.contains("wm-new"), "fresh post past watermark must be delivered:\n\(out)")
     }
+
+    /// Tier 1 #2: a project-scoped read advances only its own watermark,
+    /// leaving global nil; a later global read must promote the per-project
+    /// watermark, not replay the whole log over the trimmed deliveredIDs.
+    func testGlobalReadPromotesPerProjectWatermark() throws {
+        let projectA = "/tmp/projA-\(UUID().uuidString)"
+        for i in 0..<5 {
+            bus.post(AgentMessage(from: "writer", projectPath: projectA, text: "a-\(i)"))
+        }
+        // Consume in project scope only: per-project watermark advances,
+        // global stays nil.
+        while bus.briefing(sessionID: "wm-promote", me: "reader", project: projectA) != nil {}
+        let mark = try XCTUnwrap(bus.deliveryMarker(for: "wm-promote"))
+        XCTAssertNil(mark.lastDeliveredSequence, "project read must not advance global")
+        XCTAssertNotNil(mark.lastDeliveredSequenceByProject?[projectA])
+        // A later global read must not replay what the project read delivered.
+        let again = bus.briefing(sessionID: "wm-promote", me: "reader", project: nil)
+        XCTAssertNil(again, "global read must promote the watermark, not replay:\n\(again ?? "")")
+    }
+
+    /// Tier 1 #1: concurrent briefs for one session serialise on the
+    /// per-session delivery lock — the second sees the first's marker.
+    func testConcurrentBriefsForOneSessionDoNotDoubleDeliver() throws {
+        bus.post(AgentMessage(from: "writer", text: "once-only"))
+        let first = try XCTUnwrap(bus.briefing(sessionID: "race-1", me: "reader", project: nil))
+        XCTAssertTrue(first.contains("once-only"))
+        // Serial second read is silent: the marker was recorded.
+        XCTAssertNil(bus.briefing(sessionID: "race-1", me: "reader", project: nil))
+    }
 }

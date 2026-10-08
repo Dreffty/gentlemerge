@@ -91,14 +91,18 @@ public struct PrecommitGate: Sendable {
     /// on this worktree. Both default to "know nothing", which reaps nothing
     /// — the gate without liveness behaves exactly as before.
     ///
-    /// The delegated-request check (mayTouch) joins in step 3, once
-    /// `AgentRequest` exists — commits stay green per step.
+    /// The delegated-request check (mayTouch) evaluates rule 3 against the union
+    /// of the delegate's in-progress mayTouch scopes: a delegate holding two
+    /// requests is judged against the contract it is working under, not the
+    /// oldest one. `activeRequest` is kept as a convenience for the single
+    /// case; `activeRequests` wins when both are given.
     public static func evaluate(
         staged: [String],
         me: String?,
         claims: [PathClaim],
         ownership: Ownership,
         activeRequest: AgentRequest? = nil,
+        activeRequests: [AgentRequest]? = nil,
         now: Date = Date(),
         presence: [Presence.PresenceMark] = [],
         isPIDAlive: (@Sendable (Int) -> Bool?)? = nil
@@ -163,11 +167,14 @@ public struct PrecommitGate: Sendable {
                     continue
                 }
             }
-            if let activeRequest, !activeRequest.mayTouch.isEmpty,
-               !activeRequest.mayTouch.contains(where: { Glob.matches($0, path) }) {
+            let scoped = activeRequests ?? activeRequest.map { [$0] } ?? []
+            let union = scoped.flatMap(\.mayTouch)
+            if !union.isEmpty,
+               !union.contains(where: { Glob.matches($0, path) }) {
+                let names = scoped.map(\.id).joined(separator: ", ")
                 violations.append(.init(
                     path: path,
-                    reason: "outside delegated request \(activeRequest.id) mayTouch (\(activeRequest.mayTouch.joined(separator: ", ")))",
+                    reason: "outside delegated request\(scoped.count == 1 ? " \(names)" : "s \(names)") mayTouch (\(union.joined(separator: ", ")))",
                     blocking: true
                 ))
                 continue

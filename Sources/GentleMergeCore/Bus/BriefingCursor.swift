@@ -1,8 +1,10 @@
 import Foundation
 
 /// Per-session memory of what the briefing already told this session.
-/// Lives in delivered/<sessionID>/cursor.json: that directory is already
-/// written only by this session's hook, so no lock is needed.
+/// Lives in delivered/<sessionID>/cursor.json. Reads and writes run inside
+/// the per-session delivery lock in `briefing` — `brief --as <label>` is an
+/// ordinary CLI any number of shells can run, so the single-writer assumption
+/// would lose deliveries. Never take a second lock in here: the caller holds it.
 public struct BriefingCursor: Codable, Sendable, Equatable {
     public var sessionID: String
     public var lastFullAt: Date?

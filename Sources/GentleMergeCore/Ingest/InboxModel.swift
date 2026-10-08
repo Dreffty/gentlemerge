@@ -477,7 +477,9 @@ public final class InboxModel {
     /// the only process that lives long enough to notice, which is why the
     /// readers get their own defence in `others` instead of a share of this.
     func sweepDeadSessions(now: Date = Date()) {
-        var list = bus.activities()
+        // Stored rows only: presence is merged at read time and must never be
+        // persisted, or the sweep buries phantom sessions that never existed.
+        var list = bus.storedActivities()
         var buried: [AgentActivity] = []
 
         for index in list.indices where list[index].state != .ended {
@@ -596,11 +598,15 @@ public final class InboxModel {
 
     /// Every event says something about what that session is doing. This is the
     /// picture the other agents get to read before their next turn.
+    ///
+    /// Persists only the app-owned rows (`storedActivities`): `activities()`
+    /// merges presence at read time, and writing that merged list back freezes
+    /// presence marks into the file.
     private func updateActivity(from envelope: SpoolEnvelope) {
         recordImplicitPathClaims(from: envelope)
         guard let sessionID = envelope.sessionID else { return }
 
-        var list = bus.activities()
+        var list = bus.storedActivities()
         var activity = list.first { $0.id == sessionID }
             ?? AgentActivity(
                 id: sessionID,
@@ -703,8 +709,13 @@ public final class InboxModel {
         let rel = String(file.path.dropFirst(checkout.path.count + 1))
         guard !rel.isEmpty else { return }
 
-        // A payload label is advisory attribution, not verified caller identity.
-        let label = envelope.payload.string("label").map(Identity.safe)?.nonEmpty
+        // Identity resolution, in the same precedence the gate uses: the hook's
+        // resolved worktree label first (top-level envelope field, not the
+        // agent-controlled payload), then the simulator/advisory payload label,
+        // then the provider default. Two worktrees on one provider claiming as
+        // the provider name made the whole implicit-claim feature inert.
+        let label = envelope.label.map(Identity.safe)?.nonEmpty
+            ?? envelope.payload.string("label").map(Identity.safe)?.nonEmpty
             ?? AgentBus.label(for: envelope.provider)
         PathClaims(paths: paths).touch(file: rel, label: label, project: project)
     }

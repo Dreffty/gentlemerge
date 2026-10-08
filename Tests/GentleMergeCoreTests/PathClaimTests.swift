@@ -285,6 +285,34 @@ final class PrecommitGateTests: XCTestCase {
         ).isEmpty)
     }
 
+    func testTwoInProgressRequestsAreJudgedAgainstTheirUnion() {
+        let first = AgentRequest(
+            id: "req-old", from: "you", fromVerified: true, to: "codex", projectPath: "/p",
+            title: "old", spec: "old", mayTouch: ["lib/old/**"],
+            state: .inProgress)
+        var second = AgentRequest(
+            id: "req-new", from: "you", fromVerified: true, to: "codex", projectPath: "/p",
+            title: "new", spec: "new", mayTouch: ["lib/new/**"],
+            state: .inProgress)
+        second.resolvedTo = "codex"
+        var old = first
+        old.resolvedTo = "codex"
+        // Path needed by the NEW request but outside the OLD request's scope:
+        // must pass when the union is enforced.
+        let violations = PrecommitGate.evaluate(
+            staged: ["lib/new/a.swift"], me: "codex",
+            claims: [], ownership: ownership, activeRequests: [old, second]
+        )
+        XCTAssertTrue(violations.isEmpty, "union of in-progress mayTouch must allow lib/new/a.swift: \(violations)")
+        // Path in NEITHER request's scope must still block, naming a request.
+        let blocked = PrecommitGate.evaluate(
+            staged: ["lib/other/a.swift"], me: "codex",
+            claims: [], ownership: ownership, activeRequests: [old, second]
+        )
+        XCTAssertEqual(blocked.count, 1)
+        XCTAssertTrue(blocked[0].reason.contains("req-"), "names the violated request: \(blocked[0].reason)")
+    }
+
     func testMyOwnClaimDoesNotBlockMe() {
         XCTAssertTrue(PrecommitGate.evaluate(
             staged: ["lib/store/a.swift"], me: "claude",

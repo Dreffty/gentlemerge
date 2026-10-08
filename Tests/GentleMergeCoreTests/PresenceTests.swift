@@ -196,4 +196,29 @@ final class PresenceTests: XCTestCase {
         XCTAssertTrue(live.contains { $0.currentTask == "migración" })
         XCTAssertTrue(live.contains { $0.currentTask == "on main" })
     }
+
+    // MARK: - Never persist the merged list (audit Tier 1 #4)
+
+    /// Saving must persist only app-owned rows: a merged list written back
+    /// freezes the presence mark (stale task/pid for up to 6h) and lets the
+    /// sweep bury phantom sessions that never existed.
+    func testSavingTheMergedListNeverFreezesPresence() throws {
+        Presence.record(label: "claude", project: "/tmp/gameapp", branch: "main", task: "first task",
+            paths: paths)
+        // The bug: save(activities()) writes the synthetic presence row back.
+        // The fix: updateActivity/sweep use storedActivities(); this asserts the
+        // file holds no presence-derived row even after such a save path is
+        // replaced — stored rows round-trip, presence stays on disk only.
+        let stored = bus.storedActivities()
+        XCTAssertTrue(stored.isEmpty, "no app-owned row yet, nothing stored")
+        bus.save(stored)
+        let raw = try String(contentsOf: bus.paths.activities, encoding: .utf8)
+        XCTAssertFalse(raw.contains("presence:"), "presence id must never be persisted: \(raw)")
+        // And the live mark is still served at read time.
+        XCTAssertEqual(bus.activities().filter(\.isLive).count, 1)
+        // A refreshed mark (new task) is visible — not frozen behind the file.
+        Presence.record(label: "claude", project: "/tmp/gameapp", branch: "main", task: "second task",
+            paths: paths)
+        XCTAssertEqual(bus.activities().first(where: { $0.id.hasPrefix("presence:") })?.currentTask, "second task")
+    }
 }

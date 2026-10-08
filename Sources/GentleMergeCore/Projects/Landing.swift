@@ -26,6 +26,9 @@ public enum Landing {
         case sameBranch(String)
         case wrongCheckout(expected: String, actual: String?)
         case noMergeBase(branch: String, into: String)
+        /// The radar could not run merge-tree at all — distinct from
+        /// `noMergeBase`, which is a fact about the repository (Tier 2 #8).
+        case radarUnanswered(branch: String, into: String, detail: String)
         case conflicts(branch: String, into: String, details: [ConflictDetail])
         case rebaseFailed(into: String, output: String)
         case checksFailed([CheckResult])
@@ -51,6 +54,10 @@ public enum Landing {
                     + " — land runs from the branch's own worktree"
             case .noMergeBase(let branch, let into):
                 return "`\(branch)` and `\(into)` share no history — a rebase would fail too"
+            case .radarUnanswered(let branch, let into, let detail):
+                return "the conflict radar could not answer for `\(branch)` vs `\(into)` (\(detail))"
+                    + " — main is untouched; retry, or run"
+                    + " `git merge-tree --write-tree --name-only \(branch) \(into)` yourself."
             case .conflicts(let branch, let into, let details):
                 var lines = ["`\(branch)` conflicts with `\(into)` on \(details.count) file(s):"]
                 for detail in details {
@@ -60,9 +67,13 @@ public enum Landing {
                 lines.append("Coordinate, rebase by hand, then land again.")
                 return lines.joined(separator: "\n")
             case .rebaseFailed(let into, let output):
-                return "rebase onto `\(into)` failed (aborted, branch untouched):\n\(output)"
+                // The abort status rides in `output`: a hardcoded claim here
+                // lied whenever the abort itself failed (Tier 2 #10).
+                return "rebase onto `\(into)` failed:\n\(output)"
             case .checksFailed(let results):
-                var lines = ["\(results.count) check(s) failed — main untouched:"]
+                var lines = ["\(results.count) check(s) failed — main untouched, but the branch already moved:"
+                    + " it was rebased onto its target (new SHAs; emptied commits dropped)."
+                    + " Fix the checks and re-run, or reset the branch to its pre-landing tip if you kept it."]
                 for result in results {
                     lines.append("  ✗ \(result.name)")
                     for line in Self.tail(result.output) { lines.append("      \(line)") }
@@ -125,7 +136,14 @@ public enum Landing {
             "/usr/bin/env",
             ["git"] + arguments,
             in: URL(fileURLWithPath: repo),
-            environment: ["GIT_OPTIONAL_LOCKS": "0"],
+            // Belt-and-braces for anything that echoes a path back to us
+            // (log --name-only, merge-tree) — plain diff calls use -z instead.
+            environment: [
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.quotePath",
+                "GIT_CONFIG_VALUE_0": "false",
+            ],
             timeout: timeout
         )
     }
@@ -183,10 +201,16 @@ public enum Landing {
     }
 
     /// Paths that changed between two revisions, sorted.
+    ///
+    /// `-z`, because the plain form C-quotes any non-ASCII path
+    /// (`"sp\303\244 ce.txt"`): authorsOf then ran `git log -- "<quoted>"
+    /// "` (no match, "unknown authors"), and releaseCovering's glob never
+    /// matched — so the landing agent's own claim stayed alive until TTL
+    /// (audit Tier 2 #7).
     public static func filesChanged(from old: String, to new: String, repo: String) -> [String] {
-        let output = git(["diff", "--name-only", old, new], in: repo)
+        let output = git(["diff", "--name-only", "-z", old, new], in: repo)
         guard output.succeeded else { return [] }
-        return output.lines.sorted()
+        return output.stdout.components(separatedBy: "\0").filter { !$0.isEmpty }.sorted()
     }
 
     // MARK: - The landing
@@ -249,10 +273,14 @@ public enum Landing {
             throw Failure.gitTooOld(gitVersion.map({ "\($0.0).\($0.1).\($0.2)" }) ?? "unknown")
         }
 
-        guard let conflicted = ConflictRadar.conflicts(between: branch, and: into, in: repoPath) else {
+        switch ConflictRadar.conflicts(between: branch, and: into, in: repoPath) {
+        case .clean:
+            break
+        case .unrelatedHistories:
             throw Failure.noMergeBase(branch: branch, into: into)
-        }
-        if !conflicted.isEmpty {
+        case .unanswered(let detail):
+            throw Failure.radarUnanswered(branch: branch, into: into, detail: detail)
+        case .paths(let conflicted):
             let details = conflicted.map { path in
                 ConflictDetail(path: path, authors: authorsOf(path: path, branch: branch, into: into, repo: repoPath))
             }
@@ -277,6 +305,9 @@ public enum Landing {
 
         progress("rebasing `\(branch)` onto `\(into)`…")
         var results: [CheckResult] = []
+        // From here on a failure must say the branch already moved: the rebase
+        // rewrites SHAs even though main stays put (Tier 2 #10).
+        var didRebase = false
         if fast {
             guard let branchTip = tip(of: branch, repo: repoPath),
                   let intoTip = tip(of: into, repo: repoPath),
@@ -289,9 +320,24 @@ public enum Landing {
         } else {
             let rebased = git(["rebase", into], in: repoPath, timeout: 300)
             guard rebased.succeeded else {
-                _ = git(["rebase", "--abort"], in: repoPath)
-                throw Failure.rebaseFailed(into: into, output: String(rebased.text.suffix(500)))
+                // Report the abort's actual outcome. `git rebase --abort` fails
+                // both when nothing was left in progress and when the abort
+                // itself fails — asking the filesystem keeps the difference
+                // honest instead of asserting "branch untouched" (Tier 2 #10).
+                let note: String
+                if Self.midRebase(repoPath) {
+                    note = git(["rebase", "--abort"], in: repoPath).succeeded
+                        ? "\n(rebase aborted — branch untouched)"
+                        : "\n(abort FAILED: the worktree is mid-rebase — run `git rebase --abort` by hand before anything else)"
+                } else {
+                    note = "\n(no rebase left in progress — branch untouched)"
+                }
+                throw Failure.rebaseFailed(
+                    into: into,
+                    output: String(rebased.text.suffix(500)) + note
+                )
             }
+            didRebase = true
 
             if !skipChecks {
                 results = ProjectChecks.run(planned, in: repo)
@@ -305,9 +351,21 @@ public enum Landing {
 
         guard let sha = tip(of: branch, repo: repoPath),
               let intoSHA = tip(of: into, repo: repoPath)
-        else { throw Failure.cannotFastForward(reason: "lost track of `\(branch)` after the rebase") }
+        else { throw Failure.cannotFastForward(reason: "lost track of `\(branch)`") }
         let files = filesChanged(from: intoSHA, to: sha, repo: repoPath)
-        try fastForward(into: into, to: sha, from: intoSHA, branch: branch, repo: repoPath)
+        do {
+            try fastForward(into: into, to: sha, from: intoSHA, branch: branch, repo: repoPath)
+        } catch let failure as Failure {
+            // The rebase has already rewritten `branch` — a bare
+            // "could not move main" reads as if nothing happened at all.
+            if didRebase, case .cannotFastForward(let reason) = failure {
+                throw Failure.cannotFastForward(
+                    reason: reason + " — `\(branch)` was already rebased onto `\(into)`"
+                        + " (new SHAs; emptied commits dropped); main is untouched."
+                )
+            }
+            throw failure
+        }
 
         let project = ProjectRegistry.canonicalPath(for: repoPath)
         let top = files.sorted().prefix(3).joined(separator: ", ")
@@ -330,6 +388,20 @@ public enum Landing {
             checksRun: results.count, claimsReleased: released.count, dryRun: false,
             message: text
         )
+    }
+
+    /// True when a rebase is actually in progress in `repo`. Resolves the git
+    /// dir first, so a linked worktree (`.git` is a file) answers too.
+    static func midRebase(_ repo: String) -> Bool {
+        let raw = git(["rev-parse", "--git-dir"], in: repo, timeout: 10)
+            .stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return false }
+        let dir = raw.hasPrefix("/")
+            ? URL(fileURLWithPath: raw)
+            : URL(fileURLWithPath: repo).appendingPathComponent(raw)
+        return ["rebase-merge", "rebase-apply"].contains {
+            FileManager.default.fileExists(atPath: dir.appendingPathComponent($0).path)
+        }
     }
 
     /// Move `into` to `sha`: a real merge wherever it is checked out, a
@@ -403,10 +475,24 @@ public enum Landing {
         guard dirtyFiles(repo: cwd).isEmpty else {
             return .skipped(reason: "worktree not clean")
         }
-        guard let conflicted = ConflictRadar.conflicts(between: branch, and: into, in: cwd),
-              conflicted.isEmpty
-        else {
+        // The radar must answer before auto-land moves anything: "could not
+        // ask" used to report as "sees a conflict", and on git < 2.38 this
+        // branch fired every time (Tier 2 #8). Same gate sweep and land take.
+        let radarGit = ConflictRadar.gitVersion(in: cwd)
+        guard let supported = radarGit, ConflictRadar.supportsMergeTree(version: supported) else {
+            return .skipped(reason: radarGit.map {
+                "git \($0.0).\($0.1).\($0.2) < 2.38 — merge-tree unavailable, radar cannot check"
+            } ?? "git did not answer --version — radar cannot check")
+        }
+        switch ConflictRadar.conflicts(between: branch, and: into, in: cwd) {
+        case .clean, .paths([]):
+            break
+        case .paths:
             return .skipped(reason: "radar sees a conflict with \(into)")
+        case .unrelatedHistories:
+            return .skipped(reason: "`\(branch)` and `\(into)` share no history — landing would fail")
+        case .unanswered(let detail):
+            return .skipped(reason: "radar could not answer (\(detail)) — not landing blind")
         }
 
         let repo = URL(fileURLWithPath: cwd)

@@ -169,14 +169,25 @@ public struct GitSnapshot: Sendable {
         var restored: [String] = []
         var created: [String] = []
 
-        for (status, path) in Self.parseNameStatus(diff.stdout) {
-            switch status.first {
+        for entry in Self.parseNameStatus(diff.stdout) {
+            guard let first = entry.paths.first else { continue }
+            switch entry.status.first {
             case "M", "T", "D":
                 // Present in the snapshot and different (or missing) now.
-                try writeFromSnapshot(commit: snapshot.commit, path: path)
-                restored.append(path)
+                try writeFromSnapshot(commit: snapshot.commit, path: first)
+                restored.append(first)
             case "A":
-                created.append(path)
+                created.append(first)
+            case "R", "C":
+                // The snapshot knows the source name; write it back. The
+                // destination is the agent's own file after the rename —
+                // never deleted, reported as created so it reads as what it is.
+                try writeFromSnapshot(commit: snapshot.commit, path: first)
+                restored.append(first)
+                if let destination = entry.paths.last, destination != first,
+                   !created.contains(destination) {
+                    created.append(destination)
+                }
             default:
                 continue
             }
@@ -224,18 +235,22 @@ public struct GitSnapshot: Sendable {
         return repository.appendingPathComponent(path)
     }
 
-    static func parseNameStatus(_ raw: String) -> [(status: String, path: String)] {
+    static func parseNameStatus(_ raw: String) -> [(status: String, paths: [String])] {
         let fields = raw.components(separatedBy: "\0").filter { !$0.isEmpty }
-        var results: [(String, String)] = []
+        var results: [(String, [String])] = []
         var index = 0
         while index < fields.count {
             let status = fields[index]
-            // Renames and copies carry two paths; the second is the current name.
-            let extraPaths = status.hasPrefix("R") || status.hasPrefix("C") ? 2 : 1
-            guard index + extraPaths < fields.count else { break }
-            let path = fields[index + extraPaths]
-            results.append((status, path))
-            index += extraPaths + 1
+            // Renames and copies carry two paths, in git's order: source
+            // (a-side, what the snapshot knows) first, destination (b-side,
+            // what the worktree has now) second. Both are needed — dropping
+            // either is how a rename used to vanish from a restore (Tier 2 #6).
+            let isRename = status.hasPrefix("R") || status.hasPrefix("C")
+            let count = isRename ? 2 : 1
+            guard index + count < fields.count else { break }
+            let paths = Array(fields[(index + 1)...(index + count)])
+            results.append((status, paths))
+            index += count + 1
         }
         return results
     }

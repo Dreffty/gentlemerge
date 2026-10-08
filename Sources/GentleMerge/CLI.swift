@@ -1230,7 +1230,7 @@ enum CLI {
             paths: paths,
             handoffIsStaged: files.contains(Ownership.handoffRelativePath)
         ).ownership
-        let active = label.flatMap { Requests(paths: paths).inProgress(assignedTo: $0, project: project).first }
+        let scoped = label.map { Requests(paths: paths).inProgress(assignedTo: $0, project: project) } ?? []
         let presence = Presence.marks(paths: paths)
         // Dead sessions lose their claims before the gate decides, labeled or
         // not: an unlabeled commit must not stay blocked by a ghost either.
@@ -1252,7 +1252,7 @@ enum CLI {
             me: label,
             claims: claims,
             ownership: ownership,
-            activeRequest: active,
+            activeRequests: scoped,
             presence: presence,
             isPIDAlive: { Liveness.isProcessAlive($0) }
         )
@@ -1865,13 +1865,13 @@ enum CLI {
             paths: paths,
             handoffIsStaged: rel == Ownership.handoffRelativePath
         ).ownership
-        let active = Requests(paths: paths).inProgress(assignedTo: me, project: project).first
+        let scopedAdvise = Requests(paths: paths).inProgress(assignedTo: me, project: project)
         let notes = Advise.check(
             path: rel,
             me: me,
             claims: claims,
             ownership: ownership,
-            activeRequest: active,
+            activeRequests: scopedAdvise,
             presence: Presence.marks(paths: paths),
             isPIDAlive: { Liveness.isProcessAlive($0) }
         )

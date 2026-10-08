@@ -67,9 +67,12 @@ public struct TaskStep: Codable, Sendable, Equatable, Identifiable {
 
     public init(id: String? = nil, text: String, done: Bool = false) {
         // Same identity rule as a task: derived from the text, so the app, the
-        // CLI and the next launch all agree on which point this is.
-        self.id = id ?? HandoffMarkdown.identifier(for: text)
-        self.text = text
+        // CLI and the next launch all agree on which point this is. One line,
+        // for the same reason as TaskItem: a newline here becomes a flush-left
+        // checkbox on the way back in and gets promoted to its own task.
+        let clean = HandoffMarkdown.oneLine(text)
+        self.id = id ?? HandoffMarkdown.identifier(for: clean)
+        self.text = clean
         self.done = done
     }
 }
@@ -124,8 +127,11 @@ public struct TaskItem: Codable, Sendable, Identifiable {
     ) {
         // Identity comes from the text, not from a UUID: this file is edited by
         // agents and by hand, and a task read back must be the same task.
-        self.id = id ?? HandoffMarkdown.identifier(for: text)
-        self.text = text
+        // One line first: an interior newline renders as a second line that
+        // parses as a different task — and loses half the words on save.
+        let clean = HandoffMarkdown.oneLine(text)
+        self.id = id ?? HandoffMarkdown.identifier(for: clean)
+        self.text = clean
         self.steps = steps
         self.completed = done
         self.addedAt = addedAt
@@ -140,11 +146,16 @@ public struct TaskItem: Codable, Sendable, Identifiable {
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        text = (try? container.decode(String.self, forKey: .text)) ?? ""
+        // Same normalization as the memberwise init: decoded text can carry
+        // whatever an older binary wrote, and one line is the invariant.
+        text = HandoffMarkdown.oneLine((try? container.decode(String.self, forKey: .text)) ?? "")
         id = (try? container.decode(String.self, forKey: .id))
             ?? HandoffMarkdown.identifier(for: text)
         completed = (try? container.decode(Bool.self, forKey: .done)) ?? false
-        steps = (try? container.decode([TaskStep].self, forKey: .steps)) ?? []
+        steps = ((try? container.decode([TaskStep].self, forKey: .steps)) ?? []).map { step in
+            let clean = HandoffMarkdown.oneLine(step.text)
+            return clean == step.text ? step : TaskStep(text: clean, done: step.done)
+        }
         addedAt = try? container.decode(Date.self, forKey: .addedAt)
         addedBy = try? container.decode(String.self, forKey: .addedBy)
     }
@@ -291,6 +302,29 @@ public enum HandoffMarkdown {
         text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
             line.hasPrefix("\\#") ? String(line.dropFirst()) : String(line)
         }.joined(separator: "\n")
+            // Also undoes `protectMetadata`: rendered task text carries its
+            // literal " · " as " ·<nbsp>", which the metadata strip never
+            // matches. Restoring here keeps every unescape path symmetric.
+            .replacingOccurrences(of: " ·\u{00A0}", with: " · ")
+    }
+
+    /// Task and step text is one line. The grammar is line-based, so an
+    /// interior newline renders as a second line that parses back as a
+    /// different task — or a remainder the tasks heading discards — and the
+    /// next save permanently deletes the lost half (audit Tier 2 #11).
+    static func oneLine(_ text: String) -> String {
+        text.replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// A literal " · " inside task text, written so the metadata parser cannot
+    /// eat it: `task(from:)` strips only plain-space separators, and a task
+    /// genuinely named "… · by hand" round-trips as its own words (the real
+    /// ` · by claude` still strips, because renderTask appends it unmodified).
+    static func protectMetadata(_ text: String) -> String {
+        text.replacingOccurrences(of: " · ", with: " ·\u{00A0}")
     }
 
     public static func render(_ handoff: ProjectHandoff) -> String {
@@ -339,7 +373,7 @@ public enum HandoffMarkdown {
     }
 
     static func renderTask(_ task: TaskItem) -> String {
-        var line = "- [\(task.done ? "x" : " ")] \(escape(task.text))"
+        var line = "- [\(task.done ? "x" : " ")] \(escape(protectMetadata(oneLine(task.text))))"
         // The counter is written out so the file reads right on its own, in a
         // pull request or in someone else's editor. It is recomputed on the way
         // back in, so a stale one can never outvote the boxes below it.
@@ -360,7 +394,7 @@ public enum HandoffMarkdown {
     /// agent editing by hand has to get right.
     static func renderTaskLines(_ task: TaskItem) -> [String] {
         [renderTask(task)] + task.steps.map { step in
-            "\(stepIndent)- [\(step.done ? "x" : " ")] \(escape(step.text))"
+            "\(stepIndent)- [\(step.done ? "x" : " ")] \(escape(protectMetadata(oneLine(step.text))))"
         }
     }
 
@@ -648,7 +682,13 @@ public enum HandoffMarkdown {
     }
 
     static func task(from checkbox: Checkbox) -> TaskItem {
-        var text = unescape(checkbox.text)
+        // Strip `renderTask`'s metadata from the raw line, BEFORE unescape:
+        // a literal " · " in the text was protected at render time (nbsp), so
+        // only real metadata — plain-space separators — matches here.
+        // Unescaping first would restore the separators and feed them straight
+        // back to this parser, and the task's own words would be stolen again
+        // (audit Tier 2 #11).
+        var text = checkbox.text
         var addedAt: Date?
         var addedBy: String?
 
@@ -667,6 +707,7 @@ public enum HandoffMarkdown {
             }
             text = String(text[..<range.lowerBound]).trimmingCharacters(in: .whitespaces)
         }
+        text = unescape(text)
 
         // Stable id from the text: the same task keeps its identity across edits
         // made in a file we do not control.

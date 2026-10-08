@@ -370,14 +370,23 @@ public struct AgentBus: Sendable {
     // MARK: - Activity
 
     public func activities() -> [AgentActivity] {
-        let stored: [AgentActivity]
+        storedActivities() + livePresenceExcludingStoredIDs(from: storedActivities())
+    }
+
+    /// The app-owned rows only — what `save` may persist. `activities()` merges
+    /// presence at read time; writing the merged list back would freeze presence
+    /// into the file (stale task/pid served for up to 6h, phantom `.sessionEnd`
+    /// watches from `sweepDeadSessions`, presence evicting real sessions at the
+    /// 40-row cap).
+    public func storedActivities() -> [AgentActivity] {
         if let data = try? Data(contentsOf: paths.activities),
            let decoded = try? JSONCoding.decoder().decode([AgentActivity].self, from: data) {
-            stored = decoded
-        } else {
-            stored = []
+            return decoded
         }
+        return []
+    }
 
+    private func livePresenceExcludingStoredIDs(from stored: [AgentActivity]) -> [AgentActivity] {
         // The agents' own marks, merged in here so that every reader — `who`,
         // the peer list, the briefing — gets them without knowing they exist.
         //
@@ -387,7 +396,7 @@ public struct AgentBus: Sendable {
         // was the whole failure: `who` said nobody was working while five
         // sessions were mid-turn.
         let known = Set(stored.filter(\.isLive).map(\.id))
-        return stored + Presence.live(paths: paths).filter { !known.contains($0.id) }
+        return Presence.live(paths: paths).filter { !known.contains($0.id) }
     }
 
     public func save(_ activities: [AgentActivity]) {
@@ -924,6 +933,33 @@ public struct AgentBus: Sendable {
         mode: BriefingMode = .full,
         persistCursor: Bool = true
     ) -> String? {
+        // The whole read-compute-write runs under the per-session delivery
+        // lock: without it two concurrent briefs compute the same pending set
+        // and both deliver it (Tier 1 #1). Anonymous reads share one lock;
+        // they persist nothing, so contention is harmless.
+        do {
+            return try LockedFile.withExclusiveLock(Self.deliveryLockURL(for: sessionID, paths: paths)) {
+                briefingLocked(
+                    sessionID: sessionID, me: me, project: project, branch: branch,
+                    now: now, mode: mode, persistCursor: persistCursor)
+            }
+        } catch {
+            Log.error("briefing lock failed: \(error.localizedDescription)")
+            return briefingLocked(
+                sessionID: sessionID, me: me, project: project, branch: branch,
+                now: now, mode: mode, persistCursor: false)
+        }
+    }
+
+    private func briefingLocked(
+        sessionID: String?,
+        me: String?,
+        project: String?,
+        branch: String? = nil,
+        now: Date,
+        mode: BriefingMode,
+        persistCursor: Bool
+    ) -> String? {
         // Peers are the ones sharing this project. A session in `clipapp` was
         // being told about another project's simulator, and paying context
         // for it every turn.
@@ -1325,10 +1361,19 @@ public struct AgentBus: Sendable {
         let key = project ?? ""
         if persistCursor {
             if project == nil {
-                // Global read (sees all): advance global scope only.
+                // Global read (sees all): advance global scope, promoting the
+                // per-project watermarks. A project-scoped read advanced only
+                // its own key, leaving global nil; without promotion a later
+                // global read has no watermark and replays the whole log over
+                // the trimmed deliveredIDs (Tier 1 #2).
                 let oldMarker = deliveryMarker(for: sessionID)
                 let oldGlobal: UInt64? = [oldMarker?.lastDeliveredSequence, cursor.lastDeliveredSequence].compactMap { $0 }.max()
-                let newGlobal: UInt64? = [oldGlobal, contiguousSeq].compactMap { $0 }.max()
+                let promoted: UInt64? = [
+                    oldGlobal, contiguousSeq,
+                    (oldMarker?.lastDeliveredSequenceByProject ?? [:]).values.max(),
+                    (cursor.lastDeliveredSequenceByProject ?? [:]).values.max(),
+                ].compactMap { $0 }.max()
+                let newGlobal: UInt64? = promoted
                 if let newGlobal {
                     if let old = cursor.lastDeliveredSequence {
                         cursor.lastDeliveredSequence = max(old, newGlobal)
@@ -1766,6 +1811,16 @@ public static func label(for provider: AgentProvider) -> String {
         if let data = try? JSONCoding.encoder().encode(marker) {
             try? AtomicFile.write(data, to: markerURL(for: sessionID))
         }
+    }
+
+    /// Per (session, project) under one exclusive lock: the briefing's
+    /// read-compute-write (pending → fingerprint → record) is wide (render 400
+    /// messages), so two concurrent `brief --as` ran it interleaved and both
+    /// delivered the same set. The lock is per session-id (the marker + cursor
+    /// files), so different sessions still brief in parallel.
+    static func deliveryLockURL(for sessionID: String?, paths: Paths) -> URL {
+        let name = sessionID.map { "brief-\(fileSafeSessionID($0))" } ?? "brief-anon"
+        return paths.delivered.appendingPathComponent("\(name).lock")
     }
 
     static func fingerprint(_ text: String) -> String {

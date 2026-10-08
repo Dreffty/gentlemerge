@@ -60,7 +60,7 @@ public struct MCPServer {
                         let violations = PrecommitGate.evaluate(staged: files, me: identity,
                             claims: PathClaims(paths: paths).live(project: project),
                             ownership: Ownership.effective(project: project, paths: paths).ownership,
-                            activeRequest: Requests(paths: paths).inProgress(assignedTo: identity, project: project).first)
+                            activeRequests: Requests(paths: paths).inProgress(assignedTo: identity, project: project))
                         text = violations.isEmpty ? "No staged path violations." : violations.map { "\($0.path): \($0.reason)" }.joined(separator: "\n")
                         return toolReply(id, text, isError: violations.contains(where: { $0.blocking }))
                     case "claim":
@@ -91,13 +91,13 @@ public struct MCPServer {
                         guard !checkPaths.isEmpty else { text = "no paths given"; break }
                         let liveClaims = PathClaims(paths: paths).live(project: project)
                         let checkOwnership = Ownership.effective(project: project, paths: paths).ownership
-                        let checkActive = Requests(paths: paths).inProgress(assignedTo: identity, project: project).first
+                        let checkActive = Requests(paths: paths).inProgress(assignedTo: identity, project: project)
                         let checkPresence = Presence.marks(paths: paths)
                         text = checkPaths.map { checkPath in
                             let rel = checkPath.hasPrefix(project + "/")
                                 ? String(checkPath.dropFirst(project.count + 1)) : checkPath
                             let notes = Advise.check(path: rel, me: identity, claims: liveClaims,
-                                ownership: checkOwnership, activeRequest: checkActive,
+                                ownership: checkOwnership, activeRequests: checkActive,
                                 presence: checkPresence, isPIDAlive: { Liveness.isProcessAlive($0) })
                             return notes.isEmpty ? "ok \(checkPath)" : notes.map(\.text).joined(separator: "\n")
                         }.joined(separator: "\n")
