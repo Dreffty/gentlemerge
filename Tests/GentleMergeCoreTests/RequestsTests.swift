@@ -419,22 +419,40 @@ final class RequestsTests: XCTestCase {
         let here = self.here
         let paths = self.paths!
         // Dos hilos, una delegación cada uno, misma capability.
-        var targets = [String?](repeating: nil, count: 2)
-        let lock = NSLock()
+        //
+        // A lock-guarded box rather than a captured `var`: the array is written
+        // from inside `concurrentPerform`, and Swift 6.0 (the CI toolchain)
+        // rejects mutating a captured var there outright. The lock is the same
+        // one this test has always taken — this is the spelling it accepts.
+        final class Targets: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage: [String?]
+            init(count: Int) { storage = [String?](repeating: nil, count: count) }
+            func set(_ index: Int, _ value: String) {
+                lock.lock(); defer { lock.unlock() }
+                storage[index] = value
+            }
+            var values: [String?] {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage
+            }
+        }
+        let targets = Targets(count: 2)
         DispatchQueue.concurrentPerform(iterations: 2) { index in
             do {
                 let r = try bus.delegate(from: "boss", fromVerified: true, to: "capability:images",
                                          projectPath: here, title: "race-\(index)", spec: "spec",
                                          inputs: [], expectedOutput: nil, mayTouch: [], budgetMinutes: 10)
-                lock.lock(); targets[index] = r.resolvedTo; lock.unlock()
+                targets.set(index, r.resolvedTo ?? "none")
             } catch {
-                lock.lock(); targets[index] = "ERROR:\(error)"; lock.unlock()
+                targets.set(index, "ERROR:\(error)")
             }
         }
-        let resolved = try XCTUnwrap(targets[0]), resolved2 = try XCTUnwrap(targets[1])
+        let resolved = try XCTUnwrap(targets.values[0]), resolved2 = try XCTUnwrap(targets.values[1])
         XCTAssertFalse(resolved.hasPrefix("ERROR"), "first delegate failed: \(resolved)")
         XCTAssertFalse(resolved2.hasPrefix("ERROR"), "second delegate failed: \(resolved2)")
-        XCTAssertNotEqual(resolved, resolved2, "two racers with two free agents must split, got \(targets)")
+        XCTAssertNotEqual(resolved, resolved2, "two racers with two free agents must split, got \(targets.values)")
         XCTAssertTrue(["race-a", "race-b"].contains(resolved))
         XCTAssertTrue(["race-a", "race-b"].contains(resolved2))
         _ = paths

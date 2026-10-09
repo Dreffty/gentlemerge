@@ -24,11 +24,16 @@ final class ShellSpawnFailureTests: XCTestCase {
     private func readerThreadCount() -> Int {
         var list: thread_act_array_t?
         var count = mach_msg_type_number_t(0)
-        guard task_threads(mach_task_self_, &list, &count) == KERN_SUCCESS, let list else { return -1 }
+        // Read once into a let, then use that. `mach_task_self_` is a global the
+        // compiler treats as shared mutable state, and Swift 6.0 (the CI
+        // toolchain) rejects referencing it from a concurrency-checked context
+        // — which every test method now is.
+        let task = mach_task_self_
+        guard task_threads(task, &list, &count) == KERN_SUCCESS, let list else { return -1 }
         defer {
-            for index in 0..<Int(count) { mach_port_deallocate(mach_task_self_, list[index]) }
+            for index in 0..<Int(count) { mach_port_deallocate(task, list[index]) }
             vm_deallocate(
-                mach_task_self_,
+                task,
                 vm_address_t(UInt(bitPattern: list)),
                 vm_size_t(MemoryLayout<thread_act_t>.stride) * vm_size_t(count)
             )

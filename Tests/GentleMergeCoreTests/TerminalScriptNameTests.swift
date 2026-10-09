@@ -5,6 +5,12 @@ import XCTest
 /// and the value was interpolated into `tell application "<name>"` with only
 /// `.app` stripped. A value containing a quote produced a script that ran
 /// something else, with the app's Automation grant behind it.
+///
+/// `ScriptableTerminal` lives inside `#if os(macOS)` in `TerminalBridge.swift`
+/// — AppleScript has no Linux surface — so this file is gated the same way. The
+/// Linux CI job compiled it unconditionally and failed to find the type, which
+/// made the whole package unbuildable there.
+#if os(macOS)
 final class TerminalScriptNameTests: XCTestCase {
     func testKnownTerminalsStillMapToTheirScriptingNames() {
         XCTAssertEqual(ScriptableTerminal.applicationName(for: "iTerm.app"), "iTerm2")
@@ -63,3 +69,4 @@ final class TerminalScriptNameTests: XCTestCase {
         XCTAssertFalse(name.contains("\\"), "no escape can be introduced")
     }
 }
+#endif
