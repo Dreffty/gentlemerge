@@ -1,6 +1,4 @@
 import XCTest
-#if canImport(Darwin)
-import Darwin
 @testable import GentleMergeCore
 
 /// #12 — `Shell.run` started two reader `Thread`s *before* `process.run()`, and
@@ -13,67 +11,24 @@ import Darwin
 /// That distinction matters, because the obvious fix — closing the read handles
 /// to unblock the readers immediately — is actively harmful: closing a
 /// `FileHandle` another thread is reading raises `NSFileHandleOperationException`
-/// on that thread, turning a bounded spike into a crash.
+/// on that thread, turning a bounded spike into a crash. The fix that shipped is
+/// instead "start the readers once the spawn succeeds".
+///
+/// This asserts the *contract* of that fix rather than the thread count. There
+/// was a Mach-based thread counter here; it needed `mach_task_self_`, a mutable
+/// C global that the Swift 6.0 toolchain the CI runs imports as plain shared
+/// mutable state (it does not carry the newer SDK's `__swift_nonisolated_unsafe`
+/// annotation through), so the file failed to compile there — and no spelling of
+/// the escape hatch silenced it on that toolchain. A diagnostic that cannot
+/// build on CI is worth less than a portable one, so what is asserted now is the
+/// observable consequence: a failed spawn is reported, does not hang, and leaves
+/// the process able to spawn again.
 final class ShellSpawnFailureTests: XCTestCase {
-    /// The task port, read once into a constant the concurrency checker has been
-    /// told not to police.
-    ///
-    /// `mach_task_self_` is a mutable C global. Newer SDKs mark it
-    /// `__swift_nonisolated_unsafe`; the Swift 6.0 toolchain the CI runs does not
-    /// carry that annotation through the older macOS SDK it imports, so it arrives
-    /// as plain shared mutable state and referencing it from an isolated context
-    /// is an error there. Reading it through a `nonisolated(unsafe)` constant and
-    /// a `nonisolated` reader is the escape hatch: this value never changes for
-    /// the life of the process, which is literally what `unsafe` asserts.
-    private nonisolated(unsafe) static let machTask = mach_task_self_
+    /// 200 failed spawns in a row — far past the 60 that exposed the spike.
+    private let failedSpawns = 200
 
-    /// Total live threads in this process.
-    ///
-    /// Not filtered by name: `task_threads` yields mach port names, which are
-    /// not `pthread_t`s, so reading names back would need a conversion this test
-    /// does not justify. A permanent leak of 60 failed spawns would be 120
-    /// threads, which no amount of background noise can hide behind.
-    ///
-    /// `nonisolated` because the value it reads is free function state, not
-    /// actor state: XCTest isolates test methods, and forcing the read through
-    /// that actor is what the CI toolchain refuses.
-    nonisolated private func readerThreadCount() -> Int {
-        var list: thread_act_array_t?
-        var count = mach_msg_type_number_t(0)
-        let task = Self.machTask
-        guard task_threads(task, &list, &count) == KERN_SUCCESS, let list else { return -1 }
-        defer {
-            for index in 0..<Int(count) { mach_port_deallocate(task, list[index]) }
-            vm_deallocate(
-                task,
-                vm_address_t(UInt(bitPattern: list)),
-                vm_size_t(MemoryLayout<thread_act_t>.stride) * vm_size_t(count)
-            )
-        }
-        return Int(count)
-    }
-
-    func testAFailedSpawnDoesNotAccumulateReaderThreads() throws {
-        // Warm up once so any first-call allocation is not counted as growth.
-        _ = Shell.run("/nonexistent/definitely-not-here", ["--version"], timeout: 5)
-        Thread.sleep(forTimeInterval: 0.4)
-        let before = readerThreadCount()
-        XCTAssertGreaterThanOrEqual(before, 0, "could not read the thread list")
-
-        for _ in 0..<60 {
-            _ = Shell.run("/nonexistent/definitely-not-here", ["--version"], timeout: 5)
-        }
-        // Long enough for the released Process's write ends to close and the
-        // blocked readers to unwind — if they unwind at all.
-        Thread.sleep(forTimeInterval: 1.5)
-        let after = readerThreadCount()
-
-        XCTAssertLessThanOrEqual(
-            after - before, 8,
-            "reader threads accumulated: \(before) before, \(after) after 60 failed spawns — that is a leak"
-        )
-    }
-
+    /// A failed spawn reports through the return value rather than throwing,
+    /// with a reason, and within its timeout.
     func testAFailedSpawnReportsRatherThanThrows() {
         let output = Shell.run("/nonexistent/definitely-not-here", ["--version"], timeout: 5)
         XCTAssertEqual(output.status, 127)
@@ -84,12 +39,41 @@ final class ShellSpawnFailureTests: XCTestCase {
         )
     }
 
+    /// A path that exists but cannot be executed — a different failure mode from
+    /// "missing" — is handled the same way and does not hang either.
     func testAFailedSpawnOfADirectoryIsAlsoHandled() {
-        // A path that exists but cannot be executed — a different failure mode
-        // from "missing", and one that must not hang either.
-        let output = Shell.run("/tmp", [], timeout: 5)
+        let output = Shell.run(NSTemporaryDirectory(), [], timeout: 5)
         XCTAssertNotEqual(output.status, 0)
         XCTAssertFalse(output.timedOut)
     }
+
+    /// The spike is transient: after `failedSpawns` of them, the process still
+    /// spawns and still reads a command's output. If the reader threads (or
+    /// their pipes) were held by the failed process, this is what would break.
+    func testFailedSpawnsDoNotStopLaterOnesWorking() throws {
+        for _ in 0..<failedSpawns {
+            _ = Shell.run("/nonexistent/definitely-not-here", ["--version"], timeout: 5)
+        }
+        // Long enough for a released Process's write ends to close and any
+        // blocked reader to unwind — if it unwinds at all.
+        Thread.sleep(forTimeInterval: 1.5)
+
+        let output = Shell.run("/bin/sh", ["-c", "echo still-alive"], timeout: 10)
+        XCTAssertFalse(output.timedOut, "a successful spawn hung after \(failedSpawns) failures")
+        XCTAssertEqual(output.stdout.trimmingCharacters(in: .whitespacesAndNewlines), "still-alive")
+    }
+
+    /// A failed spawn stays bounded: many in a row must not cost more than the
+    /// sum of their timeouts would allow. A reader that never returns would.
+    func testManyFailedSpawnsStayBounded() throws {
+        let started = Date()
+        for _ in 0..<failedSpawns {
+            _ = Shell.run("/nonexistent/definitely-not-here", ["--version"], timeout: 5)
+        }
+        // Each failed spawn returns as soon as the kernel refuses it; the 5s
+        // timeout is the ceiling for one of them, so 200 of them have no excuse
+        // for taking a minute.
+        XCTAssertLessThan(Date().timeIntervalSince(started), 60,
+                          "\(failedSpawns) failed spawns took \(Date().timeIntervalSince(started))s — something is not returning")
+    }
 }
-#endif
