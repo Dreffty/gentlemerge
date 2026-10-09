@@ -21,14 +21,19 @@ final class ShellSpawnFailureTests: XCTestCase {
     /// not `pthread_t`s, so reading names back would need a conversion this test
     /// does not justify. A permanent leak of 60 failed spawns would be 120
     /// threads, which no amount of background noise can hide behind.
+    /// Read once into a `nonisolated(unsafe)` constant.
+    ///
+    /// `mach_task_self_` is a mutable global, and Swift 6.0 (the CI toolchain)
+    /// rejects *referencing* it from a concurrency-checked context — which every
+    /// test method now is. Reading it into a plain `let` at the point of use is
+    /// not enough; it has to be read into a constant the checker has been told
+    /// not to police. This value never changes for the life of the process.
+    private nonisolated(unsafe) static let machTask = mach_task_self_
+
     private func readerThreadCount() -> Int {
         var list: thread_act_array_t?
         var count = mach_msg_type_number_t(0)
-        // Read once into a let, then use that. `mach_task_self_` is a global the
-        // compiler treats as shared mutable state, and Swift 6.0 (the CI
-        // toolchain) rejects referencing it from a concurrency-checked context
-        // — which every test method now is.
-        let task = mach_task_self_
+        let task = Self.machTask
         guard task_threads(task, &list, &count) == KERN_SUCCESS, let list else { return -1 }
         defer {
             for index in 0..<Int(count) { mach_port_deallocate(task, list[index]) }
