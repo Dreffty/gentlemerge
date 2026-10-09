@@ -23,7 +23,10 @@ final class AtomicFileTests: XCTestCase {
         try? FileManager.default.removeItem(at: root)
     }
 
-    private func payload(_ seed: Int) -> Data {
+    /// `static` so the concurrent closures below capture a free function rather
+    /// than `self`: `XCTestCase` is not Sendable, and the Linux CI toolchain
+    /// rejects capturing it from a `@Sendable` closure (audit 2026-10-09).
+    private static func payload(_ seed: Int) -> Data {
         Data(String(repeating: "x", count: 2048).utf8) + Data("-\(seed)".utf8)
     }
 
@@ -31,7 +34,7 @@ final class AtomicFileTests: XCTestCase {
     /// absent or empty. This is the exact access pattern of `precommit`.
     func testAConcurrentReaderNeverSeesTheFileAbsent() throws {
         let url = root.appendingPathComponent("claims.json")
-        try AtomicFile.write(payload(0), to: url)
+        try AtomicFile.write(Self.payload(0), to: url)
 
         let writers = 4
         let iterations = 400
@@ -53,7 +56,7 @@ final class AtomicFileTests: XCTestCase {
         for w in 0..<writers {
             group.enter()
             DispatchQueue.global().async {
-                for i in 0..<iterations { try? AtomicFile.write(self.payload(w * 10_000 + i), to: url) }
+                for i in 0..<iterations { try? AtomicFile.write(Self.payload(w * 10_000 + i), to: url) }
                 group.leave()
             }
         }
@@ -77,7 +80,7 @@ final class AtomicFileTests: XCTestCase {
             DispatchQueue.global().async {
                 for i in 0..<iterations {
                     do {
-                        try AtomicFile.write(self.payload(w * 10_000 + i), to: url)
+                        try AtomicFile.write(Self.payload(w * 10_000 + i), to: url)
                     } catch {
                         failures.increment()
                     }
@@ -101,13 +104,13 @@ final class AtomicFileTests: XCTestCase {
     /// write into a directory that does not exist yet.
     func testWriteCreatesIntermediateDirectoriesAndReplaces() throws {
         let url = root.appendingPathComponent("a/b/c/state.json")
-        try AtomicFile.write(payload(1), to: url)
+        try AtomicFile.write(Self.payload(1), to: url)
         let first = try Data(contentsOf: url)
-        try AtomicFile.write(payload(2), to: url)
+        try AtomicFile.write(Self.payload(2), to: url)
         let second = try Data(contentsOf: url)
 
         XCTAssertNotEqual(first, second)
-        XCTAssertEqual(second, payload(2), "rename must replace, not merge or append")
+        XCTAssertEqual(second, Self.payload(2), "rename must replace, not merge or append")
     }
 
     /// A plain thread-safe counter: `@MainActor` or locks would serialise the

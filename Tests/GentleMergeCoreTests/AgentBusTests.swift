@@ -1066,7 +1066,26 @@ final class AgentBusTests: XCTestCase {
         let start = DispatchSemaphore(value: 0)
         let group = DispatchGroup()
         let lock = NSLock()
-        var perMessage = [Int](repeating: 0, count: count)
+        // A lock-guarded box, and the bus read into a `let` before the loop.
+        // `DispatchQueue.async` takes a `@Sendable` closure, and `XCTestCase` is
+        // not Sendable — so capturing `self.bus` or mutating a captured `var` is
+        // an error on the Linux CI toolchain (audit 2026-10-09).
+        final class Delivery: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storage: [Int]
+            init(count: Int) { storage = [Int](repeating: 0, count: count) }
+            func record(_ hits: [Bool]) {
+                lock.lock(); defer { lock.unlock() }
+                for (index, hit) in hits.enumerated() where hit { storage[index] += 1 }
+            }
+            var counts: [Int] {
+                lock.lock()
+                defer { lock.unlock() }
+                return storage
+            }
+        }
+        let perMessage = Delivery(count: count)
+        let bus = self.bus!
 
         for _ in 0..<readers {
             queue.async(group: group) {
@@ -1074,25 +1093,23 @@ final class AgentBusTests: XCTestCase {
                 // Keep draining: each brief pages a little and the next one
                 // continues. The point is that they interleave.
                 for _ in 0..<60 {
-                    guard let out = self.bus.briefing(
+                    guard let out = bus.briefing(
                         sessionID: "race-real", me: "reader", project: nil, mode: .delta
                     ) else { break }
-                    lock.lock()
-                    for i in 0..<count where out.contains("concurrent-\(i)-") { perMessage[i] += 1 }
-                    lock.unlock()
+                    perMessage.record((0..<count).map { out.contains("concurrent-\($0)-") })
                 }
             }
         }
         for _ in 0..<readers { start.signal() }
         group.wait()
 
-        let duplicated = perMessage.enumerated().filter { $0.element > 1 }.map(\.offset)
+        let duplicated = perMessage.counts.enumerated().filter { $0.element > 1 }.map(\.offset)
         XCTAssertEqual(
             duplicated, [],
             "\(duplicated.count) message(s) delivered more than once across concurrent readers"
         )
         XCTAssertEqual(
-            perMessage.filter { $0 == 0 }.count, 0,
+            perMessage.counts.filter { $0 == 0 }.count, 0,
             "some messages were never delivered at all"
         )
     }
