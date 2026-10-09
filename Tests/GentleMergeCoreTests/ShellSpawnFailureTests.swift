@@ -15,22 +15,29 @@ import Darwin
 /// `FileHandle` another thread is reading raises `NSFileHandleOperationException`
 /// on that thread, turning a bounded spike into a crash.
 final class ShellSpawnFailureTests: XCTestCase {
+    /// The task port, read once into a constant the concurrency checker has been
+    /// told not to police.
+    ///
+    /// `mach_task_self_` is a mutable C global. Newer SDKs mark it
+    /// `__swift_nonisolated_unsafe`; the Swift 6.0 toolchain the CI runs does not
+    /// carry that annotation through the older macOS SDK it imports, so it arrives
+    /// as plain shared mutable state and referencing it from an isolated context
+    /// is an error there. Reading it through a `nonisolated(unsafe)` constant and
+    /// a `nonisolated` reader is the escape hatch: this value never changes for
+    /// the life of the process, which is literally what `unsafe` asserts.
+    private nonisolated(unsafe) static let machTask = mach_task_self_
+
     /// Total live threads in this process.
     ///
     /// Not filtered by name: `task_threads` yields mach port names, which are
     /// not `pthread_t`s, so reading names back would need a conversion this test
     /// does not justify. A permanent leak of 60 failed spawns would be 120
     /// threads, which no amount of background noise can hide behind.
-    /// Read once into a `nonisolated(unsafe)` constant.
     ///
-    /// `mach_task_self_` is a mutable global, and Swift 6.0 (the CI toolchain)
-    /// rejects *referencing* it from a concurrency-checked context — which every
-    /// test method now is. Reading it into a plain `let` at the point of use is
-    /// not enough; it has to be read into a constant the checker has been told
-    /// not to police. This value never changes for the life of the process.
-    private nonisolated(unsafe) static let machTask = mach_task_self_
-
-    private func readerThreadCount() -> Int {
+    /// `nonisolated` because the value it reads is free function state, not
+    /// actor state: XCTest isolates test methods, and forcing the read through
+    /// that actor is what the CI toolchain refuses.
+    nonisolated private func readerThreadCount() -> Int {
         var list: thread_act_array_t?
         var count = mach_msg_type_number_t(0)
         let task = Self.machTask
