@@ -31,6 +31,20 @@ final class GlobTests: XCTestCase {
         XCTAssertTrue(Glob.matches("lib/", "lib/x"))
     }
 
+    /// A `.` segment in the middle means "this directory", exactly as at the
+    /// front. Keeping it made `src/./**` name a directory no repository has, so
+    /// the claim was accepted, reported as claimed, and matched nothing — a
+    /// protection that silently did not protect (audit 2026-10-08).
+    func testNormalizeStripsDotSegmentsAnywhere() {
+        XCTAssertTrue(Glob.matches("src/./**", "src/a.dart"))
+        XCTAssertTrue(Glob.matches("lib//store/**", "lib/store/a.dart"))
+        XCTAssertTrue(Glob.matches("./lib/./store/**", "lib/store/a.dart"))
+        // And the claim machinery agrees with `matches`: two spellings of the
+        // same pattern are one pattern, so claiming one renews the other rather
+        // than colliding with it.
+        XCTAssertTrue(Glob.mayOverlap("src/./**", "src/**"))
+    }
+
     func testQuestionMatchesExactlyOneCharacter() {
         XCTAssertTrue(Glob.matches("lib/?.dart", "lib/a.dart"))
         XCTAssertFalse(Glob.matches("lib/?.dart", "lib/ab.dart"))
@@ -260,11 +274,57 @@ final class PrecommitGateTests: XCTestCase {
         XCTAssertEqual(violations.count, 1, "history is not a decision")
     }
 
-    func testNoIdentityNeverBlocks() {
+    func testNoIdentityStillBlocksOnLiveClaims() {
+        let violations = PrecommitGate.evaluate(
+            staged: ["lib/store/a.swift"], me: nil,
+            claims: [claim("claude", "lib/**")], ownership: ownership
+        )
+        XCTAssertEqual(violations.count, 1, "the hook must reject invasions even without a label")
+        XCTAssertTrue(violations[0].reason.contains("claimed by claude"), "the holder is named")
+        XCTAssertTrue(violations[0].reason.contains("project init --label"), "the reason names the way out")
+        XCTAssertTrue(violations[0].blocking)
+    }
+
+    func testNoIdentityDoesNotBlockOnOwnershipZones() {
         XCTAssertTrue(PrecommitGate.evaluate(
             staged: ["assets/x.png"], me: nil,
-            claims: [claim("claude", "assets/**")], ownership: ownership
-        ).isEmpty, "enforcing claims against an unknown actor is a block we cannot justify")
+            claims: [], ownership: ownership
+        ).isEmpty, "zones need a label to tell the owner from the invader")
+    }
+
+    func testNoIdentityWithNoClaimsStillPasses() {
+        XCTAssertTrue(PrecommitGate.evaluate(
+            staged: ["lib/store/a.swift"], me: nil,
+            claims: [], ownership: ownership
+        ).isEmpty)
+    }
+
+    func testTwoInProgressRequestsAreJudgedAgainstTheirUnion() {
+        let first = AgentRequest(
+            id: "req-old", from: "you", fromVerified: true, to: "codex", projectPath: "/p",
+            title: "old", spec: "old", mayTouch: ["lib/old/**"],
+            state: .inProgress)
+        var second = AgentRequest(
+            id: "req-new", from: "you", fromVerified: true, to: "codex", projectPath: "/p",
+            title: "new", spec: "new", mayTouch: ["lib/new/**"],
+            state: .inProgress)
+        second.resolvedTo = "codex"
+        var old = first
+        old.resolvedTo = "codex"
+        // Path needed by the NEW request but outside the OLD request's scope:
+        // must pass when the union is enforced.
+        let violations = PrecommitGate.evaluate(
+            staged: ["lib/new/a.swift"], me: "codex",
+            claims: [], ownership: ownership, activeRequests: [old, second]
+        )
+        XCTAssertTrue(violations.isEmpty, "union of in-progress mayTouch must allow lib/new/a.swift: \(violations)")
+        // Path in NEITHER request's scope must still block, naming a request.
+        let blocked = PrecommitGate.evaluate(
+            staged: ["lib/other/a.swift"], me: "codex",
+            claims: [], ownership: ownership, activeRequests: [old, second]
+        )
+        XCTAssertEqual(blocked.count, 1)
+        XCTAssertTrue(blocked[0].reason.contains("req-"), "names the violated request: \(blocked[0].reason)")
     }
 
     func testMyOwnClaimDoesNotBlockMe() {

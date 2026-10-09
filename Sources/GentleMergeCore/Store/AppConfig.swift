@@ -169,11 +169,14 @@ public struct AppConfig: Codable, Sendable, Equatable {
         return config
     }
 
-    public func save(to url: URL) {
-        do {
-            try AtomicFile.write(try JSONCoding.encoder(pretty: true).encode(self), to: url)
-        } catch {
-            Log.error("could not save config: \(error.localizedDescription)")
-        }
+    /// Throws rather than logging.
+///
+/// A silent failure here is worse than a crash: `gentlemerge config set
+    /// claimsPolicy deny` printed `deny` and exited 0 on a read-only or full
+    /// home, having persisted nothing — so the user believed a setting had
+    /// changed when it had not (audit Tier 5 #31). Callers that genuinely want
+    /// the old behaviour can drop the result; the CLI must not.
+    public func save(to url: URL) throws {
+        try AtomicFile.write(try JSONCoding.encoder(pretty: true).encode(self), to: url)
     }
 }

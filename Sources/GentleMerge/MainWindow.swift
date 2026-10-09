@@ -154,6 +154,21 @@ private struct ProjectPane: View {
             }
             .padding(20)
         }
+        // The model writes `lastMessage` from ~30 places and nothing read it:
+        // add a task, deny a request, kick off a headless run and the window
+        // said nothing either way — including when the write had failed and the
+        // answer was the one thing worth seeing (audit 2026-10-08).
+        .safeAreaInset(edge: .bottom) {
+            if let message = model.lastMessage, !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
+                    .background(.bar)
+            }
+        }
         .navigationTitle(projectName)
         .toolbar {
             ToolbarItemGroup {
@@ -386,7 +401,13 @@ private struct ProjectPane: View {
                             Button("Ack") { updateRequest(request, action: "ack") }
                         }
                         if request.state == .assigned || request.state == .queued {
-                            Button("Reject") { updateRequest(request, action: "reject") }
+                            // The model's own path, not `RequestActions` with a
+                            // literal "you": a human is not the assignee, and
+                            // `transition` only lets the two parties to the
+                            // contract move it — this button was doomed to fail
+                            // with "you is not allowed to do that"
+                            // (audit 2026-10-08).
+                            Button("Reject") { model.deny(request.id); reload() }
                         }
                     }
                 }
@@ -395,6 +416,12 @@ private struct ProjectPane: View {
         }
     }
 
+    /// `ack` only: the one transition a human genuinely owns, because it is the
+    /// *requester* acknowledging a result (`Requests.transition` requires
+    /// `actor == from`, and the button is only shown when `from == "you"`).
+    /// Reject used to come through here with a literal `by: "you"` and could
+    /// never succeed — it now goes through `model.deny`, which acts as the
+    /// assignee on purpose (audit 2026-10-08).
     private func updateRequest(_ request: AgentRequest, action: String) {
         do {
             _ = try RequestActions.perform(action: action, id: request.id, by: "you", result: nil, paths: model.paths)

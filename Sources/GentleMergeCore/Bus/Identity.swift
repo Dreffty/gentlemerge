@@ -23,9 +23,17 @@ public struct Identity: Sendable, Equatable {
            !name.isEmpty {
             return Identity(label: safe(name), source: .presence)
         }
-        let project = ProjectRegistry.canonicalPath(for: cwd)
-        let live = Presence.marks(paths: paths).filter { !$0.isExpired && $0.projectPath == project }
-        if live.count == 1 { return Identity(label: safe(live[0].label), source: .presence) }
+        // There used to be a branch here that adopted the label of the single
+        // live presence mark in the project. It is gone, deliberately: a mark
+        // belongs to a session, not to the directory resolving identity, so
+        // "exactly one agent is alive here" is evidence about *that* agent and
+        // none at all about the one asking. The result was a brand-new agent
+        // becoming the agent already working — it claimed paths as `alice`,
+        // renewed `alice`'s claim instead of conflicting with it, overwrote
+        // `alice`'s presence mark with its own heartbeat (so `who` stopped
+        // listing the real one), and could never be addressed separately
+        // (audit 2026-10-08). With nothing to identify us we answer "you",
+        // which is not anybody's name and so cannot be mistaken for theirs.
         if provider != .unknown { return Identity(label: AgentBus.label(for: provider), source: .provider) }
         return Identity(label: "you", source: .human)
     }
@@ -34,9 +42,22 @@ public struct Identity: Sendable, Equatable {
     /// stripped, overlong names are cut, and a name with nothing left in it
     /// becomes "agent" — an empty label would otherwise file presence marks
     /// and messages under nobody at all.
+    ///
+    /// ASCII **explicitly**, never `CharacterSet.alphanumerics`: that is the
+    /// Unicode category (L*, M*), so `safe("c\u{2162}aude")` kept U+2162 (ROMAN
+    /// NUMERAL FIFTY) and produced a label that renders identically to `claude`
+    /// but fails every `to == "claude"` route and every claim comparison. A
+    /// homoglyph is an impersonation that survives the filter this function's
+    /// own docstring claims to implement (audit Tier 5 #22).
     public static func safe(_ value: String) -> String {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "#-_."))
-        let kept = String(String(value.unicodeScalars.filter { allowed.contains($0) }.map(Character.init)).prefix(24))
+        let isAllowed: (UInt8) -> Bool = { byte in
+            (byte >= 48 && byte <= 57)    // 0-9
+                || (byte >= 65 && byte <= 90)   // A-Z
+                || (byte >= 97 && byte <= 122)  // a-z
+                || byte == 35 || byte == 45 || byte == 95 || byte == 46 // # - _ .
+        }
+        let kept = String(String(decoding: value.utf8.filter(isAllowed).map { $0 }, as: UTF8.self)
+            .prefix(24))
         return kept.isEmpty ? "agent" : kept
     }
 

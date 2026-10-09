@@ -545,7 +545,14 @@ check "and main did not move on a dry run" \
 
 echo "a worktree's ports"
 ENV_A=$(cd "$WT_A" && "$BIN" env)
-check "the label travels" "$(printf '%s' "$ENV_A" | grep -c 'GENTLEMERGE_LABEL=a')" "1"
+# The label is quoted on purpose: `env.sh` is `source`d, so an unquoted label
+# that happens to be shell code would execute (audit 2026-10-07). Leading
+# whitespace is stripped, which the `sed` below does, because the check is
+# "exactly this line", not "a line containing this".
+check "the label travels" \
+    "$(printf '%s\n' "$ENV_A" | grep -c "^export GENTLEMERGE_LABEL='a'$")" "1"
+check "the label is not interpolated bare" \
+    "$(printf '%s\n' "$ENV_A" | grep -c "^export GENTLEMERGE_LABEL=[^']")" "0"
 check "same label, stable ports" "$ENV_A" "$(cd "$WT_A" && "$BIN" env)"
 (cd "$WT_A" && "$BIN" env --write > /dev/null)
 check "env.sh lands in the worktree" "$([ -f "$WT_A/.gentlemerge/env.sh" ] && echo yes || echo no)" "yes"

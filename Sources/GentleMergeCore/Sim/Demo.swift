@@ -12,7 +12,7 @@ public enum Demo {
     /// worktrees share the real bus; no UI, real agents, or user config edits.
     @MainActor
     @discardableResult
-    public static func run(keep: Bool, paths: Paths, binary: URL = URL(fileURLWithPath: CommandLine.arguments[0]),
+    public static func run(keep: Bool, paths: Paths, binary: URL = CurrentExecutable.url,
                            log: @Sendable (String) -> Void) throws -> URL {
         let root = temporaryRoot()
         return try run(in: root, keep: keep, paths: paths, binary: binary, log: log)

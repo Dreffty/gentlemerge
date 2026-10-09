@@ -30,8 +30,24 @@ public enum HookScript {
 
     while [ $# -gt 0 ]; do
       case "$1" in
-        --provider) PROVIDER="${2:-unknown}"; shift 2 ;;
-        --mode) MODE="${2:-notify}"; shift 2 ;;
+        --provider)
+          # A value-taking flag with nothing after it must still make progress.
+          # `shift 2` fails when only one argument remains and, without `set -e`,
+          # $# never decreases: `gentlemerge-hook.sh --provider` spun forever,
+          # holding the agent's hook slot (audit Tier 5 #24).
+          if [ $# -ge 2 ]; then
+            PROVIDER="$2"; shift 2
+          else
+            PROVIDER="${2:-unknown}"; shift
+          fi
+          ;;
+        --mode)
+          if [ $# -ge 2 ]; then
+            MODE="$2"; shift 2
+          else
+            MODE="${2:-notify}"; shift
+          fi
+          ;;
         *) shift ;;
       esac
     done
@@ -100,6 +116,16 @@ public enum HookScript {
     else
       SOCKET_JSON=""
     fi
+    # The resolved label travels in the envelope: the reader attributes the
+    # implicit path claim to the worktree's label, not the provider default.
+    # Without it two worktrees (hermes, codex) on one provider both claim as
+    # "claude" and rule 1 never fires between them. After esc(): the shell
+    # reads top to bottom, and calling it earlier mangles the envelope.
+    if [ -n "${GENTLEMERGE_LABEL:-}" ]; then
+      LABEL_JSON=",\"label\":\"$(esc "$GENTLEMERGE_LABEL")\""
+    else
+      LABEL_JSON=""
+    fi
 
     # --- envelope -------------------------------------------------------------
     TMP="$SPOOL/.tmp-$ID"
@@ -115,6 +141,7 @@ public enum HookScript {
       printf ',"term_program":"%s"' "$(esc "${TERM_PROGRAM:-}")"
       printf ',"term_session_id":"%s"' "$(esc "${TERM_SESSION_ID:-}")"
       printf '%s' "$SOCKET_JSON"
+      printf '%s' "$LABEL_JSON"
       printf ',"payload":'
       cat "$PAYLOAD_FILE"
       printf '}'

@@ -232,13 +232,19 @@ public struct HookInstaller: Sendable {
         original: String,
         scriptPath: String
     ) -> (contents: String, previous: [String]) {
-        let replacement = "notify = [\"\(scriptPath)\"]"
+        let replacement = "notify = [\"\(Self.tomlBasicString(scriptPath))\"]"
         var previous: [String] = []
         var lines = original.components(separatedBy: "\n")
         var replaced = false
 
         for (index, line) in lines.enumerated() {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Anything after a `[table]` header belongs to that table, so only a
+            // top-level `notify` may be replaced. The insert path below already
+            // knew this; the replace path did not, so a config whose only
+            // `notify` lived under some `[table]` had that line overwritten and
+            // its top-level key silently never written (audit Tier 3 #13).
+            if trimmed.hasPrefix("[") { break }
             guard trimmed.hasPrefix("notify") else { continue }
             guard let equals = trimmed.firstIndex(of: "="),
                   trimmed[trimmed.startIndex..<equals].trimmingCharacters(in: .whitespaces) == "notify"
@@ -259,7 +265,29 @@ public struct HookInstaller: Sendable {
         return (lines.joined(separator: "\n"), previous)
     }
 
-    func parseTOMLStringArray(_ text: String) -> [String] {
+    /// Escape a path for a TOML *basic* string.
+///
+/// `"` and `\` are the only two that must change, and the backslash first — a
+/// home directory containing either produced a `config.toml` Codex could not
+/// parse, so the notify bridge silently stopped being installed (audit Tier 3
+/// #13).
+static func tomlBasicString(_ value: String) -> String {
+    value
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"")
+}
+
+/// Escape a path for a POSIX shell.
+///
+/// The old version only handled spaces, so a home containing `"`, `` ` ``, `$`
+/// or `\` was interpolated raw into the hook `command` string in
+/// `~/.claude/settings.json` and the Codex notify script (audit Tier 3 #13).
+/// Single quotes are literal in sh; the only escape inside them is `'\''`.
+static func shellQuoted(_ path: String) -> String {
+    "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
+}
+
+func parseTOMLStringArray(_ text: String) -> [String] {
         var values: [String] = []
         var current = ""
         var inString = false
@@ -399,8 +427,13 @@ public struct HookInstaller: Sendable {
         return destination
     }
 
+    /// Always single-quoted, not "quoted only if it has a space".
+    ///
+    /// This value lands in a shell command string in `~/.claude/settings.json`,
+    /// so a path containing `"`, `` ` ``, `$` or `\` has to be escaped too —
+    /// the space-only version emitted all of those raw (audit Tier 3 #13).
     private func quoted(_ path: String) -> String {
-        path.contains(" ") ? "\"\(path)\"" : path
+        HookInstaller.shellQuoted(path)
     }
 }
 

@@ -40,6 +40,15 @@ public struct GitHookInstaller: Sendable {
         return link == standard ? "$HOME/.gentlemerge/bin/gentlemerge" : link
     }
 
+    /// Single-quote a value for a POSIX shell — the shared primitive.
+    ///
+    /// The gate path is interpolated into `${GENTLEMERGE_BIN:-...}`, and `word`
+    /// in that expansion is subject to command substitution and arithmetic — so a
+    /// home directory containing `$(...)` executed it on *every commit*, and one
+    /// containing `"` produced a hook that was a syntax error (audit 2026-10-07).
+    /// Assigning it through single quotes first removes the expansion entirely.
+    static func shellQuoted(_ value: String) -> String { Shell.quoted(value) }
+
     public static func script(gateDefault: String = "$HOME/.gentlemerge/bin/gentlemerge") -> String {
         """
         #!/bin/sh
@@ -47,7 +56,8 @@ public struct GitHookInstaller: Sendable {
         # Enforces PathClaims / Ownership / request.mayTouch on staged files. Deterministic, zero tokens.
         # Escape hatch for humans: GENTLEMERGE_SKIP=1 git commit ...
         # (handled inside the binary so the skip is published on the bus, never silent)
-        AI="${GENTLEMERGE_BIN:-\(gateDefault)}"
+        AI_DEFAULT=\(shellQuoted(gateDefault))
+        AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
         if [ -x "$AI" ]; then
           "$AI" precommit --enforce --staged --project "$(git rev-parse --show-toplevel)" || exit 1
         else
@@ -67,7 +77,8 @@ public struct GitHookInstaller: Sendable {
     # Releases my claims on what just landed. Never blocks, never fails: git
     # ignores a post-commit exit code, and this exits 0 regardless.
     [ -n "$GENTLEMERGE_SKIP" ] && exit 0
-    AI="${GENTLEMERGE_BIN:-\(gateDefault)}"
+    AI_DEFAULT=\(shellQuoted(gateDefault))
+    AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
     if [ -x "$AI" ]; then
       "$AI" postcommit --project "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true
     else
@@ -136,9 +147,15 @@ public struct GitHookInstaller: Sendable {
         let custom = configured.hasPrefix("/")
             ? URL(fileURLWithPath: configured)
             : toplevel.appendingPathComponent(configured)
-        let customPath = custom.standardizedFileURL.path
-        if customPath == classic.standardizedFileURL.path { return (classic, nil) }
-        let topPath = toplevel.standardizedFileURL.path
+        // Symlinks resolved, not just `.`/`..`: `standardizedFileURL` collapses
+        // the lexical form and leaves a link alone, so `core.hooksPath=.link`
+        // pointing at `/tmp/shared` compared as inside the repo while git ran
+        // our gate from a directory every repository on the machine shares —
+        // exactly what this error exists to prevent (audit 2026-10-08).
+        let customPath = custom.resolvingSymlinksInPath().standardizedFileURL.path
+        let classicPath = classic.resolvingSymlinksInPath().standardizedFileURL.path
+        if customPath == classicPath { return (classic, nil) }
+        let topPath = toplevel.resolvingSymlinksInPath().standardizedFileURL.path
         guard customPath == topPath || customPath.hasPrefix(topPath + "/") else {
             throw InstallError.hooksPathOutsideRepo(path: customPath, configured: configured)
         }
@@ -202,7 +219,23 @@ public struct GitHookInstaller: Sendable {
     private func placeHook(name: String, script: String, marker: String, in directory: URL) throws -> Bool {
         let hook = directory.appendingPathComponent(name)
         if let existing = try? String(contentsOf: hook) {
-            if existing.contains(marker) { return false }
+            // Identity is the *whole body*, not just the marker. The marker is a
+            // compile-time constant while the body varies per install — it bakes
+            // in the resolved gate path — so an install that found the marker
+            // reported "already installed" and left the hook pointing at the
+            // previous home. `ensureBinaryLink` re-links the binary in the *new*
+            // home, so the hook could not find it: every commit then printed
+            // "gate binary not found … this commit is NOT checked" and passed
+            // unchecked (audit Tier 5 #38).
+            if existing.contains(marker) {
+                if existing == script { return false }
+                // Ours, but stale. Rewrite in place — never chain ourselves — and
+                // report it as a change, so "already installed" means the body on
+                // disk is byte-identical to what we would write.
+                try AtomicFile.write(Data(script.utf8), to: hook)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)
+                return true
+            }
             if Self.legacyMarkers.contains(where: existing.contains) {
                 try? FileManager.default.removeItem(at: hook)
             }
@@ -211,7 +244,15 @@ public struct GitHookInstaller: Sendable {
         if FileManager.default.fileExists(atPath: hook.path) {
             // Keep the foreign hook and chain it; never destroy someone else's
             // tooling — a hook we moved over would be husky silently disabled.
-            try FileManager.default.moveItem(at: hook, to: hook.appendingPathExtension("gentlemerge-prev"))
+            // A stale `*.gentlemerge-prev` from an earlier chain must go first:
+            // `moveItem` refuses to overwrite, so the throw used to escape the
+            // install loop and leave *nothing* installed, with a message naming
+            // the collision instead of the cause (audit Tier 5 #39).
+            let previous = hook.appendingPathExtension("gentlemerge-prev")
+            if FileManager.default.fileExists(atPath: previous.path) {
+                try? FileManager.default.removeItem(at: previous)
+            }
+            try FileManager.default.moveItem(at: hook, to: previous)
         }
         try AtomicFile.write(Data(script.utf8), to: hook)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hook.path)

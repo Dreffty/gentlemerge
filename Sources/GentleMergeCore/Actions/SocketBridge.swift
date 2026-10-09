@@ -45,7 +45,35 @@ public struct SocketBridge: Sendable {
         withUnsafeMutablePointer(to: &addr.sun_path) { p in socketPath.withCString { _ = strcpy(UnsafeMutableRawPointer(p).assumingMemoryBound(to: CChar.self), $0) } }
         let len = socklen_t(MemoryLayout<sockaddr_un>.size)
         guard withUnsafePointer(to: &addr, { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, len) } }) == 0 else { throw Failure.connect(errno) }
-        guard line.withCString({ write(fd, $0, strlen($0)) }) > 0 else { throw Failure.write }
+        // Loop the write and neutralise SIGPIPE, like every other raw-write site in
+        // this codebase (`AgentBus` around :725, `JSONCoding` around :126).
+        // `write` to a socket is allowed to be short, and the old single call
+        // reported a partial write as success. A peer that closed between
+        // `connect` and `write` raises SIGPIPE, whose default disposition on
+        // Darwin is to terminate the process — and this is called from the
+        // MainActor, inside the menu-bar app (audit Tier 5 #28).
+        //
+        // Unreachable today: `wireLine` always throws `.unknownWireFormat`, so
+        // `NudgeGate` falls back to the tty. It is fixed because this is the
+        // code the IMPLEMENTER note above is waiting for someone to complete,
+        // and it should not be landmines on arrival.
+        var bytesWritten = 0
+        let total = line.utf8.count
+        try line.withCString { pointer in
+            while bytesWritten < total {
+                #if canImport(Darwin)
+                let sent = Darwin.write(fd, pointer + bytesWritten, total - bytesWritten)
+                #elseif canImport(Glibc)
+                let sent = Glibc.write(fd, pointer + bytesWritten, total - bytesWritten)
+                #endif
+                if sent < 0 {
+                    // EPIPE means the peer went away; there is nothing to retry.
+                    guard errno == EINTR else { throw Failure.write }
+                    continue
+                }
+                bytesWritten += sent
+            }
+        }
     }
 
     /// One greppable word per failure, for the ledger.

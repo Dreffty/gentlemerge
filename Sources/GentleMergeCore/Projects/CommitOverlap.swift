@@ -207,6 +207,40 @@ public enum PrecommitCheck {
         return paths
     }
 
+    /// `git diff --cached --name-status -z`: every staged path, and for a
+    /// rename or copy **both** names.
+    ///
+    /// `-z` because it is the only form that never quotes a path: with
+    /// `--name-only` a name holding a non-ASCII byte comes back C-escaped, and
+    /// an escaped string matches no zone pattern. Both names because
+    /// `--name-only` reports only the destination of a rename, which hides the
+    /// file being taken *out of* somebody else's claim.
+    static func parseStagedNameStatus(_ raw: String) -> [String] {
+        let fields = raw.components(separatedBy: "\0").filter { !$0.isEmpty }
+        var paths: [String] = []
+        var index = 0
+
+        while index < fields.count {
+            let status = fields[index]
+            index += 1
+            // "R100\0old\0new" — status then two names; everything else is
+            // status then one.
+            guard !status.isEmpty else { continue }
+            let bothNames = status.hasPrefix("R") || status.hasPrefix("C")
+            let wanted = bothNames ? 2 : 1
+            guard index + wanted <= fields.count else { break }
+            if bothNames {
+                paths.append(fields[index])       // the name we are giving up
+                paths.append(fields[index + 1])   // the name we are taking
+            } else {
+                paths.append(fields[index])
+            }
+            index += wanted
+        }
+
+        return paths
+    }
+
     /// `origin/main`, or nil when the branch tracks nothing — which is the
     /// normal state of a local feature branch and not worth a warning.
     static func upstreamName(in projectPath: String) -> String? {

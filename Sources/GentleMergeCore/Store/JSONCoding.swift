@@ -94,15 +94,40 @@ public enum LockedFile {
 }
 
 public enum AtomicFile {
-    /// Write via a sibling temp file + rename, so a reader (or a shell script in
-    /// a polling loop) never sees half a file.
+    public struct Error: Swift.Error, CustomStringConvertible {
+        public let path: String
+        public let code: Int32
+        public var description: String {
+            "could not write \(path): \(String(cString: strerror(code)))"
+        }
+    }
+
+    /// Write via a sibling temp file + `rename(2)`, so a reader (or a shell
+    /// script in a polling loop) never sees half a file — and never sees *no*
+    /// file.
+    ///
+    /// `rename(2)` is the whole trick, and it is not interchangeable with
+    /// `FileManager.moveItem`. `rename` replaces an existing destination
+    /// atomically when both names live on one filesystem, which a sibling temp
+    /// file guarantees. `moveItem` refuses to overwrite, so the obvious
+    /// implementation is `removeItem` + `moveItem` — and that reintroduces the
+    /// hole the temp file exists to close: between the remove and the move the
+    /// destination does not exist. Measured against the pre-commit gate, that
+    /// window let 54% of evaluations of a *blocked* commit pass (audit
+    /// 2026-10-07). The second writer in that race also lost: `moveItem` threw
+    /// "file exists", destroying the previous content and leaking its temp file
+    /// (4125 orphans in 3s on the cursor).
     public static func write(_ data: Data, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let temporary = directory.appendingPathComponent(".tmp-\(UUID().uuidString)")
         try data.write(to: temporary)
-        _ = try? FileManager.default.removeItem(at: url)
-        try FileManager.default.moveItem(at: temporary, to: url)
+        guard rename(temporary.path, url.path) == 0 else {
+            // Never leave the temp behind: there is no sweeper for these.
+            let code = errno
+            _ = try? FileManager.default.removeItem(at: temporary)
+            throw Error(path: url.path, code: code)
+        }
     }
 
     /// Add one line to a file several processes may be adding lines to at the

@@ -95,7 +95,7 @@ final class MCPServerTests: XCTestCase {
         let claim = try XCTUnwrap(tools.first { $0["name"]?.stringValue == "claim" })
         XCTAssertEqual(claim["inputSchema"]?["properties"]?["paths"]?["type"]?.stringValue, "array")
         XCTAssertEqual(claim["inputSchema"]?["required"]?.arrayValue, [.string("paths")])
-        for (name, args) in [("say", ["text": JSONValue.string("hello")]),
+        for (name, args) in [("say", ["to": JSONValue.string("b")]),
                              ("claim", ["paths": .array([.number(7)])]),
                              ("delegate", ["to": .string("a"), "title": .string("t"), "spec": .string("s"), "budget_minutes": .number(1e100)]),
                              ("release", ["paths": .string("assets/**")])] {
@@ -105,8 +105,62 @@ final class MCPServerTests: XCTestCase {
         XCTAssertTrue(Requests(paths: paths).mine(from: "a", project: project.path).isEmpty)
     }
     func testUnknownMethodAndTool() throws {
-        XCTAssertEqual(try call("missing")["error"]?["code"]?.intValue, -32601)
+        // -32601 is "unknown JSON-RPC *method*". An unrecognised tool name is
+        // invalid params, and MCP says so; the old code answered -32601 for both,
+        // so a client could not tell "bad method" from "bad tool"
+        // (audit Tier 5 #27).
         XCTAssertEqual(try rpc("missing")["error"]?["code"]?.intValue, -32601)
+        XCTAssertEqual(try call("missing")["error"]?["code"]?.intValue, -32602)
+    }
+
+    /// JSON-RPC §5: unparseable input is an error, not silence. Returning nil
+    /// left a client that emitted one malformed line waiting forever for a
+    /// response that would never come.
+    func testMalformedInputGetsAParseErrorRatherThanNoReply() throws {
+        let server = MCPServer(paths: paths, cwd: project.path, identity: "a")
+        for malformed in ["{not json", "", "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}]"] {
+            let reply = server.handle(line: malformed)
+            let parsed = try JSONCoding.decoder().decode(JSONValue.self, from: Data((reply ?? "").utf8))
+            XCTAssertEqual(
+                parsed["error"]?["code"]?.intValue, -32700,
+                "expected a parse error for \(malformed.debugDescription), got \(reply ?? "nil")"
+            )
+            XCTAssertEqual(parsed["jsonrpc"]?.stringValue, "2.0")
+        }
+    }
+
+    /// A notification has no id and gets no reply — that must survive the
+    /// parse-error change above.
+    func testANotificationStillGetsNoReply() throws {
+        let server = MCPServer(paths: paths, cwd: project.path, identity: "a")
+        XCTAssertNil(server.handle(line: #"{"jsonrpc":"2.0","method":"ping"}"#))
+    }
+
+    /// #32 — `task_add` answered "added" for text the redactor had refused, so
+    /// the agent believed the task was on the board and never retried or said
+    /// anything.
+    func testTaskAddSaysSoWhenItRefusedTheText() throws {
+        let secret = "rotate key sk-ant-api03-" + String(repeating: "a", count: 40)
+        let reply = try call("task_add", ["text": .string(secret)])
+
+        XCTAssertEqual(reply["result"]?["isError"]?.boolValue, true, "a refusal must be an error, not a success")
+        let said = try XCTUnwrap(text(reply).lowercased())
+        XCTAssertTrue(said.contains("not added"), "the reply must say it did not add it: \(said)")
+        XCTAssertFalse(
+            ProjectRegistry.handoff(for: project.path, refreshingCommits: false).tasks
+                .contains { $0.text.contains("sk-ant") },
+            "and nothing may be written"
+        )
+    }
+
+    /// And a genuine add still says "added".
+    func testTaskAddStillConfirmsARealAdd() throws {
+        let reply = try call("task_add", ["text": .string("write the migration note")])
+        XCTAssertEqual(text(reply), "added")
+        XCTAssertTrue(
+            ProjectRegistry.handoff(for: project.path, refreshingCommits: false).tasks
+                .contains { $0.text == "write the migration note" }
+        )
     }
 
     /// The CLI's `watch` without a terminal: add by session and by task, list,
@@ -190,5 +244,52 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(response["result"]?["protocolVersion"]?.stringValue, "2024-11-05")
         XCTAssertNotNil(try rpc("ping")["result"]?.objectValue)
         XCTAssertNil(server.handle(line: #"{"jsonrpc":"2.0","method":"notifications/initialized"}"#))
+    }
+
+    /// FASE 1 — `say` broadcast contract: `to` optional, `text` required.
+    func testSayBroadcastContract() throws {
+        let tools = try XCTUnwrap(rpc("tools/list")["result"]?["tools"]?.arrayValue)
+        let say = try XCTUnwrap(tools.first { $0["name"]?.stringValue == "say" })
+        // 1. `tools/list` declares `text` as required.
+        let required = say["inputSchema"]?["required"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        XCTAssertTrue(required.contains("text"), "say must require text, got \(required)")
+        // 2. `tools/list` does not declare `to` as required.
+        XCTAssertFalse(required.contains("to"), "say must not require to, got \(required)")
+        // `to` stays documented as an accepted field.
+        XCTAssertNotNil(say["inputSchema"]?["properties"]?["to"], "to must stay in fields")
+        XCTAssertNotNil(say["inputSchema"]?["properties"]?["text"], "text must stay in fields")
+
+        // 3. MCP call to `say` without `to` is accepted.
+        let broadcast = try call("say", ["text": .string("hello everyone")])
+        XCTAssertNil(broadcast["error"]?.objectValue, "broadcast say must not error: \(broadcast)")
+        XCTAssertEqual(text(broadcast), "sent")
+
+        // 4. Stored message has `to == nil`.
+        let stored = try XCTUnwrap(AgentBus(paths: paths).messages().last)
+        XCTAssertEqual(stored.text, "hello everyone")
+        XCTAssertNil(stored.to, "broadcast must store to == nil")
+
+        // 5. Directed say still reaches only its addressee.
+        let directed = try call("say", ["to": .string("codex"), "text": .string("only for codex")])
+        XCTAssertEqual(text(directed), "sent")
+        let bus = AgentBus(paths: paths)
+        let forCodex = try XCTUnwrap(bus.briefing(sessionID: "codex-1", me: "codex", project: nil))
+        XCTAssertTrue(forCodex.contains("only for codex"), forCodex)
+        // hermes still has the earlier broadcast pending, but must never see
+        // the note addressed to codex.
+        let forHermes = try XCTUnwrap(
+            bus.briefing(sessionID: "hermes-1", me: "hermes", project: nil),
+            "hermes should still see the earlier broadcast"
+        )
+        XCTAssertTrue(forHermes.contains("hello everyone"), forHermes)
+        XCTAssertFalse(forHermes.contains("only for codex"), "a note to codex must not leak to hermes: \(forHermes)")
+
+        // 6. Secrets are still filtered on the broadcast path.
+        let secret = "sk-abcdef1234567890"
+        let withSecret = try call("say", ["text": .string("please rotate \(secret) when you can, thanks team")])
+        XCTAssertEqual(text(withSecret), "sent")
+        let scrubbed = try XCTUnwrap(AgentBus(paths: paths).messages().last)
+        XCTAssertFalse(scrubbed.text.contains(secret), "secret must not be stored verbatim: \(scrubbed.text)")
+        XCTAssertTrue(scrubbed.text.contains("[redacted"), "secret must leave a redaction marker: \(scrubbed.text)")
     }
 }

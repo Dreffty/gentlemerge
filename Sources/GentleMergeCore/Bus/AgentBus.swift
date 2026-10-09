@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// What one agent session is doing right now.
 public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
@@ -207,6 +212,12 @@ public struct AgentMessage: Codable, Sendable, Identifiable, Equatable {
     public var verified: Bool?
     /// The request this message announces or answers, when any.
     public var requestID: String?
+    /// Monotonic delivery order. Nil is every message written before sequences
+    /// existed; those keep decoding and are ordered by time. New posts always
+    /// carry the next number, assigned under the messages lock, so two writers
+    /// never share one and a reader can page FIFO without losing mail to a
+    /// character or message cap.
+    public var sequence: UInt64?
 
     public init(
         id: String = UUID().uuidString,
@@ -222,7 +233,8 @@ public struct AgentMessage: Codable, Sendable, Identifiable, Equatable {
         replacesID: String? = nil,
         toBranch: String? = nil,
         verified: Bool? = nil,
-        requestID: String? = nil
+        requestID: String? = nil,
+        sequence: UInt64? = nil
     ) {
         self.id = id
         self.at = at
@@ -238,11 +250,12 @@ public struct AgentMessage: Codable, Sendable, Identifiable, Equatable {
         self.toBranch = toBranch
         self.verified = verified
         self.requestID = requestID
+        self.sequence = sequence
     }
 
     enum CodingKeys: String, CodingKey {
         case id, at, from, to, projectPath, text, kind, refID, nudge, attachments
-        case replacesID, toBranch, verified, requestID, v
+        case replacesID, toBranch, verified, requestID, v, sequence
     }
 
     /// Written by hand for two reasons: a `kind` this binary does not know about
@@ -271,6 +284,7 @@ public struct AgentMessage: Codable, Sendable, Identifiable, Equatable {
         verified = (try? container.decodeIfPresent(Bool.self, forKey: .verified)).flatMap { $0 } ?? false
         requestID = try? container.decodeIfPresent(String.self, forKey: .requestID)
         v = (try? container.decodeIfPresent(Int.self, forKey: .v)) ?? 1
+        sequence = try? container.decodeIfPresent(UInt64.self, forKey: .sequence)
     }
 
     // MARK: - Saying which note you mean
@@ -356,14 +370,23 @@ public struct AgentBus: Sendable {
     // MARK: - Activity
 
     public func activities() -> [AgentActivity] {
-        let stored: [AgentActivity]
+        storedActivities() + livePresenceExcludingStoredIDs(from: storedActivities())
+    }
+
+    /// The app-owned rows only — what `save` may persist. `activities()` merges
+    /// presence at read time; writing the merged list back would freeze presence
+    /// into the file (stale task/pid served for up to 6h, phantom `.sessionEnd`
+    /// watches from `sweepDeadSessions`, presence evicting real sessions at the
+    /// 40-row cap).
+    public func storedActivities() -> [AgentActivity] {
         if let data = try? Data(contentsOf: paths.activities),
            let decoded = try? JSONCoding.decoder().decode([AgentActivity].self, from: data) {
-            stored = decoded
-        } else {
-            stored = []
+            return decoded
         }
+        return []
+    }
 
+    private func livePresenceExcludingStoredIDs(from stored: [AgentActivity]) -> [AgentActivity] {
         // The agents' own marks, merged in here so that every reader — `who`,
         // the peer list, the briefing — gets them without knowing they exist.
         //
@@ -373,7 +396,7 @@ public struct AgentBus: Sendable {
         // was the whole failure: `who` said nobody was working while five
         // sessions were mid-turn.
         let known = Set(stored.filter(\.isLive).map(\.id))
-        return stored + Presence.live(paths: paths).filter { !known.contains($0.id) }
+        return Presence.live(paths: paths).filter { !known.contains($0.id) }
     }
 
     public func save(_ activities: [AgentActivity]) {
@@ -429,11 +452,36 @@ public struct AgentBus: Sendable {
     /// One read of the activity file for both halves: this runs inside a hook,
     /// on every turn, and the two numbers have to come from the same snapshot
     /// or the count could disagree with the list it is appended to.
-    func peers(excluding sessionID: String?, project: String?) -> (here: [AgentActivity], elsewhere: Int) {
-        let live = others(excluding: sessionID)
+    ///
+    /// `me` is the reader's own label, and it removes the reader's own presence
+    /// mark from the list. `others(excluding:)` filters by *session id*, and a
+    /// reader's id is `reader-<label>` (CLI `brief --as`), `mcp-<label>-<uuid>`
+    /// (MCP) or the agent's own session id (hook) — none of which is ever equal
+    /// to the presence mark's `presence:<label>@<project>#<branch>`, so every
+    /// agent was told about itself under "Other agents you have running right
+    /// now": one phantom peer, a wrong headcount, and tokens spent on it every
+    /// turn (audit 2026-10-08). `who` passes no label and is unaffected — it is
+    /// you asking, and it should list everything.
+    func peers(excluding sessionID: String?, project: String?, me: String? = nil)
+        -> (here: [AgentActivity], elsewhere: Int)
+    {
+        let live = others(excluding: sessionID).filter { !Self.isOwnPresenceMark($0, me: me) }
         guard let project else { return (live, 0) }
         let here = live.filter { $0.projectPath == project }
         return (here, live.count - here.count)
+    }
+
+    /// Whether an activity is *this reader's own* presence mark.
+    ///
+    /// A presence row's id is `presence:<label>@<project>#<branch>`; the label
+    /// is the actor another agent addresses. Matched exactly, so an executor
+    /// (`claude#exec1`) still hears about its director (`claude`) — they are
+    /// two processes and two marks, and one is legitimately the other's news.
+    static func isOwnPresenceMark(_ activity: AgentActivity, me: String?) -> Bool {
+        guard let me, !me.isEmpty, activity.id.hasPrefix("presence:") else { return false }
+        let rest = activity.id.dropFirst("presence:".count)
+        guard let at = rest.firstIndex(of: "@") else { return false }
+        return String(rest[..<at]) == me
     }
 
     /// The single line a whole other project's worth of agents is allowed to
@@ -490,90 +538,141 @@ public struct AgentBus: Sendable {
         let combined = Redactor.scrub(title + "\n" + spec)
         guard !combined.isSuppressed else { throw RequestError.suppressed }
 
-        let requests = Requests(paths: paths)
-        var request = AgentRequest(
-            id: requests.freshID(),
-            from: from,
-            fromVerified: fromVerified,
-            to: to,
-            projectPath: projectPath,
-            title: Redactor.scrub(title).text,
-            spec: Redactor.scrub(spec).text,
-            inputs: inputs.map { Redactor.scrub($0).text },
-            expectedOutput: expectedOutput.map { Redactor.scrub($0).text },
-            mayTouch: mayTouch,
-            budgetMinutes: budgetMinutes
-        )
+        // Fair capability routing under one lock: selection + reservation atomically,
+        // so two simultaneous delegates never take the same free agent while another
+        // sits idle. The lock anchor is never written itself; only its sidecar matters.
+        let anchor = paths.requests.appendingPathComponent("delegate")
+        return try LockedFile.withExclusiveLock(anchor) {
+            let requests = Requests(paths: paths)
+            var request = AgentRequest(
+                id: requests.freshID(),
+                from: from,
+                fromVerified: fromVerified,
+                to: to,
+                projectPath: projectPath,
+                title: Redactor.scrub(title).text,
+                spec: Redactor.scrub(spec).text,
+                inputs: inputs.map { Redactor.scrub($0).text },
+                expectedOutput: expectedOutput.map { Redactor.scrub($0).text },
+                mayTouch: mayTouch,
+                budgetMinutes: budgetMinutes
+            )
 
-        if to.hasPrefix("capability:") {
-            let capability = String(to.dropFirst("capability:".count))
-            guard let target = Presence.labels(withCapability: capability, project: projectPath, paths: paths).first else {
-                throw RequestError.noCapableAgent(capability)
+            if to.hasPrefix("capability:") {
+                let capability = String(to.dropFirst("capability:".count))
+                // Nobody advertises it vs everybody is busy: different errors.
+                if Presence.labels(withCapability: capability, project: projectPath, paths: paths).isEmpty {
+                    throw RequestError.noCapableAgent(capability)
+                }
+                guard let target = Self.fairTarget(
+                    capability: capability, project: projectPath, paths: paths)
+                else {
+                    throw RequestError.noCapacity(capability)
+                }
+                request.resolvedTo = target
+            } else {
+                request.resolvedTo = to
             }
-            request.resolvedTo = target
-        } else {
-            request.resolvedTo = to
-        }
-        request.state = .assigned
-        let target = request.resolvedTo ?? to
+            request.state = .assigned
+            let target = request.resolvedTo ?? to
 
-        do {
-            for pattern in mayTouch {
-                _ = try PathClaims(paths: paths).claim(
-                    pattern: pattern,
+            do {
+                for pattern in mayTouch {
+                    _ = try PathClaims(paths: paths).claim(
+                        pattern: pattern,
+                        label: target,
+                        project: projectPath,
+                        intent: "request \(request.id)",
+                        ttl: Double(max(budgetMinutes, 1)) * 60,
+                        implicit: false,
+                        requestID: request.id
+                    )
+                }
+
+                let taskTitle = Redactor.scrub("[\(request.id)] \(request.title)").text
+                let handoff = ProjectRegistry.addTask(taskTitle, to: projectPath, by: from, paths: paths)
+                request.taskID = handoff.tasks.first { $0.text == taskTitle }?.id
+
+                if let taskID = request.taskID {
+                    let watch = WatchRule(
+                        owner: from,
+                        projectPath: projectPath,
+                        kind: .taskDone,
+                        target: taskID,
+                        note: "request \(request.id) finished"
+                    )
+                    try Watches(paths: paths).add(watch)
+                    request.watchID = watch.id
+                }
+
+                try requests.save(request)
+                try say(
+                    from: from,
+                    to: target,
+                    text: request.busSummary + "\nRun `gentlemerge request show \(request.id)` for the spec.",
+                    projectPath: projectPath,
+                    nudge: false,
+                    kind: .request,
+                    requestID: request.id,
+                    verified: fromVerified
+                )
+                Ledger(url: paths.ledger).append(LedgerEntry(
+                    at: Date(),
+                    kind: .note,
+                    project: projectPath,
+                    title: "request.created",
+                    summary: "\(request.id): \(from) -> \(target), verified \(fromVerified)"
+                ))
+                return request
+            } catch {
+                try? PathClaims(paths: paths).release(
                     label: target,
                     project: projectPath,
-                    intent: "request \(request.id)",
-                    ttl: Double(max(budgetMinutes, 1)) * 60,
-                    implicit: false,
+                    patterns: mayTouch,
                     requestID: request.id
                 )
+                throw error
             }
-
-            let taskTitle = Redactor.scrub("[\(request.id)] \(request.title)").text
-            let handoff = ProjectRegistry.addTask(taskTitle, to: projectPath, by: from)
-            request.taskID = handoff.tasks.first { $0.text == taskTitle }?.id
-
-            if let taskID = request.taskID {
-                let watch = WatchRule(
-                    owner: from,
-                    projectPath: projectPath,
-                    kind: .taskDone,
-                    target: taskID,
-                    note: "request \(request.id) finished"
-                )
-                try Watches(paths: paths).add(watch)
-                request.watchID = watch.id
-            }
-
-            try requests.save(request)
-            try say(
-                from: from,
-                to: target,
-                text: request.busSummary + "\nRun `gentlemerge request show \(request.id)` for the spec.",
-                projectPath: projectPath,
-                nudge: false,
-                kind: .request,
-                requestID: request.id,
-                verified: fromVerified
-            )
-            Ledger(url: paths.ledger).append(LedgerEntry(
-                at: Date(),
-                kind: .note,
-                project: projectPath,
-                title: "request.created",
-                summary: "\(request.id): \(from) -> \(target), verified \(fromVerified)"
-            ))
-            return request
-        } catch {
-            try? PathClaims(paths: paths).release(
-                label: target,
-                project: projectPath,
-                patterns: mayTouch,
-                requestID: request.id
-            )
-            throw error
         }
+    }
+
+    /// Fair capability target: live candidates, busy filtered when free exists,
+    /// then fewest active, fewest total assignments, oldest heartbeat, label.
+    /// Pure over current disk state; callers hold the delegate lock so two
+    /// racers cannot both see the same free set and pick the same name.
+    static func fairTarget(capability: String, project: String, paths: Paths) -> String? {
+        let marks = Presence.marks(paths: paths).filter {
+            !$0.isExpired && Liveness.isProcessAlive($0.pid) != false
+                && $0.capabilities.contains(capability)
+                && $0.projectPath == project
+        }
+        guard !marks.isEmpty else { return nil }
+        let all = Requests(paths: paths).all().filter { $0.projectPath == project }
+        func activeCount(for label: String) -> Int {
+            all.filter {
+                ($0.resolvedTo == label || ($0.resolvedTo == nil && $0.to == label))
+                    && !$0.state.isTerminal
+            }.count
+        }
+        func totalCount(for label: String) -> Int {
+            all.filter { $0.resolvedTo == label || ($0.resolvedTo == nil && $0.to == label) }.count
+        }
+        func inProgressCount(for label: String) -> Int {
+            all.filter { $0.resolvedTo == label && $0.state == .inProgress }.count
+        }
+        let free = marks.filter { inProgressCount(for: $0.label) == 0 }
+        // If anybody is free, the busy are out. If everybody is busy, the caller
+        // turns this into explicit no-capacity rather than pretending assigned.
+        guard !free.isEmpty else { return nil }
+        let pool = free
+        return pool.sorted {
+            let aActive = activeCount(for: $0.label), bActive = activeCount(for: $1.label)
+            if aActive != bActive { return aActive < bActive }
+            let aTotal = totalCount(for: $0.label), bTotal = totalCount(for: $1.label)
+            if aTotal != bTotal { return aTotal < bTotal }
+            if $0.updatedAt != $1.updatedAt { return $0.updatedAt < $1.updatedAt }
+            return $0.label < $1.label
+        }.first?.label
     }
 
     @discardableResult
@@ -599,9 +698,77 @@ public struct AgentBus: Sendable {
         }
 
         do {
-            let data = try JSONCoding.encoder().encode(message)
-            if let line = String(data: data, encoding: .utf8) {
-                try AtomicFile.append(line, to: paths.messages)
+            // Sequence + append under the same messages lock: two writers never
+            // share a number. Gaps are allowed (crash between counter bump and
+            // append); reuse is not.
+            //
+            // Guarantee, precisely: `post` never assigns a duplicate while holding
+            // the lock, even with concurrent writers or a crash (which leaves a
+            // gap). It also never goes backwards past what is on disk or past
+            // what any session already consumed:
+            //   next = max(counter, tail-of-log, max-delivered-watermark) + 1.
+            // Tail covers a log replaced with higher numbers; the watermark covers
+            // a partial restore (log+counter rewound, delivered/ kept) where
+            // reusing would look already-delivered and be filtered as dup.
+            // Full-home rewinds (everything old) correctly continue old+1 (no dup
+            // in the present log). Hand-editing the middle of the log to reuse a
+            // number is operator error and out of scope: identity is (seq,id),
+            // but the watermark assumes seq monotonic — do not reuse numbers.
+            try LockedFile.withExclusiveLock(paths.messages) {
+                var last: UInt64 = 0
+                var counterExists = false
+                if let data = try? Data(contentsOf: paths.messageSequence),
+                   let obj = try? JSONCoding.decoder().decode([String: UInt64].self, from: data),
+                   let value = obj["last"] {
+                    last = value
+                    counterExists = true
+                }
+                if !counterExists {
+                    // One-time recovery when the counter is missing (pre-sequence
+                    // installs, deleted homes): continue past the highest number
+                    // already on disk instead of reusing 1.
+                    last = max(last, Self.maxSequenceInLog(paths: paths))
+                } else {
+                    // Reinforcement: never go backwards past the tail or past
+                    // delivered mail, even if the counter file is stale.
+                    last = max(last, Self.tailMaxSequence(paths: paths, lastLines: 100))
+                }
+                if let deliveredMax = Self.maxDeliveredSequence(paths: paths) {
+                    last = max(last, deliveredMax)
+                }
+                let next = last &+ 1 == 0 ? 1 : last &+ 1
+                message.sequence = next
+                let counterData = try JSONCoding.encoder().encode(["last": next])
+                try AtomicFile.write(counterData, to: paths.messageSequence)
+                let data = try JSONCoding.encoder().encode(message)
+                guard let line = String(data: data, encoding: .utf8) else { return }
+                // Raw O_APPEND write while holding the sidecar lock (not
+                // AtomicFile.append, which would take the same lock again).
+                let url = paths.messages
+                let descriptor = open(url.path, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+                guard descriptor >= 0 else { throw LockedFile.Error(path: url.path, code: errno) }
+                defer { close(descriptor) }
+                while flock(descriptor, LOCK_EX) != 0 {
+                    guard errno == EINTR else { throw LockedFile.Error(path: url.path, code: errno) }
+                }
+                defer { flock(descriptor, LOCK_UN) }
+                let lineData = Data((line + "\n").utf8)
+                try lineData.withUnsafeBytes { buffer in
+                    guard let base = buffer.bindMemory(to: UInt8.self).baseAddress else { return }
+                    var written = 0
+                    while written < buffer.count {
+                        #if canImport(Darwin)
+                        let count = Darwin.write(descriptor, base + written, buffer.count - written)
+                        #elseif canImport(Glibc)
+                        let count = Glibc.write(descriptor, base + written, buffer.count - written)
+                        #endif
+                        if count < 0 {
+                            guard errno == EINTR else { throw LockedFile.Error(path: url.path, code: errno) }
+                            continue
+                        }
+                        written += count
+                    }
+                }
             }
         } catch {
             Log.error("could not post message: \(error.localizedDescription)")
@@ -619,6 +786,52 @@ public struct AgentBus: Sendable {
                 guard let data = line.data(using: .utf8) else { return nil }
                 return try? decoder.decode(AgentMessage.self, from: data)
             }
+    }
+
+    /// Full delivery read: every line on disk, oldest first in file order.
+    /// `messages(limit:)` stays for human commands (`show`, history,
+    /// diagnostics). Agent delivery must not page through a suffix window —
+    /// with more mail than the window, the oldest pending falls off before it
+    /// is ever shown. This reads what the cursor needs, and the cursor decides.
+    public func messagesForDelivery() -> [AgentMessage] {
+        guard let contents = try? String(contentsOf: paths.messages, encoding: .utf8) else { return [] }
+        let decoder = JSONCoding.decoder()
+        return contents.split(separator: "\n", omittingEmptySubsequences: true).compactMap { line in
+            guard let data = line.data(using: .utf8) else { return nil }
+            return try? decoder.decode(AgentMessage.self, from: data)
+        }
+    }
+
+    /// Max sequence anywhere in the log (full scan). One-time recovery path
+    /// when the counter file is missing; steady-state `post` uses the tail
+    /// (below) + counter + delivered watermark and never scans the whole file.
+    static func maxSequenceInLog(paths: Paths) -> UInt64 {
+        guard let contents = try? String(contentsOf: paths.messages, encoding: .utf8) else { return 0 }
+        let decoder = JSONCoding.decoder()
+        var maxSeq: UInt64 = 0
+        for line in contents.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let data = line.data(using: .utf8),
+                  let message = try? decoder.decode(AgentMessage.self, from: data),
+                  let seq = message.sequence, seq > maxSeq else { continue }
+            maxSeq = seq
+        }
+        return maxSeq
+    }
+
+    /// Max sequence among the last `lastLines` lines (tail read, O(tail)).
+    /// Append order is sequence order, so the max lives at the end; a replaced
+    /// log with higher numbers still shows them in its tail.
+    static func tailMaxSequence(paths: Paths, lastLines: Int = 100) -> UInt64 {
+        guard let contents = try? String(contentsOf: paths.messages, encoding: .utf8) else { return 0 }
+        let decoder = JSONCoding.decoder()
+        var maxSeq: UInt64 = 0
+        for line in contents.split(separator: "\n", omittingEmptySubsequences: true).suffix(lastLines) {
+            guard let data = line.data(using: .utf8),
+                  let message = try? decoder.decode(AgentMessage.self, from: data),
+                  let seq = message.sequence, seq > maxSeq else { continue }
+            maxSeq = seq
+        }
+        return maxSeq
     }
 
     /// The messages still worth showing somebody: the tombstones gone, whatever
@@ -745,10 +958,37 @@ public struct AgentBus: Sendable {
         mode: BriefingMode = .full,
         persistCursor: Bool = true
     ) -> String? {
+        // The whole read-compute-write runs under the per-session delivery
+        // lock: without it two concurrent briefs compute the same pending set
+        // and both deliver it (Tier 1 #1). Anonymous reads share one lock;
+        // they persist nothing, so contention is harmless.
+        do {
+            return try LockedFile.withExclusiveLock(Self.deliveryLockURL(for: sessionID, paths: paths)) {
+                briefingLocked(
+                    sessionID: sessionID, me: me, project: project, branch: branch,
+                    now: now, mode: mode, persistCursor: persistCursor)
+            }
+        } catch {
+            Log.error("briefing lock failed: \(error.localizedDescription)")
+            return briefingLocked(
+                sessionID: sessionID, me: me, project: project, branch: branch,
+                now: now, mode: mode, persistCursor: false)
+        }
+    }
+
+    private func briefingLocked(
+        sessionID: String?,
+        me: String?,
+        project: String?,
+        branch: String? = nil,
+        now: Date,
+        mode: BriefingMode,
+        persistCursor: Bool
+    ) -> String? {
         // Peers are the ones sharing this project. A session in `clipapp` was
         // being told about another project's simulator, and paying context
         // for it every turn.
-        let (peers, elsewhere) = self.peers(excluding: sessionID, project: project)
+        let (peers, elsewhere) = self.peers(excluding: sessionID, project: project, me: me)
         let pending = undelivered(to: sessionID, me: me, project: project, branch: branch, now: now)
 
         // Per-session cursor: what this session has already been told, beyond
@@ -794,7 +1034,47 @@ public struct AgentBus: Sendable {
             }
         }
 
-        guard !peers.isEmpty || elsewhere > 0 || !pending.isEmpty || !requestBlocks.isEmpty else {
+        // Peers, pending mail, open requests and un-announced claims are all reasons
+        // to say something. Claims used to be missing from this guard, which is
+        // the earliest place the briefing can return nil — so a reader whose
+        // backlog had drained and whose peers had gone quiet never heard about a
+        // path another agent had claimed, which is the one thing worth hearing
+        // (audit 2026-10-07).
+        // What this reader touches — claims plus request scope. Empty means no
+        // signal, and a reader with no footprint gets everything, exactly as
+        // before. Delta only: a session start needs the whole map.
+        //
+        // Computed before the silence gate because the gate needs it: a peer
+        // claim this reader touches is news, and the gate used to be blind to
+        // it. It compared only `pending` messages and the peer fingerprint, so
+        // once the message backlog drained it returned nil — with the claim
+        // still un-announced because the budget had cut it. Nothing would ever
+        // change again, so the collision warning never arrived at all
+        // (audit 2026-10-07). Putting claims in the fingerprint instead of the
+        // gate does not help: the fingerprint is recorded each turn, so an
+        // unannounced claim matches itself.
+        let readerScope: [String] = {
+            guard mode == .delta, let me else { return [] }
+            let mine = (project.map { PathClaims(paths: paths).live(project: $0) }
+                ?? PathClaims(paths: paths).load()).filter { $0.label == me }.map(\.pattern)
+            let touch = project.flatMap {
+                Requests(paths: paths).inProgress(assignedTo: me, project: $0).first?.mayTouch
+            } ?? []
+            return BriefingRelevance.scope(myClaimPatterns: mine, mayTouch: touch)
+        }()
+        // Claims this reader has not been shown and that touch its scope. Full
+        // mode shows every live claim regardless, so scoping is delta-only.
+        let unannouncedClaims: [PathClaim] = {
+            guard let project else { return [] }
+            let others = PathClaims(paths: paths).live(project: project)
+                .filter { $0.label != me && !cursor.seenClaimIDs.contains($0.id) }
+            return readerScope.isEmpty ? others : others.filter {
+                BriefingRelevance.touchesScope(pattern: $0.pattern, scope: readerScope)
+            }
+        }()
+
+        guard !peers.isEmpty || elsewhere > 0 || !pending.isEmpty || !requestBlocks.isEmpty
+            || !unannouncedClaims.isEmpty else {
             stampCursor()
             return nil
         }
@@ -820,36 +1100,41 @@ public struct AgentBus: Sendable {
         var material = shown.map(\.fingerprintLine)
         if elsewhere > 0 { material.append("elsewhere:\(elsewhere)") }
         let fingerprint = Self.fingerprint(material.joined(separator: "\n"))
-        if pending.isEmpty, requestBlocks.isEmpty, let marker = deliveryMarker(for: sessionID), fingerprint == marker.lastFingerprint {
+        if pending.isEmpty, requestBlocks.isEmpty, unannouncedClaims.isEmpty,
+           let marker = deliveryMarker(for: sessionID), fingerprint == marker.lastFingerprint {
             return nil
         }
 
-        // The cap exists so a backlog cannot cost a session its whole turn, and
-        // it used to be the last eight by time — which is exactly how a "do not
-        // touch that file" gets pushed off the end by eight people saying they
-        // finished something. Priority is taken out first and never capped:
-        // there are only ever a handful, and they are the reason to read at all.
-        let priority = pending.filter(\.isPriority)
-        let delivered = priority + pending.filter { !$0.isPriority }.suffix(8)
-        // What this reader touches — claims plus request scope. Empty means no
-        // signal, and a reader with no footprint gets everything, exactly as
-        // before. Delta only: a session start needs the whole map.
-        let readerScope: [String] = {
-            guard mode == .delta, let me else { return [] }
-            let mine = (project.map { PathClaims(paths: paths).live(project: $0) }
-                ?? PathClaims(paths: paths).load()).filter { $0.label == me }.map(\.pattern)
-            let touch = project.flatMap {
-                Requests(paths: paths).inProgress(assignedTo: me, project: $0).first?.mayTouch
-            } ?? []
-            return BriefingRelevance.scope(myClaimPatterns: mine, mayTouch: touch)
-        }()
+        // The cap exists so a backlog cannot cost a session its whole turn.
+        // FIFO, not LIFO: the oldest pending go first. Priority still leads
+        // (its tag is why it is read first), but normals page oldest-first so
+        // a backlog pages over turns instead of losing its head to the tail.
+        // The char/line caps limit what is printed in one turn, never what is
+        // pending: only what survives the final budget is marked delivered.
+        //
+        // Priority has its own char budget (maxPriorityChars): without it, a
+        // flood of urgents bypasses the total cap (they lead and are exempt)
+        // and eats the turn. The first urgent always goes through complete;
+        // the rest page FIFO within the budget, fairly across senders, with a
+        // one-line counter for what stays pending.
+        let allPriority = pending.filter(\.isPriority)
+        let (selectedPriority, omittedPriority) = Self.budgetPriority(allPriority, me: me, now: now, paths: paths)
+        let candidates = selectedPriority + Array(pending.filter { !$0.isPriority }.prefix(8))
         // Out-of-scope broadcasts, folded per sender: the notes stay on the
         // bus for `brief --as`, this just spends no turn tokens on them.
         var coalesced: [String: (count: Int, attachments: [String])] = [:]
         var urgentLines: [String] = []
-        var messageLines: [String] = []
-        if !delivered.isEmpty {
-            for message in delivered {
+        // One rendered block per non-folded candidate (body + attachments), in
+        // render order, so the budget walk and the post-cap delivery check can
+        // tell a whole block from a cut one.
+        var messageBlocks: [[String]] = []
+        var blockByID: [String: [String]] = [:]
+        // Which candidates were folded vs shown individually, so the post-cap
+        // check knows what "survived" means for each.
+        var coalescedIDs = Set<String>()
+        var coalescedSenderByID: [String: String] = [:]
+        if !candidates.isEmpty {
+            for message in candidates {
                 let scope = message.projectName.map { " · \($0)" } ?? ""
                 // Only worth saying when the reader is not the addressee — and
                 // an executor reading what was sent to "claude" is one, so the
@@ -881,12 +1166,15 @@ public struct AgentBus: Sendable {
                     // a file the reader may actually need.
                     group.attachments += attachments.filter { $0.hasPrefix("    ") == false }
                     coalesced[message.from] = group
+                    coalescedIDs.insert(message.id)
+                    coalescedSenderByID[message.id] = message.from
                 } else if message.isPriority {
                     urgentLines.append(body)
                     urgentLines += attachments
+                    blockByID[message.id] = [body] + attachments
                 } else {
-                    messageLines.append(body)
-                    messageLines += attachments
+                    messageBlocks.append([body] + attachments)
+                    blockByID[message.id] = [body] + attachments
                 }
             }
             // Folded broadcasts, steadiest senders first — deterministic order
@@ -894,17 +1182,61 @@ public struct AgentBus: Sendable {
             if let me {
                 for sender in coalesced.keys.sorted() {
                     let group = coalesced[sender]!
-                    messageLines.append(BriefingRelevance.coalescedLine(from: sender, count: group.count, me: me))
-                    messageLines += group.attachments
+                    messageBlocks.append(
+                        [BriefingRelevance.coalescedLine(from: sender, count: group.count, me: me)]
+                            + group.attachments
+                    )
                 }
             }
-            if !messageLines.isEmpty {
-                if !lines.isEmpty { lines.append("") }
-                // An anonymous reader is looking at somebody else's post as well as
-                // its own, so the heading may not promise they are all for you.
-                lines.append(me == nil ? "Messages on the bus:" : "Messages left for you:")
-                lines += messageLines
-            }
+        }
+        // Omitted priority stays pending with a one-line pointer, grouped by
+        // sender so a flood reads as one line, not a hundred. No handle: the
+        // post-cap check marks a message delivered only when its whole block
+        // survived, so these correctly stay pending for the next turn.
+        if !omittedPriority.isEmpty {
+            let bySender = Dictionary(grouping: omittedPriority, by: \.from)
+                .mapValues(\.count).sorted { $0.key < $1.key }
+            let detail = bySender.map { "\($0.key): \($0.value)" }.joined(separator: ", ")
+            urgentLines.append("+ \(omittedPriority.count) urgentes pendientes (\(detail)); ejecuta gentlemerge brief")
+        }
+
+        let urgentHead = urgentLines.isEmpty ? [] : ["Needs you now:"] + urgentLines + [""]
+        // How much of the briefing leads un-cut. Two rules, one per half of the
+        // old bug this fixes: `keeping` counts physical lines, not array
+        // elements — a multi-line body is one element but many rendered lines,
+        // and undercounting it let the cap cut a long urgent after its first
+        // lines while the handle in that first line still marked it delivered
+        // (audit 2026-10-06, finding 1). And message blocks lead un-cut while
+        // they fit, with the first non-fitting one still kept complete — the
+        // same rule that lets budgetPriority always take the first urgent —
+        // because a cut block could never deliver and would re-appear
+        // half-shown every turn. Everything after pages FIFO next turn.
+        var headParts = urgentHead + lines
+        if !messageBlocks.isEmpty {
+            if !lines.isEmpty { headParts.append("") }
+            // An anonymous reader is looking at somebody else's post as well as
+            // its own, so the heading may not promise they are all for you.
+            headParts.append(me == nil ? "Messages on the bus:" : "Messages left for you:")
+        }
+        let budgetChars = mode == .full ? BriefingBudget.fullMaxChars : BriefingBudget.deltaMaxChars
+        var spent = headParts.joined(separator: "\n").count
+        var keeping = headParts.reduce(0) { $0 + $1.components(separatedBy: "\n").count }
+        var oversizeKept = false
+        for block in messageBlocks {
+            let blockLines = block.reduce(0) { $0 + $1.components(separatedBy: "\n").count }
+            let blockChars = block.joined(separator: "\n").count + 1
+            let fits = spent + blockChars <= budgetChars
+            if !fits && oversizeKept { break }
+            spent += blockChars
+            keeping += blockLines
+            if !fits { oversizeKept = true }
+        }
+
+        let messageLines = messageBlocks.flatMap { $0 }
+        if !messageLines.isEmpty {
+            if !lines.isEmpty { lines.append("") }
+            lines.append(me == nil ? "Messages on the bus:" : "Messages left for you:")
+            lines += messageLines
         }
 
         lines.append("")
@@ -912,7 +1244,7 @@ public struct AgentBus: Sendable {
             "Say something back to the others with `gentlemerge say \"...\"`, and tell them what you"
                 + " are about to change before you change it."
         )
-        if !delivered.isEmpty {
+        if !candidates.isEmpty {
             lines.append(
                 "The `#abcd` in front of a note is its handle: `gentlemerge show abcd` reads it in"
                     + " full, and `gentlemerge say --replaces abcd \"...\"` corrects it in place"
@@ -926,21 +1258,31 @@ public struct AgentBus: Sendable {
         // that touch this reader's scope. An out-of-scope claim stays unseen
         // (never marked shown), so it costs this reader nothing and still
         // surfaces the moment their scope grows onto it.
+        // claim id -> its rendered, scrubbed line, checked against the final
+        // output below so the cursor only advances for lines that actually
+        // reached the reader.
+        var claimLines: [String: String] = [:]
         if let project {
             let all = PathClaims(paths: paths).live(project: project).filter { $0.label != me }
-            let unseen = (mode == .full) ? all : all.filter { !cursor.seenClaimIDs.contains($0.id) }
-            let shownClaims = (mode == .full || readerScope.isEmpty)
-                ? unseen
-                : unseen.filter { BriefingRelevance.touchesScope(pattern: $0.pattern, scope: readerScope) }
+            // Already computed above for the silence gate, so reuse it rather
+            // than filtering the same list twice with two subtly different rules.
+            let shownClaims = mode == .full ? all : unannouncedClaims
             if !shownClaims.isEmpty {
                 lines.append("")
                 lines.append(mode == .full ? "Others are editing:" : "Newly claimed by others:")
                 for claim in shownClaims {
                     let minutes = max(Int(claim.expires.timeIntervalSinceNow / 60), 0)
                     let why = claim.intent.map { " — \(BriefingRenderer.quote($0))" } ?? ""
-                    lines.append("- \(claim.label): `\(claim.pattern)`\(why) [\(minutes)m]")
+                    let line = "- \(claim.label): `\(claim.pattern)`\(why) [\(minutes)m]"
+                    lines.append(line)
+                    claimLines[claim.id] = Redactor.scrub(line).text
                 }
-                shownClaims.forEach { cursor.seenClaimIDs.insert($0.id) }
+                // Not marked seen here. This runs before the cap, so marking at
+                // this point records claims the budget then throws away — and a
+                // claim is never re-shown once seen, so it was lost outright,
+                // including via `brief --as` and via a later full briefing
+                // (audit 2026-10-07). Marked below, once we know the line
+                // survived, exactly like a message block.
             }
             // Ownership zones are worth their tokens once per session — full
             // mode only. Pinned zones say so: HANDOFF.md zones are conveniences
@@ -961,22 +1303,24 @@ public struct AgentBus: Sendable {
             lines += block.lines.map { "- \($0)" }
         }
 
-        record(delivery: fingerprint, delivered: delivered, for: sessionID)
         // The hard budget lives here and not only in the renderer: the existing
         // briefing builds its own lines, so the cap is what makes sure the
         // per-turn injection can never balloon no matter what sections grow.
         // Anonymous and non-persistent reads (a human's `brief`) are not charged
-        // per turn, so they are not capped either.
+        // per turn, so they are not capped either. Agent persistent reads are
+        // capped in both modes (delta 1200, full 4000): session start is also
+        // injected context and must respect its budget.
         //
         // Conflict-class lines lead and are exempt from the cut: a warning
         // enters even when the rest of the budget is spent.
-        let urgentHead = urgentLines.isEmpty ? [] : ["Needs you now:"] + urgentLines + [""]
         let text = Redactor.scrub((urgentHead + lines).joined(separator: "\n")).text
-        let output = mode == .delta && persistCursor
-            ? BriefingRenderer.cap(text, mode: mode, keeping: urgentHead.count)
+        let output = persistCursor && sessionID != nil
+            ? BriefingRenderer.cap(text, mode: mode, keeping: keeping)
             : text
         // A candidate is not delivered until its complete, scrubbed line survives
-        // the final budget. Omitted updates stay pending for the next delta.
+        // the final budget. Omitted updates stay pending for the next delta —
+        // and so do omitted messages. Only what is in the output advances the
+        // watermark; the rest pages FIFO next turn.
         let deliveredLines = Set(output.components(separatedBy: "\n"))
         for update in requestUpdates {
             let line = Redactor.scrub("- " + update.line).text
@@ -984,7 +1328,110 @@ public struct AgentBus: Sendable {
                 cursor.seenRequestStates[update.id] = update.state
             }
         }
-        stampCursor()
+        // Claims get the same treatment as messages and request updates: the
+        // cursor advances only for a line that is actually in the output. A
+        // claim cut by the budget stays unseen, so it is announced next turn
+        // instead of being recorded as delivered and never surfacing again
+        // (audit 2026-10-07).
+        for (id, line) in claimLines where deliveredLines.contains(line) {
+            cursor.seenClaimIDs.insert(id)
+        }
+        // Which candidates actually survived the final budget: folded
+        // broadcasts by their one-line summary, everything else by its whole
+        // block. The handle is not enough: it sits at the front of the block,
+        // so a cap that cut everything after the first line still matched it
+        // and marked a truncated message delivered — its tail then never came
+        // back (audit 2026-10-06, finding 1). The output is the rendered text
+        // cut at a line boundary, so a block survived exactly when its last
+        // physical line did.
+        //
+        // "Last physical line" has to skip blanks. `deliveredLines` contains ""
+        // for *any* output with a blank separator, which every briefing has, so
+        // a message whose text ends in a newline — `quote` preserves it, leaving
+        // "" as the block's final line — matched unconditionally and was
+        // recorded delivered although the cap had cut its body. It then never
+        // reappeared (audit 2026-10-07).
+        var actuallyDelivered: [AgentMessage] = []
+        for message in candidates {
+            if coalescedIDs.contains(message.id) {
+                guard let me, let sender = coalescedSenderByID[message.id],
+                      let group = coalesced[sender] else { continue }
+                let folded = BriefingRelevance.coalescedLine(from: sender, count: group.count, me: me)
+                if deliveredLines.contains(Redactor.scrub(folded).text)
+                    || output.contains(folded) {
+                    actuallyDelivered.append(message)
+                }
+            } else if let block = blockByID[message.id],
+                      let last = Self.lastMeaningfulLine(block) {
+                let scrubbedLast = Redactor.scrub(last).text
+                if deliveredLines.contains(scrubbedLast) || output.contains(scrubbedLast) {
+                    actuallyDelivered.append(message)
+                }
+            }
+        }
+        // Contiguous watermark: the longest head of `pending` (oldest-first)
+        // fully in `actuallyDelivered`. Priority delivered past a gap stays
+        // tracked by id, never by jumping the watermark over undelivered mail.
+        // Scope is per (session, project): `key` isolates projects so reading A
+        // never advances B. Global reads (project nil, key "") advance the
+        // global scope only.
+        let actuallySet = Set(actuallyDelivered.map(\.id))
+        var contiguous: [AgentMessage] = []
+        for message in pending {
+            guard actuallySet.contains(message.id) else { break }
+            contiguous.append(message)
+        }
+        let contiguousSeq = contiguous.compactMap(\.sequence).max()
+        let contiguousAt = contiguous.map(\.at).max()
+        let key = project ?? ""
+        if persistCursor {
+            if project == nil {
+                // Global read (sees all): advance global scope, promoting the
+                // per-project watermarks. A project-scoped read advanced only
+                // its own key, leaving global nil; without promotion a later
+                // global read has no watermark and replays the whole log over
+                // the trimmed deliveredIDs (Tier 1 #2).
+                let oldMarker = deliveryMarker(for: sessionID)
+                let oldGlobal: UInt64? = [oldMarker?.lastDeliveredSequence, cursor.lastDeliveredSequence].compactMap { $0 }.max()
+                let promoted: UInt64? = [
+                    oldGlobal, contiguousSeq,
+                    (oldMarker?.lastDeliveredSequenceByProject ?? [:]).values.max(),
+                    (cursor.lastDeliveredSequenceByProject ?? [:]).values.max(),
+                ].compactMap { $0 }.max()
+                let newGlobal: UInt64? = promoted
+                if let newGlobal {
+                    if let old = cursor.lastDeliveredSequence {
+                        cursor.lastDeliveredSequence = max(old, newGlobal)
+                    } else {
+                        cursor.lastDeliveredSequence = newGlobal
+                    }
+                }
+                if let contiguousAt {
+                    var byDate = cursor.lastMessageAtByProject ?? [:]
+                    byDate[key] = max(byDate[key] ?? .distantPast, contiguousAt)
+                    cursor.lastMessageAtByProject = byDate
+                }
+                record(delivery: fingerprint, delivered: actuallyDelivered, lastDeliveredSequence: newGlobal, project: nil, lastMessageAt: contiguousAt, for: sessionID)
+            } else {
+                // Project read: advance only this project's scope, never global.
+                let oldMarker = deliveryMarker(for: sessionID)
+                let oldPerProject: UInt64? = [oldMarker?.lastDeliveredSequenceByProject?[key], cursor.lastDeliveredSequenceByProject?[key]].compactMap { $0 }.max()
+                let newPerProject: UInt64? = [oldPerProject, contiguousSeq].compactMap { $0 }.max()
+                if let newPerProject {
+                    var byProject = cursor.lastDeliveredSequenceByProject ?? [:]
+                    byProject[key] = max(byProject[key] ?? 0, newPerProject)
+                    if byProject[key] == 0 { byProject.removeValue(forKey: key) }
+                    cursor.lastDeliveredSequenceByProject = byProject.isEmpty ? nil : byProject
+                }
+                if let contiguousAt {
+                    var byDate = cursor.lastMessageAtByProject ?? [:]
+                    byDate[key] = max(byDate[key] ?? .distantPast, contiguousAt)
+                    cursor.lastMessageAtByProject = byDate
+                }
+                record(delivery: fingerprint, delivered: actuallyDelivered, lastDeliveredSequence: nil, project: project, lastMessageAt: contiguousAt, perProjectSequence: newPerProject, for: sessionID)
+            }
+            stampCursor()
+        }
         return output
     }
 
@@ -1031,7 +1478,28 @@ public struct AgentBus: Sendable {
         now: Date = Date()
     ) -> [AgentMessage] {
         let marker = deliveryMarker(for: sessionID)
-        let floor = marker?.lastMessageAt ?? Date.distantPast
+        // Per-project cursor scope: advancing project A must never skip project
+        // B's pending. Key "" = global read (project nil, sees all).
+        // Reads take max(perProject, global) so pre-per-project markers (global
+        // only) do not replay; writes below advance only the read scope.
+        let key = project ?? ""
+        let cursor = sessionID.map { BriefingCursorStore(paths: paths).load(sessionID: $0) }
+        let perProjectSeqs: [UInt64?] = [
+            marker?.lastDeliveredSequenceByProject?[key],
+            marker?.lastDeliveredSequence,
+            cursor?.lastDeliveredSequenceByProject?[key],
+            cursor?.lastDeliveredSequence,
+        ]
+        let afterSequence: UInt64? = perProjectSeqs.compactMap { $0 }.max()
+        let perProjectFloors: [Date?] = [
+            marker?.lastMessageAtByProject?[key],
+            marker?.lastMessageAt,
+            cursor?.lastMessageAtByProject?[key],
+        ]
+        // Oldest floor among present? No: for suppression we want the max
+        // (most advanced) floor that applies to this scope, else we replay.
+        // Pre-per-project markers only have global; new scopes fall back to it.
+        let floor: Date = perProjectFloors.compactMap { $0 }.max() ?? Date.distantPast
         let seen = Set(marker?.deliveredIDs ?? [])
         // Timestamps are stored to the second, so a strict floor drops a message
         // that shares its second with the last one delivered. We can only relax
@@ -1043,9 +1511,25 @@ public struct AgentBus: Sendable {
         // yours to be handed, and one that has outlived its kind is worse than
         // nothing — a blocker that was lifted three hours ago still reads like a
         // blocker.
-        return visibleMessages(expiringAt: now)
-            .filter { dedupedByID ? $0.at >= floor : $0.at > floor }
-            .filter { !seen.contains($0.id) }
+        //
+        // Full log, not a suffix window: the char/message caps limit what is
+        // printed in one turn, never what is pending. A backlog pages FIFO over
+        // turns; nothing falls off before it is shown.
+        return Self.folded(messagesForDelivery(), expiringAt: now)
+            .filter { message in
+                if let seq = message.sequence {
+                    if let after = afterSequence {
+                        // Watermark covers the contiguous prefix; ids cover
+                        // out-of-order priority delivered past a gap.
+                        if seq <= after { return false }
+                        return !seen.contains(message.id)
+                    }
+                    // No watermark yet: old timestamp + id rule, so a marker
+                    // from before sequences still counts.
+                    return (dedupedByID ? message.at >= floor : message.at > floor) && !seen.contains(message.id)
+                }
+                return (dedupedByID ? message.at >= floor : message.at > floor) && !seen.contains(message.id)
+            }
             .filter { message in
                 // Not your own words coming back at you. Matched exactly, unlike
                 // the address: a subagent's report is news to the session that
@@ -1070,7 +1554,101 @@ public struct AgentBus: Sendable {
                 guard let branch else { return true }
                 return wanted == branch
             }
-            .sorted { $0.at < $1.at }
+            .sorted(by: Self.deliveryOrder)
+    }
+
+    /// Oldest pending first. Sequenced lines order by number (nil — every line
+    /// written before sequences — sorts before any number, by time); unsequenced
+    /// fall back to time then id. Never newest-first: the cap takes the head,
+    /// the watermark advances over the head, and nothing is skipped to reach
+    /// the tail.
+    static func deliveryOrder(_ a: AgentMessage, _ b: AgentMessage) -> Bool {
+        switch (a.sequence, b.sequence) {
+        case let (x?, y?):
+            if x != y { return x < y }
+            if a.at != b.at { return a.at < b.at }
+            return a.id < b.id
+        case (nil, _?): return true
+        case (_?, nil): return false
+        case (nil, nil):
+            if a.at != b.at { return a.at < b.at }
+            return a.id < b.id
+        }
+    }
+
+    /// Priority char budget: which urgents go this turn, which stay pending.
+    /// Oldest-first (FIFO) within the budget, always keeping the very first
+    /// complete so a long line cannot starve its own turn. Fair across senders:
+    /// once a sender has taken half the budget while other senders still wait,
+    /// its further lines defer a turn — one flood cannot take the whole turn
+    /// when others have blockers too. Single-sender floods still page bounded
+    /// (never the whole context at once).
+    static func budgetPriority(
+        _ priority: [AgentMessage],
+        me: String?,
+        now: Date,
+        paths: Paths
+    ) -> (selected: [AgentMessage], omitted: [AgentMessage]) {
+        guard !priority.isEmpty else { return ([], []) }
+        let budget = BriefingBudget.maxPriorityChars
+        let perSenderCap = budget / 2
+        let senders = Set(priority.map(\.from))
+        let store = ArtifactStore(paths: paths)
+
+        func cost(of message: AgentMessage) -> Int {
+            let scope = message.projectName.map { " · \($0)" } ?? ""
+            let forSomebodyElse = message.to.map { to in me.map { !Self.addresses(to, $0) } ?? true } ?? false
+            let addressed = forSomebodyElse ? " (for \(message.to!))" : ""
+            let tag = message.briefingTag.map { "\($0) " } ?? ""
+            let handle = "#\(message.handle) "
+            let corrects = message.replacesID == nil ? "" : " (corrects an earlier note)"
+            let branch = message.toBranch.map { " (for branch \($0))" } ?? ""
+            let body = "- \(handle)\(tag)\(message.from)\(scope)\(addressed)\(branch)\(corrects)"
+                + " (\(RelativeTime.short(from: message.at, to: now))): \(BriefingRenderer.quote(message.text))"
+            let extras = (message.attachments ?? []).flatMap { attachment -> [String] in
+                var lines = [attachment.line(at: store.displayPath(for: attachment))]
+                if let summary = attachment.summary {
+                    lines += BriefingRenderer.quote(summary)
+                        .split(separator: "\n", omittingEmptySubsequences: false).map { "    \($0)" }
+                }
+                return lines
+            }
+            // +1 per line for the joins the renderer will do.
+            return body.count + 1 + extras.reduce(0) { $0 + $1.count + 1 }
+        }
+
+        var selected: [AgentMessage] = []
+        var used = 0
+        var perSender: [String: Int] = [:]
+        var selectedIDs = Set<String>()
+        // First always goes through complete: otherwise a line longer than the
+        // budget would never be delivered and would pin the watermark forever.
+        let first = priority[0]
+        let firstCost = cost(of: first)
+        selected.append(first)
+        selectedIDs.insert(first.id)
+        used += firstCost
+        perSender[first.from, default: 0] += firstCost
+
+        for message in priority.dropFirst() {
+            let c = cost(of: message)
+            // Over the total budget: leave for next turn (a smaller line from
+            // another sender may still fit, so keep trying rather than break).
+            guard used + c <= budget else { continue }
+            // Fairness: one sender past half while others wait defers the rest
+            // of its flood a turn. Single-sender floods skip this (no others).
+            if senders.count > 1,
+               perSender[message.from, default: 0] + c > perSenderCap,
+               priority.contains(where: { $0.from != message.from && !selectedIDs.contains($0.id) }) {
+                continue
+            }
+            selected.append(message)
+            selectedIDs.insert(message.id)
+            used += c
+            perSender[message.from, default: 0] += c
+        }
+        let omitted = priority.filter { !selectedIDs.contains($0.id) }
+        return (selected, omitted)
     }
 
     @available(*, deprecated, message: "Routing is by label now: undelivered(to:me:project:)")
@@ -1114,7 +1692,27 @@ public struct AgentBus: Sendable {
         return "reader-\(safe)"
     }
 
-    public static func label(for provider: AgentProvider) -> String {
+    /// The last physical line of a rendered block that carries content.
+///
+/// The post-cap check asks "did this block survive the budget?" and answers it
+/// by looking for one line of the block in the output. If the line it picks is
+/// blank the answer is meaningless: `deliveredLines` contains "" for any output
+/// with a blank separator, so the test passes for every briefing ever
+/// rendered. A message whose text ends in a newline leaves exactly such a
+/// trailing blank — `BriefingRenderer.quote` preserves it — and was recorded
+/// delivered although the cap had cut its body, so it never came back
+/// (audit 2026-10-07). Judging the last line with ink on it restores the check.
+static func lastMeaningfulLine(_ block: [String]) -> String? {
+    for element in block.reversed() {
+        for line in element.split(separator: "\n", omittingEmptySubsequences: false).reversed()
+        where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+            return String(line)
+        }
+    }
+    return nil
+}
+
+public static func label(for provider: AgentProvider) -> String {
         switch provider {
         case .claudeCode: return "claude"
         case .codex: return "codex"
@@ -1152,6 +1750,15 @@ public struct AgentBus: Sendable {
         /// Optional so a marker written by an older binary still decodes, and so
         /// an older binary still decodes one written here.
         var deliveredIDs: [String]?
+        /// Last sequence delivered contiguously. Nil is every marker written
+        /// before sequences; those keep working on timestamps + ids.
+        /// Global fallback for migration; new writes go per-project (below).
+        var lastDeliveredSequence: UInt64?
+        /// Per-project watermark (`projectPath ?? ""`, "" = global read).
+        /// See BriefingCursor for the isolation rule. Older binaries ignore it.
+        var lastDeliveredSequenceByProject: [String: UInt64]?
+        /// Per-project timestamp floor for pre-sequence lines, same keying.
+        var lastMessageAtByProject: [String: Date]?
     }
 
     /// Enough to cover any plausible backlog without letting a long-lived
@@ -1184,23 +1791,61 @@ public struct AgentBus: Sendable {
         return marker
     }
 
-    func record(delivery fingerprint: String, delivered: [AgentMessage], for sessionID: String?) {
+    func record(delivery fingerprint: String, delivered: [AgentMessage], lastDeliveredSequence: UInt64? = nil, project: String? = nil, lastMessageAt: Date? = nil, perProjectSequence: UInt64? = nil, for sessionID: String?) {
         guard let sessionID else { return }
         var marker = deliveryMarker(for: sessionID) ?? DeliveryMarker()
         marker.lastFingerprint = fingerprint
-        // The newest of them, not the last one printed: priority messages are
-        // rendered first and may well be older than the rest, so `last` would
-        // walk the floor backwards.
-        if let last = delivered.map(\.at).max() { marker.lastMessageAt = last }
+        // IDs are global (ids unique across projects) and cover out-of-order
+        // priority past a gap in every scope.
         if !delivered.isEmpty {
             var ids = marker.deliveredIDs ?? []
             ids.append(contentsOf: delivered.map(\.id))
             marker.deliveredIDs = Array(ids.suffix(Self.deliveredIDCap))
         }
+        let key = project ?? ""
+        if project == nil {
+            // Global read (sees all): advance global scope only.
+            // The newest of them, not the last one printed: priority messages are
+            // rendered first and may well be older than the rest, so `last` would
+            // walk the floor backwards. Only what survived the final budget counts.
+            if let last = delivered.map(\.at).max() {
+                marker.lastMessageAt = max(marker.lastMessageAt ?? .distantPast, last)
+            } else if let lastMessageAt {
+                marker.lastMessageAt = max(marker.lastMessageAt ?? .distantPast, lastMessageAt)
+            }
+            if let seq = lastDeliveredSequence {
+                marker.lastDeliveredSequence = max(marker.lastDeliveredSequence ?? 0, seq)
+                if marker.lastDeliveredSequence == 0 { marker.lastDeliveredSequence = nil }
+            }
+        } else {
+            // Project read: advance only this project's scope, never global.
+            // Isolates projects: A advancing must never skip B's pending.
+            if let last = delivered.map(\.at).max() ?? lastMessageAt {
+                var byDate = marker.lastMessageAtByProject ?? [:]
+                byDate[key] = max(byDate[key] ?? .distantPast, last)
+                marker.lastMessageAtByProject = byDate
+            }
+            if let seq = perProjectSequence ?? lastDeliveredSequence {
+                var bySeq = marker.lastDeliveredSequenceByProject ?? [:]
+                bySeq[key] = max(bySeq[key] ?? 0, seq)
+                if bySeq[key] == 0 { bySeq.removeValue(forKey: key) }
+                marker.lastDeliveredSequenceByProject = bySeq.isEmpty ? nil : bySeq
+            }
+        }
         try? FileManager.default.createDirectory(at: paths.delivered, withIntermediateDirectories: true)
         if let data = try? JSONCoding.encoder().encode(marker) {
             try? AtomicFile.write(data, to: markerURL(for: sessionID))
         }
+    }
+
+    /// Per (session, project) under one exclusive lock: the briefing's
+    /// read-compute-write (pending → fingerprint → record) is wide (render 400
+    /// messages), so two concurrent `brief --as` ran it interleaved and both
+    /// delivered the same set. The lock is per session-id (the marker + cursor
+    /// files), so different sessions still brief in parallel.
+    static func deliveryLockURL(for sessionID: String?, paths: Paths) -> URL {
+        let name = sessionID.map { "brief-\(fileSafeSessionID($0))" } ?? "brief-anon"
+        return paths.delivered.appendingPathComponent("\(name).lock")
     }
 
     static func fingerprint(_ text: String) -> String {
@@ -1265,6 +1910,14 @@ public struct AgentBus: Sendable {
             if let floor = Self.leastReadMarker(paths: paths, within: interval, now: now) {
                 keep.formUnion(decoded.filter { $0.message.at >= floor }.map(\.message.id))
             }
+            // Same rule for sequences: anything past the least-delivered live
+            // watermark is still pending for somebody alive. Timestamps already
+            // cover most of it, but a burst posted in one second shares stamps
+            // while sequences stay ordered — and the watermark is what FIFO
+            // pages over.
+            if let minSeq = Self.leastDeliveredSequence(paths: paths, within: interval, now: now) {
+                keep.formUnion(decoded.filter { ($0.message.sequence ?? UInt64.max) > minSeq }.map(\.message.id))
+            }
             // A tombstone lives exactly as long as what it buries: drop it while
             // the original is still in the file and the original comes back from
             // the dead. Taken over every line and not only over the survivors —
@@ -1300,20 +1953,112 @@ public struct AgentBus: Sendable {
     /// when nobody has read within the window. Old markers pin nothing: a
     /// session gone longer than the prune window is not coming back for its
     /// mail, and pinning on it would let one dead reader grow the log forever.
+    /// Per-project floors and global floors all pin (min over all): a lagging
+    /// (session, project) keeps its scope's mail past the cap.
     static func leastReadMarker(paths: Paths, within interval: TimeInterval, now: Date) -> Date? {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: paths.delivered.path) else { return nil }
         var floors: [Date] = []
         for name in names {
             let url = paths.delivered.appendingPathComponent(name)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                let cursorURL = url.appendingPathComponent("cursor.json")
+                guard let modified = (try? FileManager.default.attributesOfItem(atPath: cursorURL.path)[.modificationDate] as? Date),
+                      now.timeIntervalSince(modified) < interval,
+                      let data = try? Data(contentsOf: cursorURL),
+                      let cursor = try? JSONCoding.decoder().decode(BriefingCursor.self, from: data)
+                else { continue }
+                if let byProject = cursor.lastMessageAtByProject {
+                    floors.append(contentsOf: byProject.values)
+                }
+                continue
+            }
             let modified = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date)
             guard let modified, now.timeIntervalSince(modified) < interval,
                   let data = try? Data(contentsOf: url),
-                  let marker = try? JSONCoding.decoder().decode(DeliveryMarker.self, from: data),
-                  let floor = marker.lastMessageAt
+                  let marker = try? JSONCoding.decoder().decode(DeliveryMarker.self, from: data)
             else { continue }
-            floors.append(floor)
+            if let floor = marker.lastMessageAt { floors.append(floor) }
+            if let byProject = marker.lastMessageAtByProject {
+                floors.append(contentsOf: byProject.values)
+            }
         }
         return floors.min()
+    }
+
+    /// The smallest sequence watermark among live sessions, or nil when nobody
+    /// sequenced has read recently. Covers both marker files
+    /// (`delivered/<session>.json`) and cursor files
+    /// (`delivered/<session>/cursor.json`): the briefing writes the new
+    /// watermark to both, and either one pins the log.
+    /// Per-project watermarks and global watermarks all pin (min over all).
+    static func leastDeliveredSequence(paths: Paths, within interval: TimeInterval, now: Date) -> UInt64? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: paths.delivered.path) else { return nil }
+        var seqs: [UInt64] = []
+        for name in names {
+            let url = paths.delivered.appendingPathComponent(name)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                let cursorURL = url.appendingPathComponent("cursor.json")
+                guard let modified = (try? FileManager.default.attributesOfItem(atPath: cursorURL.path)[.modificationDate] as? Date),
+                      now.timeIntervalSince(modified) < interval,
+                      let data = try? Data(contentsOf: cursorURL),
+                      let cursor = try? JSONCoding.decoder().decode(BriefingCursor.self, from: data)
+                else { continue }
+                if let seq = cursor.lastDeliveredSequence { seqs.append(seq) }
+                if let byProject = cursor.lastDeliveredSequenceByProject {
+                    seqs.append(contentsOf: byProject.values)
+                }
+            } else {
+                guard url.pathExtension == "json",
+                      let modified = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date),
+                      now.timeIntervalSince(modified) < interval,
+                      let data = try? Data(contentsOf: url),
+                      let marker = try? JSONCoding.decoder().decode(DeliveryMarker.self, from: data)
+                else { continue }
+                if let seq = marker.lastDeliveredSequence { seqs.append(seq) }
+                if let byProject = marker.lastDeliveredSequenceByProject {
+                    seqs.append(contentsOf: byProject.values)
+                }
+            }
+        }
+        return seqs.min()
+    }
+
+    /// Largest sequence watermark across all sessions/scopes (no recency filter).
+    /// Used by `post` to never reuse a number after a partial restore
+    /// (log+counter rewound, delivered/ kept): jumping past delivered mail
+    /// leaves a gap (allowed) instead of reusing and being filtered as dup.
+    static func maxDeliveredSequence(paths: Paths) -> UInt64? {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: paths.delivered.path) else { return nil }
+        var seqs: [UInt64] = []
+        for name in names {
+            let url = paths.delivered.appendingPathComponent(name)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { continue }
+            if isDir.boolValue {
+                let cursorURL = url.appendingPathComponent("cursor.json")
+                guard let data = try? Data(contentsOf: cursorURL),
+                      let cursor = try? JSONCoding.decoder().decode(BriefingCursor.self, from: data)
+                else { continue }
+                if let seq = cursor.lastDeliveredSequence { seqs.append(seq) }
+                if let byProject = cursor.lastDeliveredSequenceByProject {
+                    seqs.append(contentsOf: byProject.values)
+                }
+            } else {
+                guard url.pathExtension == "json",
+                      let data = try? Data(contentsOf: url),
+                      let marker = try? JSONCoding.decoder().decode(DeliveryMarker.self, from: data)
+                else { continue }
+                if let seq = marker.lastDeliveredSequence { seqs.append(seq) }
+                if let byProject = marker.lastDeliveredSequenceByProject {
+                    seqs.append(contentsOf: byProject.values)
+                }
+            }
+        }
+        return seqs.max()
     }
 
     /// Delivery markers outlive their sessions; sweep the old ones.

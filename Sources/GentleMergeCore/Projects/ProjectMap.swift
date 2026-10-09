@@ -246,7 +246,14 @@ public struct ProjectMap: Codable, Sendable, Equatable {
     static func topDirectories(_ scan: Scan) -> [String] {
         scan.byTopLevel
             .filter { $0.value > 0 }
-            .sorted { ($0.value, $1.key) > ($1.value, $0.key) }
+            // Descending by count, ascending by name. A tuple comparison sorts both
+            // components the same way, so `> ($1.value, $0.key)` left equal counts
+            // in *reverse* alphabetical order — `Tests (30) · Sources (30)`. Two
+            // explicit steps are the only way to mix directions
+            // (audit Tier 5 #42).
+            .sorted { a, b in
+                a.value != b.value ? a.value > b.value : a.key < b.key
+            }
             .prefix(5)
             .map { "\($0.key) (\($0.value))" }
     }
@@ -269,7 +276,10 @@ public struct ProjectMap: Codable, Sendable, Equatable {
         }
 
         let languages = byLanguage
-            .sorted { ($0.value, $1.key) > ($1.value, $0.key) }
+            // Descending by count, ascending by name — see `topDirectories`.
+            .sorted { a, b in
+                a.value != b.value ? a.value > b.value : a.key < b.key
+            }
             .prefix(3)
             .map(\.key)
 
