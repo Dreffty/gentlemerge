@@ -16,17 +16,25 @@ final class IdentityTests: XCTestCase {
         XCTAssertFalse(override.verified)
     }
 
-    func testWeakPresenceFallsBackWhenAmbiguous() throws {
+    /// One live mark is not evidence about who is asking. It used to be read as
+    /// such, and a fresh agent became the agent already working: it claimed
+    /// paths as them and renewed their claim instead of conflicting with it
+    /// (audit 2026-10-08). Two marks were already the ambiguous case that fell
+    /// back to `you`; one is the same case with a smaller sample.
+    func testOneLivePresenceMarkIsNotAnIdentity() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = try Paths(home: root.appendingPathComponent("home")).createDirectories()
         let project = ProjectRegistry.canonicalPath(for: root.path)
-        Presence.record(label: "a", project: project, branch: nil, task: nil, paths: paths)
+        Presence.record(label: "alice", project: project, branch: nil, task: nil, paths: paths)
+
         let one = Identity.resolve(cwd: root.path, provider: .unknown, paths: paths, environment: [:])
-        XCTAssertEqual(one.label, "a")
-        XCTAssertEqual(one.source, .presence)
+        XCTAssertEqual(one.label, "you")
+        XCTAssertEqual(one.source, .human)
         XCTAssertFalse(one.verified)
-        Presence.record(label: "b", project: project, branch: nil, task: nil, paths: paths)
+
+        // A second mark changes nothing, and a provider still names us.
+        Presence.record(label: "bob", project: project, branch: nil, task: nil, paths: paths)
         XCTAssertEqual(Identity.resolve(cwd: root.path, provider: .unknown, paths: paths, environment: [:]).source, .human)
         let provider = Identity.resolve(cwd: root.path, provider: .claudeCode, paths: paths, environment: [:])
         XCTAssertEqual(provider.label, "claude")

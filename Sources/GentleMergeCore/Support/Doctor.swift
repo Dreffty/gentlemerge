@@ -92,9 +92,15 @@ public struct Doctor: Sendable {
     }
 
     static func app(paths: Paths) -> Check {
+        // `pid > 0` before `kill`, exactly as `Liveness.isProcessAlive` does and
+        // for the same stated reason: nothing above the pid_t range was ever a
+        // pid. A hand-edited or corrupt `app.pid` of `-1` made `kill(-1, 0)`
+        // return 0 (it reports success for "any process may be signalled") and
+        // printed "running (pid -1)"; `0` signals the caller's own process group
+        // (audit Tier 5 #30).
         if let pid = try? String(contentsOf: paths.appPID, encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines),
-            let value = Int32(pid), kill(value, 0) == 0 {
+            let value = Int32(pid), value > 0, kill(value, 0) == 0 {
             return Check(name: "app", level: .ok, detail: "running (pid \(value))")
         }
         return Check(name: "app", level: .ok, detail: "not running — the CLI works without it")
@@ -118,9 +124,15 @@ public struct Doctor: Sendable {
         if missing.isEmpty {
             // Hooks without a gate binary warn on every commit but check
             // nothing. That is exactly the state worth shouting about.
+            // `paths.bin`, not `homeDirectoryForCurrentUser`: that is where
+            // `GitHookInstaller.gateDefault` actually resolves the binary, so
+            // with `GENTLEMERGE_HOME` set — or on Linux under `XDG_STATE_HOME` —
+            // doctor used to look in the real home, find nothing, and report
+            // "commits pass unchecked" for a perfectly healthy install. Its own
+            // `DoctorTests` only ever set `GENTLEMERGE_BIN`, so the path was
+            // never exercised (audit Tier 5 #44).
             let gate = ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"]
-                ?? (FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent(".gentlemerge/bin/gentlemerge").path)
+                ?? paths.bin.appendingPathComponent("gentlemerge").path
             if !FileManager.default.isExecutableFile(atPath: gate) {
                 return Check(name: "git-hooks", level: .warn,
                     detail: "hooks live in \(directory.path) but the gate binary is missing at \(gate) — commits pass unchecked. Reinstall (`gentlemerge install`) or set GENTLEMERGE_BIN.")

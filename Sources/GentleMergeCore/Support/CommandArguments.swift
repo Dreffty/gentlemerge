@@ -70,7 +70,16 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
         while index < raw.count {
             let argument = raw[index]
             if Self.valueFlags.contains(argument) {
-                index += 2
+                // Only skip the next token when it really is a value. `value(after:)`
+                // returns nil for a following flag (so `--to --global` reads the
+                // right way), but this unconditionally did `index += 2` and
+                // swallowed that flag too. Reachable: `gentlemerge radar --project`
+                // with no value left `single == false` downstream and swept every
+                // registered project instead of the named one, with no error
+                // (audit Tier 5 #25).
+                let nextIsValue = index + 1 < raw.count
+                    && !(raw[index + 1].hasPrefix("-") && raw[index + 1].count > 1)
+                index += nextIsValue ? 2 : 1
             } else if argument.hasPrefix("-") {
                 index += 1
             } else {

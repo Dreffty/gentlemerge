@@ -133,7 +133,16 @@ public enum ConflictRadar {
             "/usr/bin/env",
             ["git"] + arguments,
             in: URL(fileURLWithPath: repo),
-            environment: ["GIT_OPTIONAL_LOCKS": "0"],
+            // core.quotePath=false: merge-tree and diff C-quote any non-ASCII
+            // path (`"sp\303\244 ce.txt"`), and every consumer needs the real
+            // bytes — the same pattern stagedFiles adopted in 485f09c. No -z
+            // for merge-tree, so the config is the whole fix (Tier 2 #7).
+            environment: [
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.quotePath",
+                "GIT_CONFIG_VALUE_0": "false",
+            ],
             timeout: timeout
         )
     }
@@ -150,17 +159,52 @@ public enum ConflictRadar {
         return agentBranches(from: output.lines)
     }
 
-    /// The paths `a` and `b` would conflict on, [] when they merge cleanly,
-    /// nil when git could not answer (unknown ref, old git, wrong directory).
-    public static func conflicts(between a: String, and b: String, in repo: String) -> [String]? {
+    /// What `git merge-tree` said.
+    ///
+    /// The old `[String]?` overload made "shares no history" and "git could not
+    /// answer" the same `nil`, and callers read the first for the second: a
+    /// transient lock was reported as "share no history — a rebase would fail
+    /// too", and auto-land claimed "radar sees a conflict" for a radar that
+    /// never answered. Typed, so each caller tells the truth about which one
+    /// it got (audit Tier 2 #8).
+    public enum ConflictAnswer: Sendable, Equatable {
+        case clean
+        case paths([String])
+        /// The refs genuinely share no history — confirmed by merge-base.
+        case unrelatedHistories
+        /// git could not answer at all (missing, timeout, index lock, bad option).
+        case unanswered(detail: String)
+
+        /// The conflict paths, or nil for every answer that is not "conflicts".
+        /// Sweep reads `clean` and `unanswered` alike (never fails, never
+        /// warns blind); land and auto-land switch on the full enum.
+        public var conflictPaths: [String]? {
+            if case .paths(let paths) = self { return paths }
+            return nil
+        }
+    }
+
+    /// The paths `a` and `b` would conflict on, or which way git failed to say.
+    public static func conflicts(between a: String, and b: String, in repo: String) -> ConflictAnswer {
         let output = git(
             ["merge-tree", "--write-tree", "--no-messages", "--name-only", a, b],
             in: repo
         )
-        if output.succeeded { return [] }
-        guard output.status == 1 else { return nil }
-        let parsed = parseMergeTreeNameOnly(output.stdout)
-        return parsed.isEmpty ? nil : parsed
+        if output.succeeded { return .clean }
+        if output.status == 1 {
+            let parsed = parseMergeTreeNameOnly(output.stdout)
+            return parsed.isEmpty
+                ? .unanswered(detail: "merge-tree reported a conflict but listed no paths")
+                : .paths(parsed)
+        }
+        // Exit 128 (or anything else): only *unrelated histories* may be read
+        // as "no merge base". Ask merge-base to be sure — a lock or a missing
+        // git must not masquerade as a repository fact. merge-base exits 1
+        // with no output exactly when the refs share no ancestor.
+        let base = git(["merge-base", a, b], in: repo, timeout: 10)
+        if base.status == 1 { return .unrelatedHistories }
+        let firstLine = output.text.split(separator: "\n").first.map(String.init)
+        return .unanswered(detail: firstLine ?? "merge-tree exited \(output.status)")
     }
 
     /// Branches old enough to be archaeology stay out of the pair phase: a
@@ -176,11 +220,20 @@ public enum ConflictRadar {
         return sha.isEmpty ? nil : sha
     }
 
-    /// Paths changed on `tip` since `base`, nil when git could not answer.
+    /// Paths `tip` changed since `base`, nil when git could not answer.
+    ///
+    /// `--name-status -M` so a rename contributes **both** names. Plain
+    /// `--name-only` gives disjoint sets for a rename/modify pair (new here,
+    /// old there), `overlaps` said false, and the pair never reached
+    /// merge-tree — a real conflict the radar could never announce, which is
+    /// the feature's stated purpose failing silently (audit Tier 2 #9).
     static func changedFiles(from base: String, to tip: String, in repo: String) -> [String]? {
-        let output = git(["diff", "--name-only", "\(base)...\(tip)"], in: repo, timeout: 10)
+        let output = git(
+            ["diff", "--name-status", "-z", "-M", "\(base)...\(tip)"],
+            in: repo, timeout: 10
+        )
         guard output.succeeded else { return nil }
-        return output.lines.filter { !$0.isEmpty }
+        return GitSnapshot.parseNameStatus(output.stdout).flatMap(\.paths)
     }
 
     static func refExists(_ ref: String, in repo: String) -> Bool {
@@ -248,6 +301,20 @@ public enum ConflictRadar {
         if state.lastRun.count > 200 {
             let cutoff = state.lastRun.values.sorted().suffix(200).first ?? .distantPast
             state.lastRun = state.lastRun.filter { $0.value >= cutoff }
+        }
+        // The same cap the other two maps get. `lastAutoNote` was one key per
+        // project *and branch*, and `pairOffset` one per project, neither ever
+        // pruned — so the file grew for as long as the machine kept branching,
+        // which is the growth the other two lines were written to prevent
+        // (audit Tier 5 #41).
+        if state.lastAutoNote.count > 200 {
+            let cutoff = state.lastAutoNote.values.sorted().suffix(200).first ?? .distantPast
+            state.lastAutoNote = state.lastAutoNote.filter { $0.value >= cutoff }
+        }
+        // Projects disappear; their offsets do not need to outlive them by much.
+        if state.pairOffset.count > 100 {
+            let cutoff = state.pairOffset.values.sorted().suffix(100).first ?? 0
+            state.pairOffset = state.pairOffset.filter { $0.value >= cutoff }
         }
         do {
             try AtomicFile.write(try JSONCoding.encoder(pretty: true).encode(state), to: paths.radar)
@@ -353,7 +420,7 @@ public enum ConflictRadar {
                     for branch in branches where branch != into {
                         guard Landing.aheadCount(branch: branch, into: into, repo: project) > 0 else { continue }
                         let base = mergeBase(branch, into, in: project)
-                        guard let conflicted = conflicts(between: branch, and: into, in: project),
+                        guard let conflicted = conflicts(between: branch, and: into, in: project).conflictPaths,
                               !conflicted.isEmpty
                         else { continue }
                         if announce(conflicted, mine: branch, other: into, base: base) { announced += 1 }
@@ -381,7 +448,7 @@ public enum ConflictRadar {
                           let filesA = changedFiles(from: base, to: first, in: project),
                           let filesB = changedFiles(from: base, to: second, in: project),
                           overlaps(filesA, filesB),
-                          let conflicted = conflicts(between: first, and: second, in: project),
+                          let conflicted = conflicts(between: first, and: second, in: project).conflictPaths,
                           !conflicted.isEmpty
                     else { continue }
                     // One conflict, two warnings: the count says conflicts.

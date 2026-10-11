@@ -19,6 +19,11 @@ public struct SpoolEnvelope: Codable, Sendable, Equatable {
     /// CLAUDE_CODE_MESSAGING_SOCKET to its hooks). A notice delivered there
     /// arrives even while the session is idle.
     public var socket: String?
+    /// The worktree label resolved by the hook (GENTLEMERGE_LABEL or
+    /// `git config gentlemerge.label`). Carried top-level — not inside the
+    /// agent-controlled payload — so implicit claims attribute to the label,
+    /// the same way the gate resolves identity. Absent on old envelopes.
+    public var label: String?
     public var payload: JSONValue
 
     enum CodingKeys: String, CodingKey {
@@ -32,6 +37,7 @@ public struct SpoolEnvelope: Codable, Sendable, Equatable {
         case terminalProgram = "term_program"
         case terminalSessionID = "term_session_id"
         case socket
+        case label
         case payload
     }
 
@@ -46,6 +52,7 @@ public struct SpoolEnvelope: Codable, Sendable, Equatable {
         terminalProgram: String? = nil,
         terminalSessionID: String? = nil,
         socket: String? = nil,
+        label: String? = nil,
         payload: JSONValue = .object([:])
     ) {
         self.schema = schema
@@ -58,6 +65,7 @@ public struct SpoolEnvelope: Codable, Sendable, Equatable {
         self.terminalProgram = terminalProgram
         self.terminalSessionID = terminalSessionID
         self.socket = socket
+        self.label = label
         self.payload = payload
     }
 
@@ -72,6 +80,7 @@ public struct SpoolEnvelope: Codable, Sendable, Equatable {
         terminalProgram = SpoolEnvelope.decodeNonEmptyString(container, .terminalProgram)
         terminalSessionID = SpoolEnvelope.decodeNonEmptyString(container, .terminalSessionID)
         socket = SpoolEnvelope.decodeNonEmptyString(container, .socket)
+        label = SpoolEnvelope.decodeNonEmptyString(container, .label)
         payload = (try? container.decode(JSONValue.self, forKey: .payload)) ?? .object([:])
 
         // Shell writes numbers as strings often enough that we accept both.
@@ -96,6 +105,7 @@ public struct SpoolEnvelope: Codable, Sendable, Equatable {
         try container.encodeIfPresent(terminalProgram, forKey: .terminalProgram)
         try container.encodeIfPresent(terminalSessionID, forKey: .terminalSessionID)
         try container.encodeIfPresent(socket, forKey: .socket)
+        try container.encodeIfPresent(label, forKey: .label)
         try container.encode(payload, forKey: .payload)
     }
 

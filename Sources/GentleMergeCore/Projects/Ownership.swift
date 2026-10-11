@@ -88,12 +88,73 @@ public struct Ownership: Sendable, Equatable {
     }
 
     /// The rules in force plus where they came from. Pinned wins when present;
-    /// otherwise the HANDOFF.md section, exactly as before.
-    public static func effective(project: String, paths: Paths) -> (ownership: Ownership, authority: Authority) {
+    /// otherwise the HANDOFF.md section.
+    ///
+    /// `handoffIsStaged` is what makes the `Authority` doc comment true rather
+    /// than aspirational. HANDOFF.md is a tracked file that the committing
+    /// agent is itself editing, so treating its zones as authoritative let one
+    /// agent stage an invasion of somebody's zone *and* the deletion of that
+    /// zone's declaration in a single commit: the gate saw no zone, the commit
+    /// landed, and the declaration was then gone from history for everybody —
+    /// the next agent found the zone free (audit 2026-10-07).
+    ///
+    /// Narrowed to the threat it names (audit 2026-10-08): what must not rule
+    /// is a zone the commit is *rewriting*, not any commit that happens to
+    /// touch the file. Disarming on the file's presence switched the whole
+    /// ownership layer off for the ordinary case — the task list lives in the
+    /// same HANDOFF.md, `AGENT_PROTOCOL.md` tells every agent to write tasks
+    /// there, and the tool itself rewrites the Recent-commits section, so the
+    /// normal "I finished something, let me record it" commit sailed past every
+    /// zone unchecked. Now the staged zones are compared with the ones at HEAD:
+    /// unchanged (the overwhelmingly common case) keeps enforcing, and only a
+    /// commit that actually rewrites them falls back to the pinned store, which
+    /// lives in the home and cannot be reached from the worktree. Pinning stays
+    /// opt-in; this just stops the unverified source from ruling when it is
+    /// being rewritten under the judge's feet.
+    public static func effective(
+        project: String,
+        paths: Paths,
+        handoffIsStaged: Bool = false
+    ) -> (ownership: Ownership, authority: Authority) {
         if let rules = loadPinned(paths: paths)[project], !rules.isEmpty {
             return (Ownership(rules: rules), .pinned)
         }
-        return (from(handoff: ProjectRegistry.handoff(for: project, refreshingCommits: false)), .handoff)
+        let current = from(handoff: ProjectRegistry.handoff(for: project, refreshingCommits: false))
+        guard handoffIsStaged else { return (current, .handoff) }
+        // Fail closed: an answer we could not get is not permission.
+        guard let atHead = rulesAtHead(project: project), atHead == current else {
+            return (Ownership(rules: []), .handoff)
+        }
+        return (current, .handoff)
+    }
+
+    /// The zones as `HEAD` declares them, or nil when git could not say.
+    ///
+    /// `HEAD`, not the index: what is staged is about to be compared against
+    /// the revision the current working tree grew from, and that is the one the
+    /// last agent committed. nil (unborn HEAD, no repository, unreadable file)
+    /// reads as "the zones are being rewritten" — the caller's safe direction.
+    static func rulesAtHead(project: String) -> Ownership? {
+        let output = Shell.run(
+            "/usr/bin/env",
+            ["git", "show", "HEAD:\(handoffRelativePath)"],
+            in: URL(fileURLWithPath: project),
+            environment: ["GIT_OPTIONAL_LOCKS": "0"],
+            timeout: 10
+        )
+        guard output.succeeded else { return nil }
+        // Parse through the same path as the working tree, so a zone the
+        // markdown round trip would drop is seen as dropped here too.
+        return parse(
+            section: HandoffMarkdown.parse(output.stdout, projectPath: project)
+                .extraSections.first { $0.heading.caseInsensitiveCompare(heading) == .orderedSame }?.body ?? ""
+        )
+    }
+
+    /// The handoff file as git would name it in a diff — the one form the
+    /// caller compares against a staged path.
+    public static var handoffRelativePath: String {
+        "\(ProjectHandoff.directoryName)/\(ProjectHandoff.fileName)"
     }
 
     /// Copy the HANDOFF.md zones into the pinned authority. Returns what was
@@ -130,9 +191,22 @@ public struct Ownership: Sendable, Equatable {
     }
 
     /// Most specific rule wins (longest literal prefix).
+    /// The most specific matching zone wins.
+    ///
+    /// "Specific" is `Glob.specificity`, not the literal prefix alone: ranking by
+    /// the prefix threw away everything after the first wildcard, so a pattern
+    /// naming an exact file could lose to one naming a directory, and two
+    /// different patterns could tie and be separated only by their order in the
+    /// file (audit Tier 4 #20). Ties keep the earliest declaration, as before.
     public func owner(of path: String) -> String? {
         rules.filter { Glob.matches($0.pattern, path) }
-            .max { Glob.literalPrefix($0.pattern).count < Glob.literalPrefix($1.pattern).count }?
+            .max {
+                let a = Glob.specificity(of: $0.pattern)
+                let b = Glob.specificity(of: $1.pattern)
+                if a.longestRun != b.longestRun { return a.longestRun < b.longestRun }
+                if a.literalCount != b.literalCount { return a.literalCount < b.literalCount }
+                return a.prefix < b.prefix
+            }?
             .owner
     }
 

@@ -34,10 +34,22 @@ final class CLIConfigTests: XCTestCase {
 
     func testInvalidValuesAreRefusedBeforeWriting() throws {
         XCTAssertEqual(config(["set", "dispatchMode", "turbo"]).status, 64)
+        // A negative is a typo, not an intent. Zero is the documented way to say
+        // "uncapped" and used to be rejected by the shared positive-integer
+        // guard, which made the field's own documentation unreachable
+        // (audit Tier 5 #43).
         XCTAssertEqual(config(["set", "dispatchDailyBudgetMinutes", "-5"]).status, 64)
+        XCTAssertEqual(config(["set", "retentionDays", "0"]).status, 64)
         XCTAssertEqual(config(["set", "nope", "1"]).status, 64)
         XCTAssertEqual(config(["get", "nope"]).status, 64)
         // Nothing was written: a refusal must not leave a half config behind.
         XCTAssertFalse(FileManager.default.fileExists(atPath: Paths(home: home).config.path))
+    }
+
+    /// The one value the field's own comment promises has to be reachable.
+    func testZeroDailyBudgetMeansUncappedAndIsAccepted() throws {
+        XCTAssertEqual(config(["set", "dispatchDailyBudgetMinutes", "0"]).status, 0)
+        let stored = AppConfig.load(from: Paths(home: home).config)
+        XCTAssertEqual(stored.dispatchDailyBudgetMinutes, 0)
     }
 }

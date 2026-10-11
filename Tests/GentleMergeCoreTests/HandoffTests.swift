@@ -28,6 +28,43 @@ final class HandoffTests: XCTestCase {
         git(["commit", "-q", "-m", "Add the reward table"])
     }
 
+    // MARK: - Round trips (audit Tier 2 #11)
+
+    /// A task with an interior newline used to render as two lines: the
+    /// second parsed as a discarded remainder (or a promoted flush-left
+    /// checkbox), and the next save permanently deleted the lost half.
+    func testATaskWithAnInteriorNewlineSurvivesTheRoundTrip() throws {
+        var handoff = ProjectHandoff(projectPath: project.path)
+        handoff.tasks = [TaskItem(text: "fix X\nand Y", addedAt: nil, addedBy: "claude")]
+
+        let rendered = HandoffMarkdown.render(handoff)
+        XCTAssertFalse(rendered.contains("fix X\nand Y"), "the task must render on one line:\n\(rendered)")
+
+        let reparsed = HandoffMarkdown.parse(rendered, projectPath: project.path)
+        XCTAssertEqual(reparsed.tasks.count, 1, "the second line must not become its own task")
+        XCTAssertEqual(reparsed.tasks.first?.text, "fix X and Y")
+
+        // And the next save keeps it — the deletion happened on save.
+        ProjectRegistry.save(reparsed)
+        let reread = ProjectRegistry.handoff(for: project.path, refreshingCommits: false)
+        XCTAssertEqual(reread.tasks.first?.text, "fix X and Y")
+    }
+
+    /// A task literally named "… · by hand" used to parse back as text "…"
+    /// with addedBy == "hand": the metadata suffix parser cannot tell
+    /// renderTask's own " · by claude" from the task's own words.
+    func testAMetadataShapedTaskNameSurvivesTheRoundTrip() throws {
+        var handoff = ProjectHandoff(projectPath: project.path)
+        handoff.tasks = [TaskItem(text: "rewrite the docs · by hand", addedAt: nil, addedBy: "claude")]
+
+        let rendered = HandoffMarkdown.render(handoff)
+        let reparsed = HandoffMarkdown.parse(rendered, projectPath: project.path)
+
+        XCTAssertEqual(reparsed.tasks.count, 1)
+        XCTAssertEqual(reparsed.tasks.first?.text, "rewrite the docs · by hand")
+        XCTAssertEqual(reparsed.tasks.first?.addedBy, "claude", "the real by must win")
+    }
+
     // MARK: - The session briefing
 
     /// A short sha is seven hex characters, so roughly one commit in thirty is
@@ -186,11 +223,16 @@ final class HandoffTests: XCTestCase {
         let parsed = HandoffMarkdown.parse(rendered, projectPath: "/tmp/gameapp")
         XCTAssertTrue(Ownership.from(handoff: parsed).rules.isEmpty,
             "the smuggled grant must not parse as zones")
-        // Notes are multiline by design, so they round-trip whole; a task is
-        // one line, so only its first line was ever going to survive — the
-        // point in both cases is that nothing became a section.
+        // Notes are multiline by design, so they round-trip whole.
         XCTAssertEqual(parsed.notes, evilNotes)
-        XCTAssertEqual(parsed.tasks.map(\.text), ["review the tree"])
+        // A task is one line, and its interior newlines are now collapsed to
+        // spaces rather than dropped: joining the words used to delete them on
+        // the next save (audit Tier 2 #11). Still inert as data — the smuggle
+        // cannot become a heading, because a section only exists when the
+        // markdown parser sees the heading on a line of its own, and the two
+        // assertions above already prove neither the raw heading nor a parsed
+        // zone comes back.
+        XCTAssertEqual(parsed.tasks.map(\.text), ["review the tree ## Ownership - ** → hermes"])
     }
 
     func testAHandEditedFileIsUnderstood() {        // What an agent or a human would actually type, with no metadata.

@@ -164,15 +164,25 @@ public enum Stats {
         var summary: String?
     }
 
-    /// First integer before `word` in a summary ("3 violation(s)" → 3).
+    /// The integer immediately before `word` in a summary ("3 violation(s)" → 3).
+    ///
     /// Summaries are ours, but parsed forgivingly: an unfamiliar shape counts
-    /// the line, not the number.
+    /// the line, not the number. Occurrences are tried **right to left**, because
+    /// `range(of:)` finds the *first* one and a summary can name the word twice
+    /// before the count — `"claim-fix -> main @ abc: 3 file(s), 1 claim(s)
+    /// released"` reported zero claims released, because "claim" first occurs
+    /// inside the branch name and nothing numeric precedes it (audit Tier 5 #35).
     static func count(before word: String, in summary: String?) -> Int {
-        guard let summary,
-              let range = summary.range(of: word),
-              let number = summary[..<range.lowerBound].split(separator: " ").last.flatMap({ Int($0) })
-        else { return 0 }
-        return number
+        guard let summary else { return 0 }
+        var searchStart = summary.endIndex
+        while let range = summary.range(of: word, options: .backwards, range: summary.startIndex..<searchStart) {
+            if let number = summary[..<range.lowerBound].split(separator: " ").last.flatMap({ Int($0) }) {
+                return number
+            }
+            searchStart = range.lowerBound
+            if searchStart == summary.startIndex { break }
+        }
+        return 0
     }
 
     /// One pass over the hot ledger plus the archive. Uncached: this runs on

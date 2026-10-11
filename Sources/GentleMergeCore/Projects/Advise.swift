@@ -28,6 +28,7 @@ public enum Advise {
         claims: [PathClaim],
         ownership: Ownership,
         activeRequest: AgentRequest? = nil,
+        activeRequests: [AgentRequest]? = nil,
         now: Date = Date(),
         presence: [Presence.PresenceMark] = [],
         isPIDAlive: (@Sendable (Int) -> Bool?)? = nil
@@ -61,11 +62,14 @@ public enum Advise {
                 ))
             }
         }
-        if let activeRequest, !activeRequest.mayTouch.isEmpty,
-           !activeRequest.mayTouch.contains(where: { Glob.matches($0, path) }) {
+        let scoped = activeRequests ?? activeRequest.map { [$0] } ?? []
+        let union = scoped.flatMap(\.mayTouch)
+        if !union.isEmpty,
+           !union.contains(where: { Glob.matches($0, path) }) {
+            let names = scoped.map(\.id).joined(separator: ", ")
             notes.append(AdviseNote(
-                text: "✖ `\(path)` is outside your delegated request \(activeRequest.id)"
-                    + " scope (\(activeRequest.mayTouch.joined(separator: ", ")))."
+                text: "✖ `\(path)` is outside your delegated request\(scoped.count == 1 ? " \(names)" : "s \(names)")"
+                    + " scope (\(union.joined(separator: ", ")))."
                     + " Finish the request first or ask for a wider scope.",
                 denies: true
             ))

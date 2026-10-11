@@ -255,6 +255,43 @@ final class ConflictRadarTests: XCTestCase {
         ))
     }
 
+    /// A rename/modify pair reaches merge-tree only when the change sets
+    /// overlap. Plain `--name-only` gave {new.txt} vs {old.txt} — disjoint —
+    /// so the pair was never checked: a real conflict the radar could never
+    /// announce, which is the whole point of the pair phase failing silently
+    /// (audit Tier 2 #9).
+    func testARenameModifyConflictIsAnnouncedDespiteDisjointNameSets() throws {
+        let repo = try makeRepo()
+        try write("one\n", to: "old.txt", in: repo)
+        commit("adds old", in: repo)
+
+        git(["checkout", "-qb", "agent/a", "main"], in: repo)
+        git(["mv", "old.txt", "new.txt"], in: repo)
+        try write("one\nA\n", to: "new.txt", in: repo)
+        commit("alice renames", in: repo)
+
+        git(["checkout", "-qb", "agent/b", "main"], in: repo)
+        try write("one\nB\n", to: "old.txt", in: repo)
+        commit("bob edits", in: repo)
+
+        let base = try XCTUnwrap(ConflictRadar.mergeBase("agent/a", "agent/b", in: repo.path))
+        let filesA = try XCTUnwrap(ConflictRadar.changedFiles(from: base, to: "agent/a", in: repo.path))
+        let filesB = try XCTUnwrap(ConflictRadar.changedFiles(from: base, to: "agent/b", in: repo.path))
+        XCTAssertTrue(
+            ConflictRadar.overlaps(filesA, filesB),
+            "a rename contributes both names: A=\(filesA) B=\(filesB)"
+        )
+
+        XCTAssertEqual(
+            ConflictRadar.sweep(project: repo.path, paths: paths, ignoreThrottle: true),
+            .done(announced: 1, pairs: 1)
+        )
+        XCTAssertTrue(
+            busMessages().contains { $0.text.contains("new.txt") },
+            "the rename/modify conflict must be announced: \(busMessages().map(\.text))"
+        )
+    }
+
     /// Three branches, one pair per sweep: each sweep announces a new pair
     /// until every pair has been seen, and the ledger says the sweep was
     /// capped. Without rotation the first pair would starve the rest.

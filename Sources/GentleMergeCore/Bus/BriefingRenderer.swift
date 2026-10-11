@@ -16,6 +16,14 @@ public enum BriefingBudget {
     /// One peer message never costs more than this per line, however much log
     /// somebody pastes into it.
     public static let maxCharsPerLine = 500
+    /// Priority (urgent/handoff/request) budget per briefing, in characters.
+    /// ~800 chars ≈ 200 tokens: enough for a handful of blockers, small enough
+    /// to leave room for the rest in a delta turn. The first urgent always goes
+    /// through complete; the rest page FIFO within this budget, fairly across
+    /// senders, with a one-line counter for what stays pending. Without it, a
+    /// flood of urgents bypasses the total cap (they lead and are exempt from
+    /// the cut) and eats the turn.
+    public static let maxPriorityChars = 800
 }
 
 /// What this reader touches: their live claim patterns plus the scope of
@@ -107,16 +115,45 @@ public struct BriefingRenderer: Sendable {
         guard text.count > cap else { return text }
         var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         guard firstLines < lines.count else { return text }
-        let kept = lines.prefix(firstLines).joined(separator: "\n")
+        var kept = lines.prefix(firstLines).joined(separator: "\n")
         lines.removeFirst(firstLines)
-        // Untouched path when nothing is kept: byte-identical to the old cut.
-        let budget = kept.isEmpty ? cap : cap - kept.count - 1
-        let rest = lines.joined(separator: "\n")
-        guard rest.count > budget else { return text }
-        let cut = String(rest.prefix(max(budget, 0)))
-        // cut at the last complete line so we never emit half a bullet
-        let safe = cut.lastIndex(of: "\n").map { String(cut[..<$0]) } ?? cut
+        // `kept` is the conflict-class prefix: urgent news, the peer list and the
+        // leading message blocks. It leads and is normally exempt from the cut —
+        // a warning must enter even when the rest of the budget is spent — but
+        // "exempt" must not mean "unbounded".
+        //
+        // It was unbounded. `kept.count` counts characters where `firstLines`
+        // counted lines, so a prefix larger than the cap drove the remainder's
+        // budget negative, `max(budget, 0)` zero, and the return was `kept + tail`
+        // with no upper clamp anywhere: measured 5864 chars against a cap of
+        // 1200, while the README sells ~231 tokens/turn as a guarantee
+        // (audit 2026-10-07). The existing flood test never saw it because its
+        // inputs (100 messages of ~18 chars, one sender, no peers, no claims) kept
+        // `kept` small enough that nothing was ever cut — 1191 chars, no
+        // truncation notice at all.
+        //
+        // So the cap wins over the exemption. Cutting inside the prefix is safe
+        // because the caller re-checks every candidate against the output and
+        // leaves whatever did not survive pending — that is the whole point of
+        // the post-cap pass, and it used to be unreachable from here because
+        // `kept` could not be cut at all. The notice below always says where the
+        // rest of it lives.
         let tail = "\n- …truncated; run `gentlemerge brief` for the full picture"
+        let ceiling = max(0, cap - tail.count - 1)
+        if kept.count > ceiling {
+            let hard = String(kept.prefix(ceiling))
+            kept = hard.lastIndex(of: "\n").map { String(hard[..<$0]) } ?? ""
+        }
+
+        let rest = lines.joined(separator: "\n")
+        let budget = kept.isEmpty ? cap : max(0, cap - kept.count - 1)
+        guard rest.count > budget else { return text }
+        let cut = String(rest.prefix(budget))
+        // cut at the last complete line so we never emit half a bullet. When
+        // the whole budget is shorter than the next line, that means emitting
+        // nothing here: a partial line would look like delivered mail to the
+        // post-cap check, which reads the output as a line-boundary prefix.
+        let safe = cut.lastIndex(of: "\n").map { String(cut[..<$0]) } ?? ""
         return kept.isEmpty ? safe + tail : kept + "\n" + safe + tail
     }
 }

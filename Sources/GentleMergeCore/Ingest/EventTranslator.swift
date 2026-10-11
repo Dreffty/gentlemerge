@@ -147,7 +147,7 @@ public enum EventTranslator {
         summary: String,
         detail: String? = nil,
         toolName: String? = nil,
-        paths: [String] = []
+        paths: [String]? = nil
     ) -> InboxItem {
         // Every translated item passes through here on its way to state, the
         // ledger and the briefings. Scrub here and all three are clean; scrub
@@ -155,6 +155,25 @@ public enum EventTranslator {
         // itself stays raw in the spool — owner-only files, pruned in days —
         // because advise and the translators still need to read it.)
         let safePayload = scrubbedPayload(envelope.payload)
+        // Derive the paths here rather than asking every call site. The parameter
+        // defaulted to `[]` and **no call site passed one**, so `touchedPaths`
+        // was always nil and `scope` always `.unknown` — which silently disabled
+        // the README's third Review bullet: "what nobody verified" could never
+        // mention a file outside the project, because the paths to check were
+        // never recorded. `PathExtractor.paths` had zero callers anywhere
+        // (audit Tier 5 #37). A caller that knows better still wins.
+        //
+        // The tool arguments arrive nested under `tool_input`, while
+        // `PathExtractor` reads its keys from the top level — feeding it the
+        // envelope as-is found nothing, which is very likely why it never had a
+        // caller in the first place.
+        let name = toolName ?? envelope.payload.string("tool_name")
+        let arguments = safePayload["tool_input"] ?? safePayload["input"] ?? safePayload
+        let resolved = paths ?? PathExtractor.paths(toolName: name, input: arguments)
+        // Preserve order, drop repeats — an Edit's `file_path` and `path` can
+        // both name the same file.
+        var seen = Set<String>()
+        let touched = resolved.filter { seen.insert($0).inserted }
         return InboxItem(
             id: envelope.id,
             sessionID: envelope.sessionID,
@@ -174,8 +193,8 @@ public enum EventTranslator {
             createdAt: envelope.receivedAt,
             updatedAt: envelope.receivedAt,
             payload: safePayload,
-            touchedPaths: paths.isEmpty ? nil : paths,
-            scope: PathExtractor.scope(of: paths, project: envelope.workingDirectory)
+            touchedPaths: touched.isEmpty ? nil : touched,
+            scope: PathExtractor.scope(of: touched, project: envelope.workingDirectory)
         )
     }
 

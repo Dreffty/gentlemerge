@@ -25,11 +25,21 @@ ownership: lib/store/** → claude · lib/data/** → hermes · assets/** → co
 [claude]  commit BLOCKED: ✖ lib/data/models.dart: owned by hermes per HANDOFF.md; claim it explicitly to override
 [claude]  → hermes: need a nullable `sku` on Product, can you add it?
 [hermes]  briefing:
-    ## Messages for you
-    - [claude → hermes] need a nullable `sku` on Product, can you add it?
+    Other agents you have running right now (from GentleMerge):
+    - Codex · repo (just now, working)
+    - Claude Code · repo (just now, working)
 
-coordination cost: 3 briefings (3 non-empty) · ≈ 693 tokens total · ≈ 231 tokens/turn (estimate: chars/4)
+    Messages left for you:
+    - #3163 claude · repo (just now): need a nullable `sku` on Product, can you add it?
+
+    Newly claimed by others:
+    - claude: `lib/data/models.dart` [14m]
+
+coordination cost: 3 briefings (3 non-empty) · ≈ 637 tokens total · ≈ 212 tokens/turn (estimate: chars/4)
 ```
+
+*(The token counts and the id numbers move a little run to run — the briefing
+cost is measured, and `chars/4` is an estimate.)*
 
 ## Why
 
@@ -45,7 +55,7 @@ GentleMerge takes the opposite stance: **coordination is infrastructure, not int
 | Agent doesn't know what others are doing | **Delta briefings** injected only when something changed, hard-capped at ~300 tokens; empty when nothing's new | ~20–70/turn |
 | "This task is better done by another agent" | **Requests**: a contract with `may_touch` paths, time budget, state machine and automatic callback. Delegate and keep working | ~50 once |
 | Branches will conflict at merge | **Conflict radar** (`git merge-tree`) warns both agents early; `gentlemerge land` rebases, runs checks, fast-forwards | 0 |
-| Dev servers collide on ports | Per-worktree `env.sh` with a unique port range | 0 |
+| Dev servers collide on ports | Per-worktree `env.sh` with its own 100-port range (labels absent from `config.json` get one derived from a stable hash — different labels, but not a guarantee across every possible name; add `agents` to `config.json` for the guarantee) | 0 |
 | "Did the agent actually do it right?" | **Review** lists what changed, what checks ran, and what *nobody verified* — never says "all good" | 0 |
 
 ## How it works
@@ -75,6 +85,11 @@ gentlemerge project init --git-hooks            # HANDOFF.md + pre-commit & pre-
 git worktree add ../wt-claude -b agent/claude && (cd ../wt-claude && gentlemerge project init --label claude)
 git worktree add ../wt-hermes -b agent/hermes && (cd ../wt-hermes && gentlemerge project init --label hermes)
 ```
+Every worktree gets its own label: that is what `say --to <label>` routes by and
+what the gate judges "mine" from. Labels are ASCII (`[A-Za-z0-9#-_.]`, 24 chars)
+— anything else is stripped, and the same stripping is applied when git hands the
+label back, so `--label "🚀rocket"` and `--label rocket` are one agent rather
+than two.
 Declare zones in `.gentlemerge/HANDOFF.md`:
 ```markdown
 ## Ownership
@@ -114,6 +129,7 @@ Only if you opt in, GentleMerge can deliver a fixed one-line notice to another a
 
 Guarantees come in three rungs, depending on the client — declared, not implied:
 - **Enforced** (git gate): `pre-commit`/`pre-merge-commit` block. No client option can skip it except the human escape hatch, and every skip is published to the bus. A hostile local process still can (`--no-verify`, editing the hook): the gate coordinates cooperative agents. A missing gate binary warns on every commit instead of passing silently.
+  Ownership zones are enforced from `HANDOFF.md`, with one deliberate blind spot: a commit that *rewrites the zones themselves* is not judged by them (that is the agent being its own judge), and only the pinned store rules apply in that case. Recording a task in `HANDOFF.md` — which the agent protocol tells every agent to do — does **not** switch the zones off; only changing them does.
 - **Advised** (hooks): PreToolUse warns before the edit lands. A client without hooks never hears it.
 - **Convention** (MCP): `claim_check` answers honestly, but nothing stops the edit. MCP clients coordinate by discipline plus the enforced gate at commit time.
 

@@ -111,6 +111,25 @@ final class GitSnapshotTests: XCTestCase {
         XCTAssertFalse(files.contains("build/artifact.bin"), ".gitignore is respected")
     }
 
+    func testARenamedFileComesBackUnderItsSnapshotName() throws {
+        let snapshot = try XCTUnwrap(GitSnapshot(anyPathInside: repository.path))
+        let reference = try snapshot.create(label: "before the rename")
+
+        // The agent renames a tracked file: git reports R100 old new, and the
+        // old switch dropped it on the floor — "restored 0 files" as success
+        // with the snapshot's file missing (audit Tier 2 #6).
+        git(["mv", "README.md", "GUIDE.md"])
+
+        let report = try snapshot.restore(reference)
+
+        XCTAssertEqual(read("README.md"), "hello\n", "the snapshot's file must come back")
+        XCTAssertTrue(report.restored.contains("README.md"), "reported as restored, not silent")
+        XCTAssertFalse(report.summary.contains("restored 0"), report.summary)
+        // Never delete: the rename's destination is the agent's file and stays.
+        XCTAssertEqual(read("GUIDE.md"), "hello\n")
+        XCTAssertTrue(report.created.contains("GUIDE.md"), "the renamed copy is reported, not removed")
+    }
+
     func testListingAndPruning() throws {
         let snapshot = try XCTUnwrap(GitSnapshot(anyPathInside: repository.path))
         let first = try snapshot.create(label: "one")

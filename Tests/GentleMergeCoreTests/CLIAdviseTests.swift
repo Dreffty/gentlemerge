@@ -52,7 +52,7 @@ final class CLIAdviseTests: XCTestCase {
         try paths.createDirectories()
         var config = AppConfig()
         config.claimsPolicy = "deny"
-        config.save(to: paths.config)
+        try config.save(to: paths.config)
         let output = advise()
         XCTAssertEqual(output.status, 0)
         XCTAssertTrue(output.stdout.contains("deny"), output.stdout)

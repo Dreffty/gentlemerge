@@ -5,13 +5,33 @@ public struct MCPServer {
     public let paths: Paths
     public let cwd: String
     public let identity: String
+    /// One delivery cursor per MCP process, not per label: two processes
+    /// sharing a label are two conversations — two worktrees, or two chats on
+    /// the same platform — and a shared cursor made the second one answer
+    /// `(nothing new)` while the first ate the mail (audit 2026-10-06,
+    /// finding 2). Same shape the hooks use: every session gets a unique id at
+    /// startup and consumes through its own delivery marker
+    /// (docs/ARCHITECTURE.md, "Session identity").
+    public let sessionID: String
     public var version = "1.0"
     public init(paths: Paths, cwd: String, identity: String) {
         self.paths = paths; self.cwd = cwd; self.identity = identity
+        self.sessionID = "mcp-\(identity)-\(UUID().uuidString.prefix(8).lowercased())"
     }
     public func handle(line: String) -> String? {
-        guard let request = try? JSONCoding.decoder().decode(JSONValue.self, from: Data(line.utf8)),
-              let id = request["id"] else { return nil }
+        // Unparseable input is an error, not silence. Returning nil here left a
+        // client that emitted one malformed line waiting for a response that
+        // would never come, and JSON-RPC §5 makes -32700 mandatory. A
+        // syntactically valid *non-object* (a batch array, say) reached the same
+        // dead end, because `JSONValue.subscript` requires `.object`.
+        guard let parsed = try? JSONCoding.decoder().decode(JSONValue.self, from: Data(line.utf8)),
+              parsed.objectValue != nil else {
+            return encode(.object(["jsonrpc": .string("2.0"), "id": .null,
+                "error": .object(["code": .number(-32700), "message": .string("parse error")])]))
+        }
+        let request = parsed
+        // A notification carries no id and gets no reply — that part was right.
+        guard let id = request["id"] else { return nil }
         let result: JSONValue
         switch request["method"]?.stringValue {
         case "initialize":
@@ -26,8 +46,12 @@ public struct MCPServer {
         case "tools/call":
             let name = request["params"]?["name"]?.stringValue ?? ""
             guard let tool = Self.tools.first(where: { $0.name == name }) else {
-                return encode(.object(["jsonrpc": .string("2.0"), "id": id,
-                    "error": .object(["code": .number(-32601), "message": .string("unknown tool: \(name)")])]))
+                // -32602, not -32601. -32601 is "unknown JSON-RPC *method*"; an
+                // unrecognised tool name is invalid params, and MCP says so. The
+                // old value was also identical to the one used two lines later
+                // for a genuinely unknown method, so a client could not tell
+                // "bad method" from "bad tool" (audit Tier 5 #27).
+                return rpcError(id, -32602, "unknown tool: \(name)")
             }
             // Same reason as the CLI read commands: hook events wait in the
             // spool until something consumes them, and on a headless machine
@@ -44,6 +68,9 @@ public struct MCPServer {
             if !["brief", "status"].contains(name) {
                 do {
                     let text: String
+                    // Set by the branches that failed in a way the caller must
+                    // see, rather than folded into the text.
+                    var isError = false
                     switch name {
                     case "precommit":
                         let gate = PrecommitGate(paths: paths)
@@ -51,7 +78,7 @@ public struct MCPServer {
                         let violations = PrecommitGate.evaluate(staged: files, me: identity,
                             claims: PathClaims(paths: paths).live(project: project),
                             ownership: Ownership.effective(project: project, paths: paths).ownership,
-                            activeRequest: Requests(paths: paths).inProgress(assignedTo: identity, project: project).first)
+                            activeRequests: Requests(paths: paths).inProgress(assignedTo: identity, project: project))
                         text = violations.isEmpty ? "No staged path violations." : violations.map { "\($0.path): \($0.reason)" }.joined(separator: "\n")
                         return toolReply(id, text, isError: violations.contains(where: { $0.blocking }))
                     case "claim":
@@ -82,21 +109,50 @@ public struct MCPServer {
                         guard !checkPaths.isEmpty else { text = "no paths given"; break }
                         let liveClaims = PathClaims(paths: paths).live(project: project)
                         let checkOwnership = Ownership.effective(project: project, paths: paths).ownership
-                        let checkActive = Requests(paths: paths).inProgress(assignedTo: identity, project: project).first
+                        let checkActive = Requests(paths: paths).inProgress(assignedTo: identity, project: project)
                         let checkPresence = Presence.marks(paths: paths)
                         text = checkPaths.map { checkPath in
                             let rel = checkPath.hasPrefix(project + "/")
                                 ? String(checkPath.dropFirst(project.count + 1)) : checkPath
                             let notes = Advise.check(path: rel, me: identity, claims: liveClaims,
-                                ownership: checkOwnership, activeRequest: checkActive,
+                                ownership: checkOwnership, activeRequests: checkActive,
                                 presence: checkPresence, isPIDAlive: { Liveness.isProcessAlive($0) })
                             return notes.isEmpty ? "ok \(checkPath)" : notes.map(\.text).joined(separator: "\n")
                         }.joined(separator: "\n")
                     case "task_add":
-                        _ = ProjectRegistry.addTask(args["text"]?.stringValue ?? "", to: project, by: identity)
-                        text = "added"
+                        // Report what happened rather than assuming. `addTask`
+                        // returns the handoff either way, so "added" was
+                        // returned for text the redactor had refused as almost
+                        // entirely a secret — and the agent believed the task was
+                        // on the board, without retrying or mentioning it
+                        // (audit Tier 5 #32).
+                        let outcome = ProjectRegistry.addTaskReporting(
+                            args["text"]?.stringValue ?? "", to: project, by: identity, paths: paths
+                        ).outcome
+                        switch outcome {
+                        case .added: text = "added"
+                        case .alreadyThere: text = "already on the board"
+                        case .empty: text = "not added: the text was empty"
+                        case .writeFailed:
+                            // Honest, and an error: "added" for a write that did
+                            // not land is how an agent ends up moving on with
+                            // work nobody is tracking (audit 2026-10-08).
+                            text = "not added: the task list could not be written"
+                            isError = true
+                        case .refusedAsSecret:
+                            text = "not added: the text looked almost entirely like a secret, so it was refused"
+                            isError = true
+                        }
                     case "task_done":
-                        _ = ProjectRegistry.setTask(args["id"]?.stringValue ?? "", done: true, in: project)
+                        // An id nobody issued must error, not answer `done`: an
+                        // agent that believes it closed work that never existed
+                        // reports completion upstream (audit 2026-10-06, finding 3).
+                        let doneID = args["id"]?.stringValue ?? ""
+                        let handoff = ProjectRegistry.handoff(for: project, refreshingCommits: false)
+                        guard handoff.tasks.contains(where: { $0.id == doneID }) else {
+                            throw TaskError.noSuchTask(doneID)
+                        }
+                        _ = ProjectRegistry.setTask(doneID, done: true, in: project, paths: paths)
                         text = "done"
                     case "say":
                         _ = try AgentBus(paths: paths).say(from: identity, to: args["to"]?.stringValue,
@@ -143,12 +199,12 @@ public struct MCPServer {
                             capabilities: args["capabilities"]?.arrayValue?.compactMap(\.stringValue))
                         text = "ok"
                     }
-                    return toolReply(id, text)
+                    return toolReply(id, text, isError: isError)
                 } catch { return toolReply(id, String(describing: error), isError: true) }
             }
             let mode: BriefingMode = name == "brief" ? .full : .delta
             let updates = AgentBus(paths: paths).briefing(
-                sessionID: "mcp-\(identity)", me: identity, project: project, mode: mode)
+                sessionID: sessionID, me: identity, project: project, mode: mode)
             var sections = [String]()
             if mode == .full, let context = ProjectRegistry.sessionContext(for: project) {
                 sections.append(context)
@@ -213,7 +269,7 @@ public struct MCPServer {
         Tool(name: "claim", description: "Reserve paths before editing.", details: "Fails on another agent's claim. Intent is shown to the others. TTL in minutes, default 30.", fields: ["paths": "array", "intent": "string", "ttl_minutes": "number", "project": "string"], required: ["paths"]),
         Tool(name: "claim_check", description: "Ask whether paths are editable right now.", details: "Read-only pre-edit check (claims, ownership, request scope). No hook stops an MCP edit, so check before writing and claim what you touch.", fields: ["paths": "array", "project": "string"], required: ["paths"]),
         Tool(name: "release", description: "Release your claims.", details: "Omit paths to release everything you hold.", fields: ["paths": "array", "project": "string"]),
-        Tool(name: "say", description: "Message another agent, or the human.", details: "`to` is a label, or omit it for everyone in the project.", fields: ["to": "string", "text": "string", "project": "string"], required: ["to", "text"]),
+        Tool(name: "say", description: "Message another agent, or the human.", details: "`to` is a label, or omit it for everyone in the project.", fields: ["to": "string", "text": "string", "project": "string"], required: ["text"]),
         Tool(name: "delegate", description: "Create a request by label or capability.", details: "Continue your work; do not wait. may_touch scopes the worker's paths; budget_minutes caps its time.", fields: ["to": "string", "title": "string", "spec": "string", "inputs": "array", "expected_output": "string", "may_touch": "array", "budget_minutes": "number", "project": "string"], required: ["to", "title", "spec"]),
         Tool(name: "request_show", description: "Read the full request spec.", details: "Returns the request as JSON.", fields: ["id": "string"], required: ["id"]),
         Tool(name: "request_update", description: "Accept, done, fail, reject or ack a request.", details: "Include result on done/fail.", fields: ["id": "string", "action": "string", "result": "string"], required: ["id", "action"]),
@@ -258,6 +314,17 @@ public struct MCPServer {
         let rule = WatchRule(owner: owner, projectPath: project, kind: resolved, target: ruleTarget, note: noteText)
         try Watches(paths: paths).add(rule)
         return "watching: \(subject) → \(owner) (id \(rule.shortID))"
+    }
+
+    /// `task_done` on an id that matches no task in the project.
+    enum TaskError: Error, CustomStringConvertible {
+        case noSuchTask(String)
+
+        var description: String {
+            switch self {
+            case .noSuchTask(let id): return "no task with id \"\(id)\" — call brief to see the open tasks and their ids"
+            }
+        }
     }
 
     enum WatchError: Error, CustomStringConvertible {

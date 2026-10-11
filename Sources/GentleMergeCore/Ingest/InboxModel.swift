@@ -17,7 +17,16 @@ public final class InboxModel {
     public var config: AppConfig {
         didSet {
             guard config != oldValue else { return }
-            config.save(to: paths.config)
+            // Best effort here — this is a property observer on a model the user
+            // is looking at, and there is nowhere useful to surface a throw. The
+            // CLI's own `config set` path does report its failure instead, which
+            // is the case that matters (audit Tier 5 #31).
+            do {
+                try config.save(to: paths.config)
+            } catch {
+                Log.error("could not save config: \(error.localizedDescription)")
+                lastMessage = "Could not save settings: \(error.localizedDescription)"
+            }
         }
     }
 
@@ -477,7 +486,9 @@ public final class InboxModel {
     /// the only process that lives long enough to notice, which is why the
     /// readers get their own defence in `others` instead of a share of this.
     func sweepDeadSessions(now: Date = Date()) {
-        var list = bus.activities()
+        // Stored rows only: presence is merged at read time and must never be
+        // persisted, or the sweep buries phantom sessions that never existed.
+        var list = bus.storedActivities()
         var buried: [AgentActivity] = []
 
         for index in list.indices where list[index].state != .ended {
@@ -586,7 +597,9 @@ public final class InboxModel {
     }
 
     public func clearHistory() {
+        let doomed = items.filter { !$0.isPending }.map(\.id)
         items.removeAll { !$0.isPending }
+        removedIDs.formUnion(doomed)
         saveState()
     }
 
@@ -594,11 +607,15 @@ public final class InboxModel {
 
     /// Every event says something about what that session is doing. This is the
     /// picture the other agents get to read before their next turn.
+    ///
+    /// Persists only the app-owned rows (`storedActivities`): `activities()`
+    /// merges presence at read time, and writing that merged list back freezes
+    /// presence marks into the file.
     private func updateActivity(from envelope: SpoolEnvelope) {
         recordImplicitPathClaims(from: envelope)
         guard let sessionID = envelope.sessionID else { return }
 
-        var list = bus.activities()
+        var list = bus.storedActivities()
         var activity = list.first { $0.id == sessionID }
             ?? AgentActivity(
                 id: sessionID,
@@ -701,8 +718,13 @@ public final class InboxModel {
         let rel = String(file.path.dropFirst(checkout.path.count + 1))
         guard !rel.isEmpty else { return }
 
-        // A payload label is advisory attribution, not verified caller identity.
-        let label = envelope.payload.string("label").map(Identity.safe)?.nonEmpty
+        // Identity resolution, in the same precedence the gate uses: the hook's
+        // resolved worktree label first (top-level envelope field, not the
+        // agent-controlled payload), then the simulator/advisory payload label,
+        // then the provider default. Two worktrees on one provider claiming as
+        // the provider name made the whole implicit-claim feature inert.
+        let label = envelope.label.map(Identity.safe)?.nonEmpty
+            ?? envelope.payload.string("label").map(Identity.safe)?.nonEmpty
             ?? AgentBus.label(for: envelope.provider)
         PathClaims(paths: paths).touch(file: rel, label: label, project: project)
     }
@@ -792,9 +814,28 @@ public final class InboxModel {
         } catch { lastMessage = "Could not save approval: \(error)" }
     }
 
+    /// A human says "do not run this".
+    ///
+    /// A human is not a party to the contract, and `"you"` is the label an
+    /// unlabelled worktree resolves to — so acting as `"you"` relied on the
+    /// escape hatch that let anybody move anybody's request (audit
+    /// 2026-10-07). The human's intent is "do not run this", which is the
+    /// assignee declining on the record: act as whichever agent was going to
+    /// run it.
+    ///
+    /// Through `RequestActions.perform` rather than a bare `transition`, so a
+    /// refusal also releases the `may_touch` claims `delegate` reserved when it
+    /// created the request and tells the delegator it is not happening. Without
+    /// that, a denied request still blocked those paths for its whole TTL.
     public func deny(_ id: String) {
         do {
-            _ = try Requests(paths: paths).transition(id, to: .rejected, by: "you", result: "denied by human")
+            guard let request = Requests(paths: paths).all().first(where: { $0.id == id }) else {
+                lastMessage = "No such request: \(id)."
+                return
+            }
+            let assignee = request.resolvedTo ?? request.to
+            _ = try RequestActions.perform(action: "reject", id: id, by: assignee,
+                                           result: "denied by human", paths: paths)
             pendingApprovals.removeValue(forKey: id)
             try updateApprovals { $0.remove(id) }
             lastMessage = "Denied \(id)."
@@ -825,11 +866,17 @@ public final class InboxModel {
         }
         let live = Set(liveActivities.map { AgentBus.label(for: $0.provider) })
             .union(Presence.marks(paths: paths).filter { !$0.isExpired }.map(\.label))
+        // Read the ledger once for the whole sweep, not once per assigned request.
+        // `spentTodayMinutes` reads and JSON-decodes every line of ledger.jsonl,
+        // and it was evaluated inside the loop, so N assigned requests meant N ×
+        // L decodes every 3-second tick — the app's quiet background cost
+        // scaling with work it was not doing (audit Tier 4 #21).
+        let spentToday = Dispatcher.spentTodayMinutes(paths: paths, now: now)
         for request in assigned {
             guard !dispatchedRequestIDs.contains(request.id) else { continue }
             switch DispatchGate.decide(request: request, config: config, liveLabels: live,
                 lastDispatched: lastDispatched, approved: approvedRequestIDs.contains(request.id),
-                spentTodayMinutes: Dispatcher.spentTodayMinutes(paths: paths, now: now), now: now) {
+                spentTodayMinutes: spentToday, now: now) {
             case .dispatch(let target):
                 // Mark before starting: a slow child may stay assigned past the
                 // quiet period. Neither another tick nor a start failure retries it.
@@ -868,9 +915,29 @@ public final class InboxModel {
         ProjectRegistry.handoff(for: projectPath)
     }
 
+    /// What the shared list actually did, in `lastMessage`.
+    ///
+    /// This used to call `addTask` and then say "Added to X." unconditionally:
+    /// `addTaskReporting` exists precisely to distinguish "added" from "already
+    /// on the board", "refused as a secret" and "I could not write the file",
+    /// and throwing that away meant the window claimed a task was on the board
+    /// while the board did not have it (audit 2026-10-08).
     public func addTask(_ text: String, to projectPath: String, by author: String = "you") {
-        _ = ProjectRegistry.addTask(text, to: projectPath, by: author)
-        lastMessage = "Added to \(URL(fileURLWithPath: projectPath).lastPathComponent)."
+        let (_, outcome) = ProjectRegistry.addTaskReporting(
+            text, to: projectPath, by: author, paths: paths
+        )
+        lastMessage = switch outcome {
+        case .added:
+            "Added to \(URL(fileURLWithPath: projectPath).lastPathComponent)."
+        case .alreadyThere:
+            "Already on the list — nothing was changed."
+        case .empty:
+            "Nothing to add: the text was empty."
+        case .refusedAsSecret:
+            "Not added: that looked almost entirely like a secret."
+        case .writeFailed:
+            "Not added: the task list could not be written. `gentlemerge doctor` says why."
+        }
     }
 
     /// Who is on which task here, the lapsed claims already gone.
@@ -882,20 +949,23 @@ public final class InboxModel {
     }
 
     public func setTask(_ task: TaskItem, done: Bool, in projectPath: String) {
-        _ = ProjectRegistry.setTask(task.id, done: done, in: projectPath)
+        _ = ProjectRegistry.setTask(task.id, done: done, in: projectPath, paths: paths)
         // Same rule as the CLI: ticking it off ends whatever claim was on it,
         // so nobody is left waiting for a task that no longer exists.
         if done { _ = try? TaskClaims(paths: paths).releaseAll(task.id, in: projectPath) }
     }
 
     public func removeTask(_ task: TaskItem, in projectPath: String) {
-        _ = ProjectRegistry.removeTask(task.id, in: projectPath)
+        _ = ProjectRegistry.removeTask(task.id, in: projectPath, paths: paths)
     }
 
     public func setNotes(_ notes: String, in projectPath: String) {
-        var handoff = ProjectRegistry.handoff(for: projectPath)
-        handoff.notes = notes
-        _ = ProjectRegistry.save(handoff)
+        // The same lock the task list takes: this is another read-modify-write of
+        // the same shared file, and a note typed while an agent adds a task must
+        // not overwrite it (audit 2026-10-08).
+        _ = ProjectRegistry.mutateHandoff(projectPath, in: paths) { handoff in
+            handoff.notes = notes
+        }
     }
 
     /// Writes the handoff file and points the project's CLAUDE.md / AGENTS.md at
@@ -1176,11 +1246,23 @@ public final class InboxModel {
 
     // MARK: - Persistence
 
-    private func trimHistory() {
+    /// Ids this process deliberately dropped.
+///
+/// `saveState` unions the on-disk rows back in so a headless drain cannot
+/// erase rows the menu-bar app just added. But that union also resurrected
+/// everything `clearHistory` and `trimHistory` had just removed — so "Clear
+/// history" came straight back on the next tick, and `state.json` accumulated
+/// every row ever ingested, re-encoded on every three-second drain, growing
+/// without bound (audit 2026-10-07). A removal is a decision, not a stale copy,
+/// so it has to be remembered across the merge that follows it.
+private var removedIDs: Set<String> = []
+
+private func trimHistory() {
         let resolved = items.filter { !$0.isPending }.sorted { $0.updatedAt > $1.updatedAt }
         guard resolved.count > config.historyLimit else { return }
         let doomed = Set(resolved.dropFirst(config.historyLimit).map(\.id))
         items.removeAll { doomed.contains($0.id) }
+        removedIDs.formUnion(doomed)
     }
 
     /// Internal (not private) so headless drains and tests can drive the same
@@ -1203,6 +1285,11 @@ public final class InboxModel {
             if let data = try? Data(contentsOf: paths.state),
                let stored = try? JSONCoding.decoder().decode([InboxItem].self, from: data) {
                 for row in stored {
+                    // A row we just decided to drop stays dropped. Anything we
+                    // still hold is newer than what is on disk, so it wins
+                    // regardless — which is what lets the same id come back
+                    // later as genuinely new.
+                    if byID[row.id] == nil, removedIDs.contains(row.id) { continue }
                     if let mine = byID[row.id] {
                         if row.updatedAt > mine.updatedAt { byID[row.id] = row }
                     } else {
@@ -1211,6 +1298,11 @@ public final class InboxModel {
                 }
             }
             items = Array(byID.values)
+            // An id that came back into `items` is genuinely live again, so stop
+            // treating it as removed — otherwise the removal ledger becomes the
+            // next thing that grows without bound.
+            let live = Set(items.map(\.id))
+            removedIDs = removedIDs.subtracting(live)
             try AtomicFile.write(try JSONCoding.encoder().encode(items), to: paths.state)
         } catch {
             Log.error("could not save state: \(error.localizedDescription)")

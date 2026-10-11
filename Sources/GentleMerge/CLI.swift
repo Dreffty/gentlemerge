@@ -41,7 +41,14 @@ enum CLI {
                 let paths = rest.contains("--home-real") ? Paths.fromEnvironment() : Paths(home: root.appendingPathComponent("home"))
                 _ = try MainActor.assumeIsolated {
                     try Demo.run(in: root, keep: rest.contains("--keep"), paths: paths,
-                        binary: URL(fileURLWithPath: arguments[0]).standardizedFileURL) { print($0) }
+                        // Not `arguments[0]`: that is the word the shell put in
+                        // argv[0], which for a PATH-installed binary is just
+                        // "gentlemerge" — it resolved to <cwd>/gentlemerge, the
+                        // gate then reported "binary not found" on every demo
+                        // commit and checked nothing, while the demo printed
+                        // `commit ok` for the step the README shows blocked
+                        // (audit 2026-10-08).
+                        binary: CurrentExecutable.url) { print($0) }
                 }
                 return 0
             } catch {
@@ -302,7 +309,7 @@ enum CLI {
         print("codex:           \(codexInstalled ? "notify bridge installed" : "not installed")")
 
         if let pid = try? String(contentsOf: paths.appPID, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-           let value = Int32(pid), kill(value, 0) == 0 {
+           let value = Int32(pid), value > 0, kill(value, 0) == 0 {
             print("app:             running (pid \(value))")
         } else {
             print("app:             not running")
@@ -387,13 +394,24 @@ enum CLI {
                 return 64
             }
             config.dispatchMode = value
-        case "dispatchDailyBudgetMinutes", "retentionDays":
-            guard let minutes = Int(value), minutes > 0 else {
-                FileHandle.standardError.write(Data("\(key) wants a positive integer\n".utf8))
+        case "dispatchDailyBudgetMinutes":
+            // The field is documented as "<= 0 means uncapped" and the gate reads
+            // it as `> 0`, so 0 is the only way to turn the cap off — and the
+            // shared positive-integer guard used to reject it, making the
+            // documented value unreachable (audit Tier 5 #43). Zero is accepted;
+            // a negative stays refused, because that is a typo rather than an
+            // intention.
+            guard let minutes = Int(value), minutes >= 0 else {
+                FileHandle.standardError.write(Data("\(key) wants 0 (uncapped) or a positive integer\n".utf8))
                 return 64
             }
-            if key == "dispatchDailyBudgetMinutes" { config.dispatchDailyBudgetMinutes = minutes }
-            else { config.retentionDays = minutes }
+            config.dispatchDailyBudgetMinutes = minutes
+        case "retentionDays":
+            guard let days = Int(value), days > 0 else {
+                FileHandle.standardError.write(Data("retentionDays wants a positive integer\n".utf8))
+                return 64
+            }
+            config.retentionDays = days
         case "claimsPolicy":
             guard ["warn", "deny", "off"].contains(value) else {
                 FileHandle.standardError.write(Data("claimsPolicy wants warn, deny or off\n".utf8))
@@ -410,7 +428,15 @@ enum CLI {
             FileHandle.standardError.write(Data("unknown key \"\(key)\"\n".utf8))
             return 64
         }
-        config.save(to: paths.config)
+        // Report the failure instead of printing the new value and exiting 0. A read-only
+        // or full home used to make `config set` claim success while persisting
+        // nothing, so the user believed a setting had changed (audit Tier 5 #31).
+        do {
+            try config.save(to: paths.config)
+        } catch {
+            FileHandle.standardError.write(Data("could not save \(key): \(error.localizedDescription)\n".utf8))
+            return 1
+        }
         return show(key)
     }
 
@@ -511,7 +537,14 @@ enum CLI {
         let bus = AgentBus(paths: paths)
         let identity: Identity
         do { identity = try Identity.reconcile(explicit: value(after: "--from", in: arguments),
-            resolved: Identity.resolve(cwd: projectDirectory(arguments, allowPositional: false), provider: .unknown, paths: paths))
+            // The *checkout*, not the project: `gentlemerge.label` is per worktree
+            // (`extensions.worktreeConfig`), so asking the canonical repository
+            // root answered with the main checkout's label and every worktree
+            // signed as whoever owned that one. A note from hermes filed under
+            // `from: claude` was dropped by the recipient's own `from != me`
+            // filter, and `say --done` buried the other agent's blockers
+            // (audit 2026-10-08). Every other command already used the checkout.
+            resolved: Identity.resolve(cwd: checkoutDirectory(arguments, allowPositional: false), provider: .unknown, paths: paths))
         } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1
         }
@@ -1193,11 +1226,16 @@ enum CLI {
         let repo = URL(fileURLWithPath: directory)
         let project = ProjectRegistry.canonicalPath(for: directory)
 
-        // Identity: the worktree's own label first, then the one live presence
-        // mark in this project — and none of the two means we say so once and
-        // do not block, because enforcing claims against an unknown actor
-        // would block a commit we cannot justify.
-        let label = WorktreeLabel.read(cwd: repo) ?? presenceIdentity(project: project, paths: paths)
+        // Identity for enforcement is the *worktree's own* label, and nothing
+        // else. We deliberately do not fall back to the project's single live
+        // presence mark: a mark belongs to a session, not to the directory
+        // committing here, so adopting one made `me` equal whoever happened to
+        // be alive. When that happened to be the claim holder, rule 1's
+        // `$0.label != me` skipped its own claim and the commit sailed through
+        // (audit 2026-10-07). With no label, `evaluate` still blocks on live
+        // claims — it just cannot apply ownership zones, which need somebody to
+        // tell owner from invader.
+        let label = WorktreeLabel.read(cwd: repo)
 
         // The existing overlap report, exactly as `precommit` prints it.
         let baseline = value(after: "--since", in: arguments)
@@ -1217,36 +1255,43 @@ enum CLI {
         let gate = PrecommitGate(paths: paths)
         let files = staged ? gate.stagedFiles(repo: repo) : gate.dirtyFiles(repo: repo)
         let claims = PathClaims(paths: paths).live(project: project)
-        let ownership = Ownership.effective(project: project, paths: paths).ownership
-        let active = label.flatMap { Requests(paths: paths).inProgress(assignedTo: $0, project: project).first }
+        // A commit that rewrites HANDOFF.md cannot also be judged by it — the
+        // agent could stage the invasion and the deletion of the zone's
+        // declaration together. Only the pinned store rules in that case.
+        let ownership = Ownership.effective(
+            project: project,
+            paths: paths,
+            handoffIsStaged: files.contains(Ownership.handoffRelativePath)
+        ).ownership
+        let scoped = label.map { Requests(paths: paths).inProgress(assignedTo: $0, project: project) } ?? []
         let presence = Presence.marks(paths: paths)
-        if let me = label {
-            let (_, reaped) = PathClaims.reap(
-                claims.filter { $0.label != me },
-                presence: presence, isPIDAlive: { Liveness.isProcessAlive($0) }, now: Date()
-            )
-            if !reaped.isEmpty {
-                Ledger(url: paths.ledger).append(LedgerEntry(
-                    at: Date(),
-                    kind: .note,
-                    project: project,
-                    title: "claim.reaped",
-                    summary: reaped.map { "\($0.label):\($0.pattern)" }.joined(separator: ", ")
-                ))
-            }
+        // Dead sessions lose their claims before the gate decides, labeled or
+        // not: an unlabeled commit must not stay blocked by a ghost either.
+        let (_, reaped) = PathClaims.reap(
+            claims.filter { $0.label != label },
+            presence: presence, isPIDAlive: { Liveness.isProcessAlive($0) }, now: Date()
+        )
+        if !reaped.isEmpty {
+            Ledger(url: paths.ledger).append(LedgerEntry(
+                at: Date(),
+                kind: .note,
+                project: project,
+                title: "claim.reaped",
+                summary: reaped.map { "\($0.label):\($0.pattern)" }.joined(separator: ", ")
+            ))
         }
         let violations = PrecommitGate.evaluate(
             staged: files,
             me: label,
             claims: claims,
             ownership: ownership,
-            activeRequest: active,
+            activeRequests: scoped,
             presence: presence,
             isPIDAlive: { Liveness.isProcessAlive($0) }
         )
 
         if label == nil {
-            print("gentlemerge: no label for this worktree (run `gentlemerge project init --label <name>`); claims not enforced")
+            print("gentlemerge: no label for this worktree (run `gentlemerge project init --label <name>`); live claims still block")
         }
         for violation in violations {
             print("✖ \(violation.path): \(violation.reason)")
@@ -1292,17 +1337,25 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         let directory = projectDirectory(arguments, allowPositional: false)
         let project = ProjectRegistry.canonicalPath(for: directory)
-        guard let label = WorktreeLabel.read(cwd: URL(fileURLWithPath: directory))
-            ?? presenceIdentity(project: project, paths: paths) else { return 0 }
+        // Only the worktree's own label releases claims. Falling back to the
+        // project's single live presence mark released *somebody else's*
+        // claims — unblocking other agents on files this worktree never owned.
+        // Without a label the claims simply wait out their TTL, which is the
+        // safe direction.
+        guard let label = WorktreeLabel.read(cwd: URL(fileURLWithPath: directory)) else { return 0 }
         let output = Shell.run(
             "/usr/bin/env",
-            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+            ["git", "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "HEAD"],
             in: URL(fileURLWithPath: directory),
-            environment: ["GIT_OPTIONAL_LOCKS": "0"],
+            environment: ["GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_COUNT": "1",
+                          "GIT_CONFIG_KEY_0": "core.quotePath", "GIT_CONFIG_VALUE_0": "false"],
             timeout: 10
         )
         guard output.succeeded else { return 0 }
-        let files = output.lines.filter { !$0.isEmpty }
+        // -z: with the default core.quotePath, a name holding a non-ASCII byte
+        // came back C-escaped and matched no claim pattern, so the claim was
+        // never released and stayed blocking until its TTL.
+        let files = output.stdout.components(separatedBy: "\0").filter { !$0.isEmpty }
         guard !files.isEmpty else { return 0 }
         let released = (try? PathClaims(paths: paths).releaseCovering(
             files: files, project: project, label: label
@@ -1317,13 +1370,6 @@ enum CLI {
             ))
         }
         return 0
-    }
-
-    /// The one live presence mark in a project, or nil — the weak identity of
-    /// an agent that said "I am here" and the only one that did.
-    private static func presenceIdentity(project: String, paths: Paths) -> String? {
-        let live = Presence.marks(paths: paths).filter { !$0.isExpired && $0.projectPath == project }
-        return live.count == 1 ? live[0].label : nil
     }
 
     /// The revision this session opened on, when GentleMerge saw it start.
@@ -1347,8 +1393,14 @@ enum CLI {
 
     private static func task(_ arguments: [String]) -> Int32 {
         // Only `--project` selects the directory here: a bare word is the task
-        // text, not a path.
+        // text, not a path. This is the *project* — where the shared list lives.
         let directory = projectDirectory(arguments, allowPositional: false)
+        // Who is adding it is a different question, and it is about the
+        // *checkout*: `gentlemerge.label` is per worktree, so resolving the
+        // author against the repository root credited the main checkout's label
+        // and every worktree wrote "by claude" into the shared list
+        // (audit 2026-10-08).
+        let checkout = checkoutDirectory(arguments, allowPositional: false)
 
         switch arguments.first {
         case nil, "list":
@@ -1383,7 +1435,7 @@ enum CLI {
             }
             let author: String
             do { author = try Identity.reconcile(explicit: value(after: "--by", in: arguments),
-                resolved: Identity.resolve(cwd: directory, provider: .unknown, paths: Paths.fromEnvironment())).label
+                resolved: Identity.resolve(cwd: checkout, provider: .unknown, paths: Paths.fromEnvironment())).label
             } catch {
                 FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1
             }
@@ -1399,19 +1451,33 @@ enum CLI {
             // often than it gets embedded newlines or delimiters right.
             let steps = values(after: "--step", in: arguments)
 
-            // Asked before the write, because `addTask` silently keeps the task
-            // that was already there: without this, re-running the same command
-            // would print a plan that never got recorded.
+            // Asked through the reporting API rather than by reading the list
+            // first: `addTask` keeps the task that was already there and reports
+            // nothing, so the old pre-check printed "Added to X" for a write
+            // that had just failed (a read-only home, a file in the way) and
+            // left the agent believing the task was on the board (audit
+            // 2026-10-08).
+            let (handoff, outcome) = ProjectRegistry.addTaskReporting(
+                text, to: directory, by: author, steps: steps, paths: Paths.fromEnvironment()
+            )
             let wanted = scrubbed.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let existed = ProjectRegistry
-                .handoff(for: directory, refreshingCommits: false)
-                .tasks
-                .contains { $0.text.caseInsensitiveCompare(wanted) == .orderedSame }
-
-            let handoff = ProjectRegistry.addTask(text, to: directory, by: author, steps: steps)
             let filed = handoff.tasks.first { $0.text.caseInsensitiveCompare(wanted) == .orderedSame }
 
-            if existed {
+            switch outcome {
+            case .refusedAsSecret, .empty:
+                FileHandle.standardError.write(
+                    Data("Not added — the task text could not be written down.\n".utf8)
+                )
+                return 1
+            case .writeFailed:
+                // The honest answer: the list is unwritable (read-only home, a
+                // file where the directory should be), so nothing was recorded.
+                FileHandle.standardError.write(
+                    Data(("Not added — could not write \(handoff.projectName)'s task list."
+                        + " See `gentlemerge doctor` for the home directory.\n").utf8)
+                )
+                return 1
+            case .alreadyThere:
                 let progress = filed?.progressLabel.map { " · \($0)" } ?? ""
                 print("Already on \(handoff.projectName)'s list\(progress): \(scrubbed.text)")
                 if !steps.isEmpty {
@@ -1419,6 +1485,8 @@ enum CLI {
                         + " gentlemerge task step add \"\(wanted)\" \"…\"")
                 }
                 return 0
+            case .added:
+                break
             }
 
             print("Added to \(handoff.projectName): \(scrubbed.text)")
@@ -1452,10 +1520,12 @@ enum CLI {
                 return 1
             }
             if action == "rm" {
-                _ = ProjectRegistry.removeTask(target.id, in: directory)
+                _ = ProjectRegistry.removeTask(target.id, in: directory, paths: Paths.fromEnvironment())
                 print("Removed: \(target.text)")
             } else {
-                _ = ProjectRegistry.setTask(target.id, done: action == "done", in: directory)
+                _ = ProjectRegistry.setTask(
+                    target.id, done: action == "done", in: directory, paths: Paths.fromEnvironment()
+                )
                 print("\(action == "done" ? "Done" : "Reopened"): \(target.text)")
             }
             // Finishing or dropping a task ends every claim on it, whoever made
@@ -1702,6 +1772,27 @@ enum CLI {
             provider = AgentProvider(rawValue: name) ?? .unknown
         }
 
+        // Who is reading: the label, resolved exactly as `brief --as` and every
+        // other command resolve it — env label, then this checkout's worktree
+        // label, then the provider as a last resort. Deriving `me` from the
+        // *provider* alone meant every Claude Code session called itself
+        // "claude", so `say --to hermes` (the label `project init --label`
+        // creates and AGENT_PROTOCOL.md tells agents to use) was never
+        // delivered to anybody, and two Claude worktrees each read the other's
+        // mail (audit 2026-10-08). The hook has already resolved
+        // GENTLEMERGE_LABEL — it is in the environment and in the envelope.
+        let identity: Identity
+        do {
+            identity = try Identity.reconcile(
+                explicit: value(after: "--as", in: arguments) ?? value(after: "--from", in: arguments),
+                resolved: Identity.resolve(
+                    cwd: checkoutDirectory(arguments, allowPositional: false),
+                    provider: provider ?? .unknown,
+                    paths: paths))
+        } catch {
+            FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1
+        }
+
         var blocks: [String] = []
 
         // The handoff is worth its tokens once, at the start of a session.
@@ -1735,7 +1826,7 @@ enum CLI {
         }
         if let briefing = AgentBus(paths: paths).briefing(
             sessionID: sessionID,
-            me: provider.map(AgentBus.label(for:)),
+            me: identity.label,
             project: directory,
             mode: briefMode,
             persistCursor: true
@@ -1809,6 +1900,7 @@ enum CLI {
         // means silent, the same as every other path in the bridge.
         guard ProcessInfo.processInfo.environment["GENTLEMERGE_SKIP"] == nil else { return 0 }
         let projectDirectory_ = projectDirectory(arguments, allowPositional: false)
+        let checkout = checkoutDirectory(arguments, allowPositional: false)
         if let claimed = value(after: "--from", in: arguments) ?? value(after: "--as", in: arguments) {
             do {
                 _ = try Identity.reconcile(explicit: claimed,
@@ -1828,31 +1920,49 @@ enum CLI {
             !file.isEmpty
         else { return 0 }
 
-        // Who is editing? The provider is what the hook says; a worktree label
-        // beats it when there is one.
+        // Who is editing? The label of this checkout, resolved exactly as the
+        // commit-time gate resolves it (env, then the worktree's own
+        // `gentlemerge.label`, then the provider). The old code read the label
+        // from the *repository root*, which in the documented five-worktrees
+        // layout is the main checkout — so a worktree was judged as whoever
+        // owned that one, and an agent editing its own zone heard nothing
+        // while a claim held by somebody else was silently skipped as "mine"
+        // (audit 2026-10-08).
         let provider = value(after: "--provider", in: arguments)
             .flatMap(AgentProvider.init(rawValue:))
-        let me = WorktreeLabel.read(cwd: URL(fileURLWithPath: projectDirectory_))
+        let me = WorktreeLabel.read(cwd: URL(fileURLWithPath: checkout))
             ?? provider.map(AgentBus.label(for:))
             ?? "agent"
 
-        // Claims are per repository; the file the hook names is usually inside
-        // the checkout, which shares the repository with every other worktree.
-        let project = ProjectRegistry.canonicalPath(for: projectDirectory_)
-        let rel = ToolInputFormatter.relativePath(file, cwd: project)
+        // Claims are per repository; the paths inside them are relative to the
+        // *checkout* the hook is running in, not to the main tree. The hook
+        // names an absolute path inside this worktree, and relativising it
+        // against the canonical repository root produced `../wt-bob/lib/x.dart`
+        // — which no glob can match, so the advice was silence for every agent
+        // working in a worktree, i.e. exactly the layout the README teaches
+        // (audit 2026-10-08). `recordImplicitPathClaims` already resolves the
+        // checkout correctly; this now agrees with it.
+        let project = ProjectRegistry.canonicalPath(for: checkout)
+        let rel = ToolInputFormatter.relativePath(file, cwd: checkout)
             .trimmingCharacters(in: CharacterSet(charactersIn: "~"))
 
         // The same rules as the commit-time gate, decided before the edit
         // lands: a surprise at commit time is twenty minutes of wasted work.
         let claims = PathClaims(paths: paths).live(project: project)
-        let ownership = Ownership.effective(project: project, paths: paths).ownership
-        let active = Requests(paths: paths).inProgress(assignedTo: me, project: project).first
+        // Same reasoning as the commit-time gate: the file being edited cannot
+        // also be the authority judging it.
+        let ownership = Ownership.effective(
+            project: project,
+            paths: paths,
+            handoffIsStaged: rel == Ownership.handoffRelativePath
+        ).ownership
+        let scopedAdvise = Requests(paths: paths).inProgress(assignedTo: me, project: project)
         let notes = Advise.check(
             path: rel,
             me: me,
             claims: claims,
             ownership: ownership,
-            activeRequest: active,
+            activeRequests: scopedAdvise,
             presence: Presence.marks(paths: paths),
             isPIDAlive: { Liveness.isProcessAlive($0) }
         )
@@ -1966,8 +2076,13 @@ enum CLI {
 
         let project = ProjectRegistry.canonicalPath(for: directory)
         let intent = value(after: "--intent", in: arguments)
+        // `value(after:)` only rejects `--`-prefixed values, so `--ttl -5` parsed fine and
+        // recorded a claim that was **born expired** (`-5 * 60 = -300`), printing
+        // "0m left" while protecting nothing. Clamp rather than reject: a zero or
+        // negative ask is a mistake, but writing a claim that claims nothing is
+        // worse than writing one that expires (audit Tier 5 #26).
         let ttl = (value(after: "--ttl", in: arguments) ?? "")
-            .flatMap { Double($0) }.map { $0 * 60 } ?? PathClaims.explicitTTL
+            .flatMap { Double($0) }.map { max($0, 0) * 60 } ?? PathClaims.explicitTTL
 
         do {
             for pattern in patterns {
@@ -2505,6 +2620,25 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         let installer = HookInstaller(paths: paths)
         let blocking = arguments.contains("--blocking")
+        // Refused rather than faked. The hook script has three modes — notify,
+        // context and advise — and a fourth named `blocking` was passed here and
+        // silently ignored, so `--blocking` produced an ordinary notify and then
+        // reported success (audit Tier 5 #33).
+        //
+        // It stays unimplemented on purpose: a blocking mode answers a
+        // permission prompt on the agent's behalf, and "GentleMerge approving
+        // tool calls on its own" is named in NudgeGate as precisely the failure
+        // this project exists to avoid. So the flag says no.
+        if blocking {
+            FileHandle.standardError.write(Data("""
+            test-event --blocking is not supported: the hook has no blocking mode.
+            \nA blocking hook answers a permission prompt for the agent, which is exactly what this
+            project refuses to do. Use `gentlemerge advise` to see what would be
+            blocked before you commit, or the pre-commit gate to enforce it.
+
+            """.utf8))
+            return 64
+        }
 
         do {
             try installer.writeScripts()
@@ -2514,27 +2648,20 @@ enum CLI {
         }
 
         let payload: String
-        if blocking {
-            payload = """
-            {"session_id":"test-session","hook_event_name":"PreToolUse","cwd":"\(FileManager.default.currentDirectoryPath)",\
-            "tool_name":"Bash","tool_input":{"command":"rm -rf build/ && swift build -c release",\
-            "description":"Rebuild from scratch"},"permission_mode":"default"}
-            """
-        } else {
-            payload = """
+        payload = """
             {"session_id":"test-session","hook_event_name":"Notification",\
             "cwd":"\(FileManager.default.currentDirectoryPath)",\
             "message":"Claude needs your permission to use Bash"}
             """
-        }
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = [
             paths.hookScript.path,
             "--provider", "claude-code",
-            "--mode", blocking ? "blocking" : "notify",
-            "--timeout", "60",
+            // No `--timeout`: the script's argument loop discards it, so passing
+            // one only looked like configuration (audit Tier 5 #33).
+            "--mode", "notify",
         ]
         let input = Pipe()
         let output = Pipe()

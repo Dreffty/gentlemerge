@@ -52,7 +52,7 @@ public struct SimAgent: Sendable {
     let script: SimScript
     let sessionID: String
     let binary: URL
-    public init(paths: Paths, worktree: URL, script: SimScript, binary: URL = URL(fileURLWithPath: CommandLine.arguments[0])) {
+    public init(paths: Paths, worktree: URL, script: SimScript, binary: URL = CurrentExecutable.url) {
         self.paths = paths; self.worktree = worktree; self.script = script; self.binary = binary.standardizedFileURL
         self.sessionID = "sim-\(script.label)-\(UUID().uuidString)"
     }

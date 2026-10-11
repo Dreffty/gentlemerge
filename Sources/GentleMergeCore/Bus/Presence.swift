@@ -228,9 +228,37 @@ public enum Presence {
     }
 
     /// What makes two marks the same agent: who, where, and on what.
+    ///
+    /// The project part carries a hash of the **whole** path, not just its last
+    /// component. Two checkouts named `app` — `/Users/alice/code/app` and
+    /// `/Users/bob/code/app` — produced the same identity and therefore the same
+    /// file on disk, so the second mark overwrote the first: one repo saw no
+    /// agents, the other saw an agent whose path was the other one, and both
+    /// vanished from `who` and from every briefing's peer list
+    /// (audit Tier 5 #36). `ProjectRegistry.canonicalPath` maps every worktree of
+    /// one repo to a single root, so the last component was the only
+    /// discriminator left — and it is not one.
     static func identity(of mark: Mark) -> String {
-        let project = mark.projectPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "-"
+        let project: String = if let path = mark.projectPath {
+            "\(URL(fileURLWithPath: path).lastPathComponent)-\(shortHash(path))"
+        } else {
+            "-"
+        }
         return "presence:\(mark.label)@\(project)#\(mark.branch ?? "-")"
+    }
+
+    /// A short, stable digest of a path, for identities and filenames.
+    ///
+    /// FNV-1a, same construction as `WorktreeEnv.stableHash`. Not a security
+    /// boundary — it only has to make two different paths unlikely to collide in
+    /// a filename.
+    private static func shortHash(_ value: String) -> String {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in value.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100_0000_01b3
+        }
+        return String(hash, radix: 36).prefix(7).description
     }
 
     static func fileURL(for mark: Mark, in paths: Paths) -> URL {

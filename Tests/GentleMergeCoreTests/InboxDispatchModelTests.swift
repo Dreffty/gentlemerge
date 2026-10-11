@@ -107,7 +107,11 @@ final class InboxDispatchModelTests: XCTestCase {
         let request = try request()
         model.config.allowDispatch = true
         model.refreshBus()
-        _ = try Requests(paths: paths).transition(request.id, to: .rejected, by: "you", result: "external denial")
+        // "you" used to be allowed to move anybody's request. It is the label an
+        // unlabelled worktree resolves to, so the escape let any agent reject a
+        // contract it was not party to (audit 2026-10-07). The assignee here is
+        // `worker`, so `worker` is who declines it.
+        _ = try Requests(paths: paths).transition(request.id, to: .rejected, by: "worker", result: "external denial")
         model.refreshBus()
         XCTAssertTrue(model.pendingApprovals.isEmpty)
         XCTAssertTrue(launched.isEmpty)
