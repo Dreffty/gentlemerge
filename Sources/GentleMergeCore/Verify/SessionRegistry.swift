@@ -39,6 +39,18 @@ public struct SessionRegistry: Sendable {
 
     public subscript(id: String) -> SessionRecord? { sessions[id] }
 
+    /// The session whose work is most worth reviewing in `projectPath`: the
+    /// newest one that started there, live or not, and nil when none ever did.
+    ///
+    /// "Newest by start" rather than "newest by last seen" because the point of
+    /// a baseline is when the work began — a session that has been quiet for an
+    /// hour still owns the diff since it started.
+    func mostRecent(in projectPath: String) -> SessionRecord? {
+        sessions.values
+            .filter { $0.projectPath == projectPath }
+            .max { $0.startedAt < $1.startedAt }
+    }
+
     public mutating func started(
         id: String,
         provider: AgentProvider,

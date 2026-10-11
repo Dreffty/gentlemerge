@@ -63,8 +63,12 @@ struct MainWindow: View {
                                 .lineLimit(1)
                         }
                     }
-                    .padding(.vertical, 1)
-                    .tag(activity.projectPath ?? "")
+                    // The project it works in, and nothing else: a row whose
+                    // session has no project has nowhere to navigate, and the
+                    // old `?? ""` tagged it as an empty project that sat in the
+                    // same selection space as the real ones — clickable, and
+                    // resolving to nothing (audit 2026-10-11).
+                    .tag(activity.projectPath)
                 }
             }
 
@@ -119,6 +123,12 @@ private struct ProjectPane: View {
     @Binding var showSnapshots: Bool
 
     @State private var handoff: ProjectHandoff?
+
+    /// Whether the project has a handoff file, resolved once per refresh rather
+    /// than in the body: `ProjectRegistry.exists` canonicalises a path, which
+    /// spawns git, and the body re-renders on every 3-second drain tick
+    /// (audit 2026-10-11).
+    @State private var handoffExists = false
     /// Merged in at render time, by task id. Never part of the handoff file.
     @State private var claimed: [String: TaskClaim] = [:]
     @State private var newTask = ""
@@ -173,12 +183,18 @@ private struct ProjectPane: View {
         .toolbar {
             ToolbarItemGroup {
                 Button {
-                    model.startReview(projectPath: projectPath)
+                    // The newest session in this project, so the diff is since
+                    // *its* baseline. Passing no session fell back to HEAD, and
+                    // a Review of work already committed then said "nothing
+                    // since HEAD" — the button appeared to do nothing
+                    // (audit 2026-10-11).
+                    let session = model.mostRecentSession(in: projectPath)
+                    model.startReview(projectPath: projectPath, sessionID: session?.id)
                     showReview = true
                 } label: {
                     Label("Review", systemImage: "checkmark.shield")
                 }
-                .help("Diff, build and tests for what the agents did here")
+                .help(reviewHelp)
 
                 Button { showSnapshots = true } label: {
                     Label("Restore points", systemImage: "clock.arrow.circlepath")
@@ -201,6 +217,32 @@ private struct ProjectPane: View {
         }
         .onAppear(perform: reload)
         .onChange(of: projectPath) { _, _ in reload() }
+        // Tasks and claims were read once, in `reload`, and never again: what
+        // another agent added or ticked did not appear in the window until the
+        // pane was torn down and rebuilt (audit 2026-10-11). The drain already
+        // ticks every 3 seconds for the bus, so this piggybacks on it and reads
+        // the cheap local files — `handoffWithoutCommits` skips the `git log`.
+        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
+            refreshShared()
+        }
+    }
+
+    /// Keep the task board and the claim list current without a `git log`.
+    private func refreshShared() {
+        handoff = model.handoffWithoutCommits(for: projectPath)
+        claimed = model.claims(for: projectPath)
+        handoffExists = ProjectRegistry.exists(for: projectPath)
+    }
+
+    /// What the Review button will review, said out loud in its tooltip: the
+    /// baseline it uses is the newest session's, and with no session there is
+    /// nothing but HEAD to diff against.
+    private var reviewHelp: String {
+        guard let session = model.mostRecentSession(in: projectPath) else {
+            return "Diff, build and tests for what the agents did here — no session has started here yet, so the diff is against HEAD"
+        }
+        return "Diff, build and tests since \(session.provider.displayName) started at "
+            + session.startedAt.formatted()
     }
 
     private var header: some View {
@@ -507,7 +549,7 @@ private struct ProjectPane: View {
                     .disabled(newTask.trimmingCharacters(in: .whitespaces).isEmpty)
             }
 
-            if handoff != nil, !ProjectRegistry.exists(for: projectPath) {
+            if handoff != nil, !handoffExists {
                 Button("Set up the handoff file") {
                     model.initializeProject(projectPath)
                     reload()
@@ -553,6 +595,7 @@ private struct ProjectPane: View {
     private func reload() {
         handoff = model.handoff(for: projectPath)
         claimed = model.claims(for: projectPath)
+        handoffExists = ProjectRegistry.exists(for: projectPath)
     }
 }
 
