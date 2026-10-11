@@ -114,10 +114,25 @@ gentlemerge demo        # three simulated agents, one temp repo, the whole proto
 
 | Component | macOS | Linux | Windows |
 |---|---|---|---|
-| CLI, MCP server, claims, pre-commit, requests, land, demo | ✅ | ✅ | WSL2 ✅ · native: help wanted |
-| Claude Code hooks + socket delivery | ✅ *needs community verification* | ✅ *needs verification* | WSL2 |
-| Codex hooks | ✅ *needs verification* | ✅ *needs verification* | WSL2 |
+| CLI, MCP server, claims, pre-commit, requests, land, demo | ✅ **verified on CI** | ⚠️ **builds, untested** | WSL2 ✅ · native: help wanted |
+| Claude Code hooks + socket delivery | ✅ *needs community verification* | ⚠️ *untested* | WSL2 |
+| Codex hooks | ✅ *needs verification* | ⚠️ *untested* | WSL2 |
 | Menu-bar app, review UI, notifications | ✅ | — | — |
+
+**What "verified on CI" means, and what it does not.** macOS runs the whole
+pipeline on every push: `swift build -c release`, the full test suite, the build
+contract, the app bundle and the headless smoke test. Linux runs
+`swift build -c release` — the CLI and both libraries compile there — and then
+**stops**, because the test module does not compile on the toolchain CI uses
+(XCTest's `@MainActor` isolation is applied more strictly there). So:
+
+- **macOS is verified**: 724 tests and the smoke test pass on every commit.
+- **Linux is only shown to build.** No test and no smoke test has ever run
+  there, so nothing about it is *verified* behaviour — it is behaviour that
+  compiles. If you rely on the Linux path, treat this as the gap it is.
+
+This is the same declaration the project has always made for live vendor
+sessions: what has not been exercised is stated, not rounded up.
 
 *Needs verification* = implemented against the vendor's documentation and tested with simulated events, not yet confirmed on a live paid session. If you have access, run `TESTING.md` §Live and open an issue with the result.
 
