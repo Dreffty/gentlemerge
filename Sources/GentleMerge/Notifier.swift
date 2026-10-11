@@ -85,16 +85,26 @@ final class Notifier: NSObject {
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [itemID])
     }
 
+    /// What the user's action on a delivered notification does.
+    ///
+    /// The notification is always withdrawn, whether or not the action found a
+    /// pending row. It used to be withdrawn never: `markHandled` requires
+    /// `isPending`, and any later event for the same session supersedes an
+    /// earlier row, so "Got it" on a notice whose session had moved on did
+    /// nothing at all — and the notice sat in Notification Center forever, since
+    /// nothing else ever called `withdraw` (audit 2026-10-11).
     private func handle(actionID: String, itemID: String) {
-        guard let model, let item = model.items.first(where: { $0.id == itemID }) else { return }
-        switch actionID {
-        case Action.open, UNNotificationDefaultActionIdentifier:
-            model.jumpToTerminal(item)
-        case Action.handled:
-            model.markHandled(item)
-        default:
-            break
+        if let model, let item = model.items.first(where: { $0.id == itemID }) {
+            switch actionID {
+            case Action.open, UNNotificationDefaultActionIdentifier:
+                model.jumpToTerminal(item)
+            case Action.handled:
+                model.markHandled(item)
+            default:
+                break
+            }
         }
+        withdraw(itemID)
     }
 }
 
