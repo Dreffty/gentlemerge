@@ -7,24 +7,85 @@ public struct Dispatcher: Sendable {
 
     /// Headless minutes already spent today, off `dispatch.start` lines. Old
     /// lines without a budget count zero rather than breaking the total.
+    ///
+    /// Memoised on the ledger's size and mtime, the same fingerprint
+    /// `Stats.summaries` uses: this runs on the app's 3-second tick, on the main
+    /// actor, and decoding every line of the ledger each time made the tick cost
+    /// ~2 seconds on a 50k-line ledger — with or without any request assigned
+    /// (audit 2026-10-11). The parse is the expensive half; filtering what was
+    /// parsed by day is not.
     public static func spentTodayMinutes(paths: Paths, now: Date = Date()) -> Int {
-        struct Line: Decodable { var title: String?; var summary: String?; var at: Date? }
-        guard let contents = try? String(contentsOf: paths.ledger, encoding: .utf8) else { return 0 }
         let calendar = Calendar.current
-        let decoder = JSONCoding.decoder()
-        var total = 0
-        for line in contents.split(separator: "\n") {
-            guard let data = line.data(using: .utf8),
-                  let entry = try? decoder.decode(Line.self, from: data),
-                  entry.title == "dispatch.start",
-                  let at = entry.at, calendar.isDate(at, inSameDayAs: now),
+        return cachedStarts(paths: paths).compactMap { entry -> Int? in
+            guard let at = entry.at, calendar.isDate(at, inSameDayAs: now),
                   let summary = entry.summary,
                   let range = summary.range(of: "budget "),
                   let minutes = Int(summary[range.upperBound...].prefix(while: \.isNumber))
-            else { continue }
-            total += minutes
+            else { return nil }
+            return minutes
+        }.reduce(0, +)
+    }
+
+    /// One `dispatch.start` line, reduced to what the total needs.
+    private struct Start: Decodable {
+        var title: String?
+        var at: Date?
+        var summary: String?
+    }
+
+    private static let cacheLock = NSLock()
+    /// Guarded by `cacheLock` on every access. The parse happens outside it, so
+    /// a slow ledger never holds it.
+    ///
+    /// Keyed on the path as well as the size and mtime: the fingerprint alone
+    /// collides between two different ledgers of the same age and length, and a
+    /// caller would then be answered with the other file's total.
+    nonisolated(unsafe) private static var cache: (fingerprint: Fingerprint?, starts: [Start])?
+
+    private struct Fingerprint: Equatable {
+        var path: String
+        var size: UInt64
+        var mtime: Date
+    }
+
+    private static func fingerprint(of url: URL) -> Fingerprint? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? UInt64,
+              let mtime = attributes[.modificationDate] as? Date
+        else { return nil }
+        return Fingerprint(path: url.path, size: size, mtime: mtime)
+    }
+
+    private static func cachedStarts(paths: Paths) -> [Start] {
+        let fingerprint = Self.fingerprint(of: paths.ledger)
+
+        cacheLock.lock()
+        if let cache, cache.fingerprint == fingerprint {
+            let cached = cache.starts
+            cacheLock.unlock()
+            return cached
         }
-        return total
+        cacheLock.unlock()
+
+        // Outside the lock: a 50k-line ledger takes long enough that holding it
+        // would serialise the whole sweep, and re-parsing it in a race is
+        // harmless — the result is a pure function of the file.
+        let starts: [Start] = {
+            guard let contents = try? String(contentsOf: paths.ledger, encoding: .utf8) else { return [] }
+            let decoder = JSONCoding.decoder()
+            return contents.split(separator: "\n").compactMap { line in
+                guard let data = line.data(using: .utf8),
+                      let entry = try? decoder.decode(Start.self, from: data),
+                      entry.title == "dispatch.start"
+                else { return nil }
+                return entry
+            }
+        }()
+
+        cacheLock.lock()
+        cache = (fingerprint, starts)
+        cacheLock.unlock()
+        return starts
     }
 
     public func promptText(for r: AgentRequest) -> String {

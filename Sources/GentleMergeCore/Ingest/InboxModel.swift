@@ -757,9 +757,22 @@ public final class InboxModel {
 
     /// One sweep per known project. The three-minute throttle inside keeps this
     /// to a small JSON read on most drains; git only runs when a sweep is due.
+    ///
+    /// Off the main actor, on a serial queue: when a sweep *is* due it runs one
+    /// git call per branch plus four per overlapping pair, which on a repository
+    /// with fifteen branches and sixty pairs froze the runloop for seconds — the
+    /// app stops draining, stops writing state and stops the delivery timer
+    /// while it happens (audit 2026-10-11). Serial, so two drains never sweep at
+    /// once; the radar only writes lock-guarded JSON, safe from any thread.
+    ///
+    /// The project list and `paths` are captured before the hop — `self` is not
+    /// Sendable and the sweep needs neither, exactly as `maybeAutoLand` does.
     private func sweepConflictRadar() {
-        for summary in projects {
-            _ = ConflictRadar.sweep(project: summary.path, paths: paths)
+        let (paths, projects) = (self.paths, self.projects)
+        RadarQueue.queue.async {
+            for summary in projects {
+                _ = ConflictRadar.sweep(project: summary.path, paths: paths)
+            }
         }
     }
 
@@ -913,6 +926,24 @@ public final class InboxModel {
     /// you and the agents have written into its handoff file.
     public func handoff(for projectPath: String) -> ProjectHandoff {
         ProjectRegistry.handoff(for: projectPath)
+    }
+
+    /// The same list, without the `git log` behind the Recent commits section.
+    ///
+    /// For the read that happens on every 3-second tick: tasks and claims are
+    /// plain local files, and showing what another agent added a minute ago is
+    /// the whole point of the pane — but a `git log` per tick, per open project,
+    /// is ~40 ms of synchronous git the drain does not need (audit 2026-10-11).
+    /// The full read still happens on appear and on project change.
+    public func handoffWithoutCommits(for projectPath: String) -> ProjectHandoff {
+        ProjectRegistry.handoff(for: projectPath, refreshingCommits: false)
+    }
+
+    /// The session whose work a Review of this project should cover: the newest
+    /// one that started here, or nil when none has. Exposed because the toolbar
+    /// button needs it to pick a baseline rather than defaulting to HEAD.
+    public func mostRecentSession(in projectPath: String) -> SessionRecord? {
+        sessions.mostRecent(in: projectPath)
     }
 
     /// What the shared list actually did, in `lastMessage`.
@@ -1313,4 +1344,12 @@ private func trimHistory() {
 /// One landing at a time, off the main actor. See `maybeAutoLand`.
 private enum AutoLandQueue {
     static let queue = DispatchQueue(label: "gentlemerge.autoland")
+}
+
+/// A second serial queue, for the radar rather than for landing: both are git
+/// work that must not block the drain, and neither may run twice at once — but
+/// a landing in progress is no reason to stop the radar from sweeping, and the
+/// other way round.
+private enum RadarQueue {
+    static let queue = DispatchQueue(label: "gentlemerge.radar")
 }

@@ -173,12 +173,18 @@ private struct ProjectPane: View {
         .toolbar {
             ToolbarItemGroup {
                 Button {
-                    model.startReview(projectPath: projectPath)
+                    // The newest session in this project, so the diff is since
+                    // *its* baseline. Passing no session fell back to HEAD, and
+                    // a Review of work already committed then said "nothing
+                    // since HEAD" — the button appeared to do nothing
+                    // (audit 2026-10-11).
+                    let session = model.mostRecentSession(in: projectPath)
+                    model.startReview(projectPath: projectPath, sessionID: session?.id)
                     showReview = true
                 } label: {
                     Label("Review", systemImage: "checkmark.shield")
                 }
-                .help("Diff, build and tests for what the agents did here")
+                .help(reviewHelp)
 
                 Button { showSnapshots = true } label: {
                     Label("Restore points", systemImage: "clock.arrow.circlepath")
@@ -201,6 +207,31 @@ private struct ProjectPane: View {
         }
         .onAppear(perform: reload)
         .onChange(of: projectPath) { _, _ in reload() }
+        // Tasks and claims were read once, in `reload`, and never again: what
+        // another agent added or ticked did not appear in the window until the
+        // pane was torn down and rebuilt (audit 2026-10-11). The drain already
+        // ticks every 3 seconds for the bus, so this piggybacks on it and reads
+        // the cheap local files — `handoffWithoutCommits` skips the `git log`.
+        .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
+            refreshShared()
+        }
+    }
+
+    /// Keep the task board and the claim list current without a `git log`.
+    private func refreshShared() {
+        handoff = model.handoffWithoutCommits(for: projectPath)
+        claimed = model.claims(for: projectPath)
+    }
+
+    /// What the Review button will review, said out loud in its tooltip: the
+    /// baseline it uses is the newest session's, and with no session there is
+    /// nothing but HEAD to diff against.
+    private var reviewHelp: String {
+        guard let session = model.mostRecentSession(in: projectPath) else {
+            return "Diff, build and tests for what the agents did here — no session has started here yet, so the diff is against HEAD"
+        }
+        return "Diff, build and tests since \(session.provider.displayName) started at "
+            + session.startedAt.formatted()
     }
 
     private var header: some View {
