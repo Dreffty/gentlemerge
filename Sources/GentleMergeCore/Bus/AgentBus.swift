@@ -419,6 +419,9 @@ public struct AgentBus: Sendable {
         activities()
             .filter { $0.id != sessionID && $0.isLive }
             .filter { Liveness.isProcessAlive($0.pid) != false }
+            // An app idling in `/` or the home folder is working on nothing
+            // a peer could collide with (see `Presence.isNoProject`).
+            .filter { !Presence.isNoProject($0.projectPath) }
             .filter { project == nil || $0.projectPath == project }
             .sorted { $0.updatedAt > $1.updatedAt }
     }
@@ -462,10 +465,31 @@ public struct AgentBus: Sendable {
     /// now": one phantom peer, a wrong headcount, and tokens spent on it every
     /// turn (audit 2026-10-08). `who` passes no label and is unaffected — it is
     /// you asking, and it should list everything.
-    func peers(excluding sessionID: String?, project: String?, me: String? = nil)
-        -> (here: [AgentActivity], elsewhere: Int)
-    {
-        let live = others(excluding: sessionID).filter { !Self.isOwnPresenceMark($0, me: me) }
+    ///
+    /// The label alone was not enough (2026-10-21): two sessions in one project
+    /// share it, and a reader whose label resolved differently from its mark's
+    /// still saw itself. So the reader also says which process (`selfPID`, the
+    /// agent pid the hook knows) and which session (`selfSessionID`) it is, and
+    /// anything carrying either is dropped. The label stays as the fallback for
+    /// when neither side knows a pid — but a mark whose pid is provably another
+    /// process is another session, whatever it is called.
+    func peers(
+        excluding sessionID: String?,
+        project: String?,
+        me: String? = nil,
+        selfPID: Int? = nil,
+        selfSessionID: String? = nil
+    ) -> (here: [AgentActivity], elsewhere: Int) {
+        let ownMarks = Presence.identities(ofSession: selfSessionID ?? sessionID, pid: selfPID, paths: paths)
+        let live = others(excluding: sessionID).filter { activity in
+            if let selfPID, activity.pid == selfPID { return false }
+            if let selfSessionID, activity.id == selfSessionID { return false }
+            if ownMarks.contains(activity.id) { return false }
+            guard Self.isOwnPresenceMark(activity, me: me) else { return true }
+            // Same label: ourselves, unless the pids prove otherwise.
+            if let selfPID, let theirs = activity.pid, theirs != selfPID { return true }
+            return false
+        }
         guard let project else { return (live, 0) }
         let here = live.filter { $0.projectPath == project }
         return (here, live.count - here.count)
@@ -956,7 +980,9 @@ public struct AgentBus: Sendable {
         branch: String? = nil,
         now: Date = Date(),
         mode: BriefingMode = .full,
-        persistCursor: Bool = true
+        persistCursor: Bool = true,
+        selfPID: Int? = nil,
+        selfSessionID: String? = nil
     ) -> String? {
         // The whole read-compute-write runs under the per-session delivery
         // lock: without it two concurrent briefs compute the same pending set
@@ -966,13 +992,15 @@ public struct AgentBus: Sendable {
             return try LockedFile.withExclusiveLock(Self.deliveryLockURL(for: sessionID, paths: paths)) {
                 briefingLocked(
                     sessionID: sessionID, me: me, project: project, branch: branch,
-                    now: now, mode: mode, persistCursor: persistCursor)
+                    now: now, mode: mode, persistCursor: persistCursor,
+                    selfPID: selfPID, selfSessionID: selfSessionID)
             }
         } catch {
             Log.error("briefing lock failed: \(error.localizedDescription)")
             return briefingLocked(
                 sessionID: sessionID, me: me, project: project, branch: branch,
-                now: now, mode: mode, persistCursor: false)
+                now: now, mode: mode, persistCursor: false,
+                selfPID: selfPID, selfSessionID: selfSessionID)
         }
     }
 
@@ -983,12 +1011,15 @@ public struct AgentBus: Sendable {
         branch: String? = nil,
         now: Date,
         mode: BriefingMode,
-        persistCursor: Bool
+        persistCursor: Bool,
+        selfPID: Int? = nil,
+        selfSessionID: String? = nil
     ) -> String? {
         // Peers are the ones sharing this project. A session in `clipapp` was
         // being told about another project's simulator, and paying context
         // for it every turn.
-        let (peers, elsewhere) = self.peers(excluding: sessionID, project: project, me: me)
+        let (peers, elsewhere) = self.peers(excluding: sessionID, project: project, me: me,
+                                            selfPID: selfPID, selfSessionID: selfSessionID)
         let pending = undelivered(to: sessionID, me: me, project: project, branch: branch, now: now)
 
         // Per-session cursor: what this session has already been told, beyond
