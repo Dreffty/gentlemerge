@@ -26,11 +26,19 @@ struct GentleMergeApp: App {
             MenuBarSummary(model: model, openMainWindow: showWindow)
         } label: {
             Image(systemName: menuBarSymbol)
+                .accessibilityLabel("GentleMerge")
             if model.liveActivities.count > 1 {
                 Text("\(model.liveActivities.count)")
             }
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(model: model)
+                // A menu bar app is not the active app, so the window would
+                // open behind whatever you were looking at.
+                .onAppear { NSApp.activate(ignoringOtherApps: true) }
+        }
     }
 
     private func showWindow() {
@@ -66,6 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
         }
+        UISnapshot.runIfRequested(model: Shared.model)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -25,7 +25,7 @@ struct SnapshotsView: View {
                         Text(GitSnapshot.isRepository(projectPath)
                             ? "No restore points yet. One is taken whenever a change is waiting for your approval."
                             : "This project is not a git repository, so there is nothing to snapshot.")
-                            .font(.system(size: 11))
+                            .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(14)
@@ -43,17 +43,17 @@ struct SnapshotsView: View {
                 Divider()
                 VStack(alignment: .leading, spacing: 3) {
                     Label(report.summary, systemImage: "arrow.uturn.backward.circle.fill")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.callout.weight(.medium))
                         .foregroundStyle(.green)
                     if !report.created.isEmpty {
                         Text("Left in place: " + report.created.prefix(4).joined(separator: ", "))
-                            .font(.system(size: 10))
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Text("Undo this restore with “\(report.safety.label)”.")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 .padding(14)
             }
@@ -66,11 +66,13 @@ struct SnapshotsView: View {
         HStack(spacing: 8) {
             Button(action: onBack) { Image(systemName: "chevron.left") }
                 .buttonStyle(.borderless)
+                .help("Back")
+                .accessibilityLabel("Back")
             Text("Restore points · \(URL(fileURLWithPath: projectPath).lastPathComponent)")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.headline)
                 .lineLimit(1)
             Spacer()
-            Button("Take one now") {
+            Button("Take One Now") {
                 _ = model.createSnapshot(forProjectAt: projectPath, label: "manual")
                 reload()
             }
@@ -85,21 +87,21 @@ struct SnapshotsView: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(spacing: 6) {
                 Image(systemName: "clock.arrow.circlepath")
-                    .font(.system(size: 10))
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                 Text(snapshot.label)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(.callout.weight(.medium))
                     .lineLimit(1)
                 Spacer(minLength: 4)
                 Text(snapshot.createdAt, style: .relative)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             if confirming == snapshot.id {
                 HStack(spacing: 6) {
                     Text("Write these files back over the current ones?")
-                        .font(.system(size: 10))
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button("Restore") {
@@ -117,8 +119,8 @@ struct SnapshotsView: View {
                     Button("Restore…") { confirming = snapshot.id }
                         .controlSize(.small)
                     Text(snapshot.commit.prefix(8))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundStyle(.tertiary)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
                     Spacer()
                 }
             }
