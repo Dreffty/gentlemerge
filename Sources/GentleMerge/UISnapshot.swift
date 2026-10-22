@@ -41,28 +41,39 @@ enum UISnapshot {
 
         let window = NSApp.windows.first { $0.canBecomeMain }
         window?.setFrame(NSRect(x: 80, y: 80, width: 1000, height: 820), display: true)
+        // Key and active, or the sidebar and controls draw in their dimmed,
+        // inactive-window colours.
+        NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
 
-        // The menu bar panel is not a window until it is clicked, so the same
-        // view goes into one of ours, off screen.
-        let panel = NSWindow(
-            contentRect: NSRect(x: -4000, y: 0, width: 300, height: 400),
-            styleMask: [.borderless], backing: .buffered, defer: false
-        )
-        panel.appearance = NSAppearance(named: appearance)
-        let host = NSHostingView(rootView: MenuBarSummary(model: model, openMainWindow: {})
-            .background(Color(nsColor: .windowBackgroundColor)))
-        panel.contentView = host
-        panel.setContentSize(host.fittingSize)
-        panel.orderFrontRegardless()
+        // The menu bar panel is not a window until it is clicked, nor is
+        // Settings, so the same views go into windows of ours, off screen.
+        let panel = offscreen(MenuBarSummary(model: model, openMainWindow: {}), appearance: appearance)
+
+        let settings = offscreen(SettingsView(model: model), appearance: appearance)
 
         // A moment for the new appearance to land everywhere.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
             if let window { capture(window, to: out.appendingPathComponent("window-\(suffix).png")) }
             capture(panel, to: out.appendingPathComponent("menubar-\(suffix).png"))
+            capture(settings, to: out.appendingPathComponent("settings-\(suffix).png"))
             panel.orderOut(nil)
+            settings.orderOut(nil)
             next()
         }
+    }
+
+    private static func offscreen(_ view: some View, appearance: NSAppearance.Name) -> NSWindow {
+        let window = NSWindow(
+            contentRect: NSRect(x: -8000, y: 0, width: 480, height: 300),
+            styleMask: [.borderless], backing: .buffered, defer: false
+        )
+        window.appearance = NSAppearance(named: appearance)
+        let host = NSHostingView(rootView: view.background(Color(nsColor: .windowBackgroundColor)))
+        window.contentView = host
+        window.setContentSize(host.fittingSize)
+        window.orderFrontRegardless()
+        return window
     }
 
     /// `CGWindowListCreateImage` is obsolete in the current SDK, so it is

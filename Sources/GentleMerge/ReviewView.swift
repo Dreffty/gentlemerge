@@ -32,7 +32,7 @@ struct ReviewView: View {
                 .frame(maxHeight: 520)
             } else {
                 Text("No review yet. Open one from a finished session.")
-                    .font(.system(size: 11))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 40)
@@ -47,14 +47,16 @@ struct ReviewView: View {
         HStack(spacing: 8) {
             Button(action: onBack) { Image(systemName: "chevron.left") }
                 .buttonStyle(.borderless)
+                .help("Back")
+                .accessibilityLabel("Back")
 
             Text(review.map { "Review · \($0.projectName)" } ?? "Review")
-                .font(.system(size: 13, weight: .semibold))
+                .font(.headline)
                 .lineLimit(1)
 
             if let review {
                 Text(review.headline)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.caption.weight(.semibold))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
                     .background(verdictColor(review).opacity(0.16), in: Capsule())
@@ -68,22 +70,25 @@ struct ReviewView: View {
                     .controlSize(.small)
             } else if let review {
                 Menu {
-                    Button("Run again") {
+                    Button("Run Again") {
                         model.startReview(projectPath: review.projectPath, sessionID: review.sessionID)
                     }
-                    Button("Run again including slow checks") {
+                    Button("Run Again Including Slow Checks") {
                         model.startReview(
                             projectPath: review.projectPath,
                             sessionID: review.sessionID,
                             includeOptional: true
                         )
                     }
-                    Button("Copy report") { copy(review) }
+                    Button("Copy Report") { copy(review) }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .menuStyle(.borderlessButton)
-                .frame(width: 22)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Run again or copy the report")
+                .accessibilityLabel("Run Again")
             }
         }
         .padding(.horizontal, 14)
@@ -94,44 +99,44 @@ struct ReviewView: View {
 
     private func workSection(_ review: Review) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            sectionTitle("WHAT CHANGED")
+            SectionHeader("What changed")
 
             if !review.work.isRepository {
                 Text("Not a git repository — no before-and-after to compare.")
-                    .font(.system(size: 11))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             } else if review.work.changes.isEmpty {
                 Text("No file changes since this session started.")
-                    .font(.system(size: 11))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
                 Text(review.work.headline)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.body.weight(.medium))
 
                 ForEach(review.work.changes.prefix(10)) { change in
                     HStack(spacing: 6) {
                         Text(change.isUntracked ? "new" : change.status)
-                            .font(.system(size: 9, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(change.isUntracked ? .green : .secondary)
                             .frame(width: 26, alignment: .leading)
                         Text(change.path)
-                            .font(.system(size: 10.5, design: .monospaced))
+                            .font(.system(.callout, design: .monospaced))
                             .lineLimit(1)
                             .truncationMode(.head)
                         Spacer(minLength: 4)
                         Text("+\(change.added)")
-                            .font(.system(size: 9, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.green)
                         Text("−\(change.removed)")
-                            .font(.system(size: 9, design: .monospaced))
+                            .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.red)
                     }
                 }
 
                 if review.work.changes.count > 10 {
                     Text("+ \(review.work.changes.count - 10) more")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -140,7 +145,7 @@ struct ReviewView: View {
                     "Touched \(review.work.outsidePaths.count) path(s) outside the project",
                     systemImage: "exclamationmark.triangle.fill"
                 )
-                .font(.system(size: 10.5, weight: .medium))
+                .font(.callout.weight(.medium))
                 .foregroundStyle(.orange)
                 .padding(.top, 2)
             }
@@ -149,12 +154,12 @@ struct ReviewView: View {
 
     private func checksSection(_ review: Review) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            sectionTitle("CHECKS")
+            SectionHeader("Checks")
 
             if review.checks.isEmpty {
                 Text("No build or test command was detected for this project. "
                     + "Add one in .gentlemerge.json and nothing here has to guess.")
-                    .font(.system(size: 11))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -163,21 +168,21 @@ struct ReviewView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 6) {
                         Image(systemName: check.symbol)
-                            .font(.system(size: 10))
+                            .font(.caption)
                             .foregroundStyle(color(for: check))
                         Text(check.name)
-                            .font(.system(size: 11.5, weight: .medium))
+                            .font(.callout.weight(.medium))
                         if let reason = check.skipReason {
                             Text(reason)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                         Spacer(minLength: 4)
                         if check.duration > 0 {
                             Text(String(format: "%.1fs", check.duration))
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundStyle(.tertiary)
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
                         }
                         if !check.output.isEmpty {
                             Button(expanded.contains(check.id) ? "Hide" : "Output") {
@@ -188,14 +193,14 @@ struct ReviewView: View {
                                 }
                             }
                             .buttonStyle(.borderless)
-                            .font(.system(size: 10))
+                            .font(.caption)
                         }
                     }
 
                     if expanded.contains(check.id), !check.output.isEmpty {
                         ScrollView {
                             Text(check.output)
-                                .font(.system(size: 10, design: .monospaced))
+                                .font(.system(.caption, design: .monospaced))
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(7)
@@ -212,15 +217,15 @@ struct ReviewView: View {
         Group {
             if !review.openQuestions.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
-                    sectionTitle("NEEDS YOUR EYES")
+                    SectionHeader("Needs your eyes")
                     ForEach(review.openQuestions, id: \.self) { question in
                         HStack(alignment: .top, spacing: 6) {
                             Image(systemName: "eye")
-                                .font(.system(size: 9))
+                                .font(.caption)
                                 .foregroundStyle(.orange)
                                 .padding(.top, 2)
                             Text(question)
-                                .font(.system(size: 11))
+                                .font(.callout)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
@@ -231,31 +236,25 @@ struct ReviewView: View {
 
     private var pastSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            sectionTitle("EARLIER REVIEWS")
+            SectionHeader("Earlier reviews")
             ForEach(model.reviews.prefix(5)) { past in
                 HStack(spacing: 6) {
                     Image(systemName: past.verdict == .problems ? "xmark.circle.fill" : "checkmark.circle")
-                        .font(.system(size: 9))
+                        .font(.caption)
                         .foregroundStyle(verdictColor(past))
                     Text(past.projectName)
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.callout.weight(.medium))
                     Text(past.headline)
-                        .font(.system(size: 10))
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Spacer(minLength: 4)
                     Text(past.startedAt, format: .dateTime.hour().minute())
-                        .font(.system(size: 9))
-                        .foregroundStyle(.tertiary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }
-    }
-
-    private func sectionTitle(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.tertiary)
     }
 
     // MARK: - Helpers

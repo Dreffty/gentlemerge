@@ -5,68 +5,82 @@ import SwiftUI
 
 /// The menu bar is a glance, not a workspace: who is running, anything waiting
 /// on you, and a way into the window where the actual work happens.
+///
+/// A panel rather than a plain menu, against `the-menu-bar.md`'s default,
+/// because approving a dispatch needs a reason to read and two buttons beside
+/// it, which a menu item cannot hold.
 @MainActor
 struct MenuBarSummary: View {
     let model: InboxModel
     var openMainWindow: () -> Void
 
+    @Environment(\.openSettings) private var openSettings
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(alignment: .firstTextBaseline) {
                 Text("GentleMerge")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.headline)
                 Spacer()
                 Text(model.liveActivities.isEmpty
-                    ? "nothing running"
+                    ? "Nothing running"
                     : "\(model.liveActivities.count) running")
-                    .font(.system(size: 10))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
+                    .monospacedDigit()
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
+            .padding(.horizontal, 14)
+            .padding(.top, 12)
+            .padding(.bottom, 10)
 
             Divider()
 
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 9) {
                 if model.liveActivities.isEmpty {
                     Text("Start an agent and it appears here.")
-                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
 
                 ForEach(model.liveActivities.prefix(5)) { activity in
-                    HStack(alignment: .top, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Circle()
-                            .fill(color(for: activity.state))
-                            .frame(width: 6, height: 6)
-                            .padding(.top, 4)
+                            .fill(activity.state.tint)
+                            .frame(width: 7, height: 7)
+                            .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
                         VStack(alignment: .leading, spacing: 1) {
                             Text("\(activity.provider.displayName) · \(activity.projectName)")
-                                .font(.system(size: 11.5, weight: .medium))
-                            if let task = activity.currentTask {
-                                Text(task)
-                                    .font(.system(size: 10.5))
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
-                            }
+                                .fontWeight(.medium)
+                                .lineLimit(1)
+                            Text(activity.currentTask ?? activity.stateLabel)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        Spacer(minLength: 4)
+                        Spacer(minLength: 6)
                         Text(RelativeTime.short(from: activity.updatedAt))
-                            .font(.system(size: 9.5))
-                            .foregroundStyle(.tertiary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
                     }
+                    .accessibilityElement(children: .combine)
+                }
+
+                if model.liveActivities.count > 5 {
+                    Text("+ \(model.liveActivities.count - 5) more in the window")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
                 }
 
                 if model.pendingCount > 0 {
-                    Divider().padding(.vertical, 2)
-                    Label("\(model.pendingCount) waiting on you", systemImage: "bell.badge")
-                        .font(.system(size: 11))
+                    Label("\(model.pendingCount) waiting on you", systemImage: "bell.badge.fill")
+                        .fontWeight(.medium)
                         .foregroundStyle(.orange)
+                        .padding(.top, 3)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
 
             Divider()
 
@@ -79,7 +93,7 @@ struct MenuBarSummary: View {
                     openMainWindow()
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.small)
+                .keyboardShortcut(.defaultAction)
 
                 Spacer()
 
@@ -88,57 +102,66 @@ struct MenuBarSummary: View {
                         model.drainNow()
                         model.refreshBus()
                     }
+                    .keyboardShortcut("r")
+                    Button("Settings…") {
+                        // A menu bar app is not the active app, so the window
+                        // would open behind whatever you were looking at.
+                        NSApp.activate(ignoringOtherApps: true)
+                        openSettings()
+                    }
+                    .keyboardShortcut(",")
                     Divider()
-                    // Terminal nudges and headless dispatch are separate opt-ins.
-                    Toggle(
-                        "Let agents type a one-line notice into an idle terminal",
-                        isOn: Binding(
-                            get: { model.config.allowNudges },
-                            set: { model.config.allowNudges = $0 }
-                        )
-                    )
-                    Divider()
-                    Button("Quit") { NSApp.terminate(nil) }
+                    Button("Quit GentleMerge") { NSApp.terminate(nil) }
+                        .keyboardShortcut("q")
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
                 .menuStyle(.borderlessButton)
-                .frame(width: 24)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("More")
+                .accessibilityLabel("More")
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
         }
-        .frame(width: 300)
+        .frame(width: 320)
     }
 
     private var dispatchControls: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Toggle("Allow dispatch", isOn: Binding(
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle(isOn: Binding(
                 get: { model.config.allowDispatch },
                 set: { model.config.allowDispatch = $0 }
-            ))
+            )) {
+                Text("Allow dispatch")
+            }
+            .toggleStyle(.switch)
+            .controlSize(.small)
             .help("Allow locally configured agents to run delegated requests without a live session")
-            .font(.system(size: 11))
 
             if !model.pendingApprovals.isEmpty {
-                Text("APPROVE DISPATCH?")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
+                Text("Approve dispatch?")
+                    .font(.headline)
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 12) {
                         ForEach(model.pendingApprovals.keys.sorted(), id: \.self) { id in
                             if let (request, target, reason) = model.pendingApprovals[id] {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text("\(request.id) → \(target.label): \(request.title)")
-                                        .font(.system(size: 11, weight: .medium))
+                                        .fontWeight(.medium)
                                         .fixedSize(horizontal: false, vertical: true)
-                                    Text(reason).font(.system(size: 10)).foregroundStyle(.secondary)
+                                    Text(reason)
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
                                     HStack {
                                         Button("Approve") { model.approve(id) }
                                             .disabled(!model.config.allowDispatch)
                                         Button("Deny", role: .destructive) { model.deny(id) }
                                     }
                                     .controlSize(.small)
+                                    .padding(.top, 2)
                                 }
                             }
                         }
@@ -147,17 +170,8 @@ struct MenuBarSummary: View {
                 .frame(maxHeight: 220)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-    }
-
-    private func color(for state: AgentActivity.State) -> Color {
-        switch state {
-        case .working: return .green
-        case .waiting: return .orange
-        case .idle: return .blue
-        case .ended: return .secondary
-        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 }
 #endif

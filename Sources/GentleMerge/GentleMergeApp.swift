@@ -26,11 +26,16 @@ struct GentleMergeApp: App {
             MenuBarSummary(model: model, openMainWindow: showWindow)
         } label: {
             Image(systemName: menuBarSymbol)
+                .accessibilityLabel("GentleMerge")
             if model.liveActivities.count > 1 {
                 Text("\(model.liveActivities.count)")
             }
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(model: model)
+        }
     }
 
     private func showWindow() {

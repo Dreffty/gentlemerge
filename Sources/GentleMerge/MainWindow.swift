@@ -43,26 +43,27 @@ struct MainWindow: View {
 
     private var sidebar: some View {
         List(selection: $selection) {
+            // No fixed point sizes in here: a sidebar's text follows the size
+            // people pick in General settings (`sidebars.md` › Desktop).
             Section("Running now") {
                 if model.liveActivities.isEmpty {
                     Text("No agent sessions")
-                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
                 ForEach(model.liveActivities) { activity in
-                    HStack(spacing: 7) {
+                    HStack(spacing: 8) {
                         Circle()
-                            .fill(color(for: activity.state))
-                            .frame(width: 7, height: 7)
+                            .fill(activity.state.tint)
+                            .frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(activity.provider.displayName)
-                                .font(.system(size: 11.5, weight: .medium))
                             Text("\(activity.projectName) · \(activity.stateLabel)")
-                                .font(.system(size: 10))
+                                .font(.subheadline)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                     }
+                    .accessibilityElement(children: .combine)
                     // The project it works in, and nothing else: a row whose
                     // session has no project has nowhere to navigate, and the
                     // old `?? ""` tagged it as an empty project that sat in the
@@ -75,40 +76,23 @@ struct MainWindow: View {
             Section("Projects") {
                 ForEach(model.projects) { summary in
                     Label(summary.name, systemImage: "folder")
-                        .font(.system(size: 12))
                         .tag(summary.path)
                 }
             }
         }
         .listStyle(.sidebar)
     }
-
-    private func color(for state: AgentActivity.State) -> Color {
-        switch state {
-        case .working: return .green
-        case .waiting: return .orange
-        case .idle: return .blue
-        case .ended: return .secondary
-        }
-    }
 }
 
 @MainActor
 private struct EmptyPane: View {
     var body: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "antenna.radiowaves.left.and.right")
-                .font(.system(size: 26))
-                .foregroundStyle(.secondary)
-            Text("Nothing running yet")
-                .font(.system(size: 13, weight: .medium))
-            Text("Start Claude Code or Codex in a project and it shows up here,\n"
+        ContentUnavailableView {
+            Label("Nothing running yet", systemImage: "antenna.radiowaves.left.and.right")
+        } description: {
+            Text("Start Claude Code or Codex in a project and it shows up here, "
                 + "along with everything it tells the other agents.")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -133,6 +117,9 @@ private struct ProjectPane: View {
     @State private var claimed: [String: TaskClaim] = [:]
     @State private var newTask = ""
     @State private var requestError: String?
+    /// Read with the task board on every refresh tick, so the section can
+    /// leave the layout entirely while there is nothing open.
+    @State private var openRequests: [AgentRequest] = []
 
     private var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
 
@@ -149,20 +136,28 @@ private struct ProjectPane: View {
             .suffix(30)
     }
 
+    private var openTaskCount: Int { (handoff?.tasks ?? []).filter { !$0.done }.count }
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                header
+            // The project's name is the window title and its path the
+            // subtitle, so the pane opens on the agents instead of on a second
+            // copy of the title. Headless dispatch moved to Settings: it is one
+            // switch for every project, and sitting inside each one said
+            // otherwise.
+            VStack(alignment: .leading, spacing: 26) {
                 agentsSection
                 messagesSection
-                requestsSection
-                automationSection
-                HStack(alignment: .top, spacing: 18) {
+                if !openRequests.isEmpty || requestError != nil {
+                    requestsSection
+                }
+                HStack(alignment: .top, spacing: 28) {
                     tasksSection.frame(maxWidth: .infinity, alignment: .leading)
                     commitsSection.frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .padding(20)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
         }
         // The model writes `lastMessage` from ~30 places and nothing read it:
         // add a task, deny a request, kick off a headless run and the window
@@ -171,15 +166,16 @@ private struct ProjectPane: View {
         .safeAreaInset(edge: .bottom) {
             if let message = model.lastMessage, !message.isEmpty {
                 Text(message)
-                    .font(.system(size: 11))
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 20)
+                    .padding(.horizontal, 24)
                     .padding(.vertical, 8)
                     .background(.bar)
             }
         }
         .navigationTitle(projectName)
+        .navigationSubtitle(NSString(string: projectPath).abbreviatingWithTildeInPath)
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -197,14 +193,16 @@ private struct ProjectPane: View {
                 .help(reviewHelp)
 
                 Button { showSnapshots = true } label: {
-                    Label("Restore points", systemImage: "clock.arrow.circlepath")
+                    Label("Restore Points", systemImage: "clock.arrow.circlepath")
                 }
+                .help("Snapshots of this project you can write back")
 
                 Button {
                     NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: projectPath)
                 } label: {
-                    Label("Finder", systemImage: "folder")
+                    Label("Show in Finder", systemImage: "folder")
                 }
+                .help("Show this project in Finder")
             }
         }
         .sheet(isPresented: $showReview) {
@@ -227,11 +225,18 @@ private struct ProjectPane: View {
         }
     }
 
-    /// Keep the task board and the claim list current without a `git log`.
+    /// Keep the task board, the claim list and the open requests current
+    /// without a `git log`.
     private func refreshShared() {
         handoff = model.handoffWithoutCommits(for: projectPath)
         claimed = model.claims(for: projectPath)
         handoffExists = ProjectRegistry.exists(for: projectPath)
+        openRequests = readOpenRequests()
+    }
+
+    private func readOpenRequests() -> [AgentRequest] {
+        Requests(paths: model.paths).all()
+            .filter { $0.projectPath == projectPath && $0.state != .acked }
     }
 
     /// What the Review button will review, said out loud in its tooltip: the
@@ -245,26 +250,14 @@ private struct ProjectPane: View {
             + session.startedAt.formatted()
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(projectName)
-                .font(.system(size: 20, weight: .semibold))
-            Text(projectPath)
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
-                .textSelection(.enabled)
-        }
-    }
-
     // MARK: Agents
 
     private var agentsSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            SectionHeader("WHO IS ON THIS")
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Who is on this", detail: agents.isEmpty ? nil : "\(agents.count) running")
 
             if agents.isEmpty {
                 Text("No session running here right now.")
-                    .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
             }
 
@@ -273,34 +266,32 @@ private struct ProjectPane: View {
             // the file does not move.
             let costs = Stats.summaries(paths: model.paths).bySession
             ForEach(agents) { activity in
-                HStack(alignment: .top, spacing: 9) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    // The provider's own colour, the same one its notes use
+                    // below, so a session and what it said read as one thing.
                     Image(systemName: activity.provider.symbolName)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 16)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(Palette.tint(for: activity.provider))
+                        .frame(width: 18)
+                        .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 6) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .firstTextBaseline, spacing: 7) {
                             Text(activity.provider.displayName)
-                                .font(.system(size: 12.5, weight: .semibold))
-                            Text(activity.stateLabel)
-                                .font(.system(size: 10, weight: .medium))
-                                .padding(.horizontal, 5)
-                                .padding(.vertical, 1)
-                                .background(stateColor(activity.state).opacity(0.15), in: Capsule())
-                                .foregroundStyle(stateColor(activity.state))
+                                .font(.headline)
+                            StateBadge(state: activity.state, label: activity.stateLabel)
+                            Spacer(minLength: 8)
                             Text(RelativeTime.short(from: activity.updatedAt))
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
                         }
 
                         if let task = activity.currentTask {
                             Text("“\(task)”")
-                                .font(.system(size: 12))
                                 .fixedSize(horizontal: false, vertical: true)
                         } else if let event = activity.lastEvent {
                             Text(event)
-                                .font(.system(size: 12))
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -309,25 +300,17 @@ private struct ProjectPane: View {
                         // off the ledger, always said as an estimate.
                         if let cost = costs[activity.id], cost.turns > 0 {
                             Text("\(cost.turns) briefings · ≈\(cost.estTokens) tokens (estimate)")
-                                .font(.system(size: 10))
-                                .foregroundStyle(.tertiary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
-                    Spacer()
                 }
-                .padding(10)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 7))
+                .background(.fill.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .accessibilityElement(children: .combine)
             }
-        }
-    }
-
-    private func stateColor(_ state: AgentActivity.State) -> Color {
-        switch state {
-        case .working: return .green
-        case .waiting: return .orange
-        case .idle: return .blue
-        case .ended: return .secondary
         }
     }
 
@@ -336,82 +319,66 @@ private struct ProjectPane: View {
     /// A kind earns a chip only when it is not the default one: a column of
     /// grey UPDATE badges would say nothing and cost every line its width.
     /// Resolved notes never reach here — they are folded out of the list.
+    /// Only urgent is coloured: purple and teal already mean Claude and Codex.
     @ViewBuilder
     private func kindChip(for message: AgentMessage) -> some View {
         if message.effectiveKind != .update {
+            let tint = message.effectiveKind == .urgent ? Color.red : Color.secondary
             Text(message.effectiveKind.rawValue.uppercased())
-                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                .padding(.horizontal, 5)
-                .padding(.vertical, 1.5)
-                .foregroundStyle(tint(for: message.effectiveKind))
-                .background(tint(for: message.effectiveKind).opacity(0.14), in: Capsule())
-        }
-    }
-
-    private func tint(for kind: MessageKind) -> Color {
-        switch kind {
-        case .urgent: return .red
-        case .handoff: return .purple
-        case .request, .requestResult: return .teal
-        case .fyi, .update, .resolve: return .gray
+                .font(.system(.caption2, design: .monospaced).weight(.semibold))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .foregroundStyle(tint)
+                .background(tint.opacity(0.14), in: Capsule())
         }
     }
 
     private var messagesSection: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            SectionHeader("WHAT THEY HAVE TOLD EACH OTHER")
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("What they have told each other")
 
             if conversation.isEmpty {
                 Text("Nothing yet. Anything written here is handed to every agent"
                     + " on its next turn — and they can write back with `gentlemerge say`.")
-                    .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // A transcript: handles in monospace, the way the agents sign
+            // their notes in a terminal.
             ForEach(conversation) { message in
-                HStack(alignment: .top, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text(message.from)
-                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(tint(for: message.from))
-                        .frame(width: 54, alignment: .leading)
+                        .font(.system(.callout, design: .monospaced).weight(.semibold))
+                        .foregroundStyle(Palette.tint(forAuthor: message.from))
+                        .frame(width: 60, alignment: .leading)
                     kindChip(for: message)
                     Text(message.text)
-                        .font(.system(size: 12))
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
-                    Spacer(minLength: 6)
+                    Spacer(minLength: 8)
                     Text(RelativeTime.short(from: message.at))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
             }
 
-            HStack(spacing: 7) {
+            HStack(spacing: 8) {
                 TextField("Tell every agent something…", text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit { send() }
-                Button("Send") { send() }
-                    .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
-                Menu {
-                    Button("Only for this project") { send(scoped: true) }
-                } label: {
-                    Image(systemName: "chevron.down")
+                // A split button: Send goes to every agent, the arrow keeps it
+                // to this project (`pull-down-buttons.md`).
+                Menu("Send") {
+                    Button("Send Only to This Project") { send(scoped: true) }
+                } primaryAction: {
+                    send()
                 }
-                .menuStyle(.borderlessButton)
-                .frame(width: 24)
+                .fixedSize()
+                .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
             }
-            .padding(.top, 2)
-        }
-    }
-
-    private func tint(for author: String) -> Color {
-        switch author {
-        case "you": return .blue
-        case "claude": return .purple
-        case "codex": return .teal
-        case "hermes": return .orange
-        default: return .secondary
+            .padding(.top, 4)
         }
     }
 
@@ -422,38 +389,42 @@ private struct ProjectPane: View {
         draft = ""
     }
 
+    /// Shown only while there is a request open here: an empty heading is a
+    /// question with nothing under it.
     private var requestsSection: some View {
-        TimelineView(.periodic(from: .now, by: 3)) { _ in
-            VStack(alignment: .leading, spacing: 7) {
-                SectionHeader("REQUESTS")
-                ForEach(Requests(paths: model.paths).all().filter { $0.projectPath == projectPath && $0.state != .acked }) { request in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text("\(request.id) · \(request.title)").font(.system(size: 12))
-                            Text("\(request.from) → \(request.resolvedTo ?? request.to) · \(request.state.rawValue)")
-                                .font(.system(size: 10)).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                        if let logURL = model.requestLogURL(for: request) {
-                            Button("Open log") { NSWorkspace.shared.open(logURL) }
-                                .buttonStyle(.link)
-                                .help(logURL.path)
-                        }
-                        if request.from == "you" && request.state.isTerminal {
-                            Button("Ack") { updateRequest(request, action: "ack") }
-                        }
-                        if request.state == .assigned || request.state == .queued {
-                            // The model's own path, not `RequestActions` with a
-                            // literal "you": a human is not the assignee, and
-                            // `transition` only lets the two parties to the
-                            // contract move it — this button was doomed to fail
-                            // with "you is not allowed to do that"
-                            // (audit 2026-10-08).
-                            Button("Reject") { model.deny(request.id); reload() }
-                        }
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Requests", detail: openRequests.isEmpty ? nil : "\(openRequests.count) open")
+            ForEach(openRequests) { request in
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(request.id) · \(request.title)")
+                        Text("\(request.from) → \(request.resolvedTo ?? request.to) · \(request.state.rawValue)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if let logURL = model.requestLogURL(for: request) {
+                        Button("Open Log") { NSWorkspace.shared.open(logURL) }
+                            .buttonStyle(.link)
+                            .help(logURL.path)
+                    }
+                    if request.from == "you" && request.state.isTerminal {
+                        Button("Acknowledge") { updateRequest(request, action: "ack") }
+                    }
+                    if request.state == .assigned || request.state == .queued {
+                        // The model's own path, not `RequestActions` with a
+                        // literal "you": a human is not the assignee, and
+                        // `transition` only lets the two parties to the
+                        // contract move it — this button was doomed to fail
+                        // with "you is not allowed to do that"
+                        // (audit 2026-10-08).
+                        Button("Reject") { model.deny(request.id); reload() }
                     }
                 }
-                if let requestError { Text(requestError).foregroundStyle(.red) }
+            }
+            if let requestError {
+                Label(requestError, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
             }
         }
     }
@@ -474,110 +445,84 @@ private struct ProjectPane: View {
 
     // MARK: Tasks and commits
 
-    /// Who may start headless work, and how much of it per day. Off by
-    /// default; delegated lets agents trigger within tiers and budget; strict
-    /// only runs human-created requests and parks the rest for approval here.
-    private var automationSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SectionHeader("HEADLESS WORK")
-            Picker("Dispatch mode", selection: Binding(
-                get: { model.config.dispatchMode },
-                set: { model.config.dispatchMode = $0; reload() }
-            )) {
-                Text("Off").tag("off")
-                Text("Delegated").tag("delegated")
-                Text("Strict").tag("strict")
-            }
-            .pickerStyle(.segmented)
-            Stepper("Daily budget: \(model.config.dispatchDailyBudgetMinutes) min", value: Binding(
-                get: { model.config.dispatchDailyBudgetMinutes },
-                set: { model.config.dispatchDailyBudgetMinutes = max(0, $0); reload() }
-            ), step: 15)
-            Text("Delegated lets agents start headless work within tiers and budget. Strict only runs human-created requests.")
-                .font(.system(size: 10))
-                .foregroundStyle(.tertiary)
-        }
-    }
-
     private var tasksSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SectionHeader("OPEN TASKS")
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Open tasks", detail: openTaskCount == 0 ? nil : "\(openTaskCount)")
 
             ForEach(handoff?.tasks ?? []) { task in
-                HStack(alignment: .top, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Toggle("", isOn: Binding(
                         get: { task.done },
                         set: { model.setTask(task, done: $0, in: projectPath); reload() }
                     ))
                     .labelsHidden()
                     .toggleStyle(.checkbox)
+                    .accessibilityLabel(task.text)
 
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 2) {
                         if task.text.hasPrefix("[req-") {
-                            Text("REQUEST").font(.system(size: 9, weight: .semibold)).foregroundStyle(.teal)
+                            Text("REQUEST")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.secondary)
                         }
                         Text(task.text)
-                            .font(.system(size: 12))
                             .strikethrough(task.done)
                             .foregroundStyle(task.done ? .secondary : .primary)
                             .fixedSize(horizontal: false, vertical: true)
                         if let by = task.addedBy {
                             Text("from \(by)")
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(.tertiary)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                         // Only while it is open: a finished task's claim died
                         // with the work, and saying otherwise would be a lie
-                        // you cannot click away.
+                        // you cannot click away. Not orange: orange means an
+                        // agent is waiting on you, a claim that one is on it.
                         if !task.done, let claim = claimed[task.id] {
-                            Text(claim.annotation())
-                                .font(.system(size: 9.5))
-                                .foregroundStyle(.orange)
+                            Label(claim.annotation(), systemImage: "hand.raised.fill")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
                     Spacer(minLength: 4)
                 }
             }
 
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 TextField("Something left to do…", text: $newTask)
                     .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 11.5))
                     .onSubmit(addTask)
                 Button("Add", action: addTask)
-                    .controlSize(.small)
                     .disabled(newTask.trimmingCharacters(in: .whitespaces).isEmpty)
             }
+            .padding(.top, 2)
 
             if handoff != nil, !handoffExists {
-                Button("Set up the handoff file") {
+                Button("Set Up the Handoff File") {
                     model.initializeProject(projectPath)
                     reload()
                 }
-                .controlSize(.small)
                 .padding(.top, 2)
             }
         }
     }
 
     private var commitsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            SectionHeader("LAST COMMITS")
+        VStack(alignment: .leading, spacing: 10) {
+            SectionHeader("Last commits")
 
             if let commits = handoff?.commits, !commits.isEmpty {
                 ForEach(commits) { commit in
-                    VStack(alignment: .leading, spacing: 1) {
+                    VStack(alignment: .leading, spacing: 2) {
                         Text(commit.subject)
-                            .font(.system(size: 12))
                             .fixedSize(horizontal: false, vertical: true)
                         Text("\(commit.shortSHA) · \(HandoffMarkdown.dayFormatter.string(from: commit.date))")
-                            .font(.system(size: 9.5, design: .monospaced))
-                            .foregroundStyle(.tertiary)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
                     }
                 }
             } else {
                 Text("No commits — this folder is not a git repository.")
-                    .font(.system(size: 11.5))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -596,19 +541,53 @@ private struct ProjectPane: View {
         handoff = model.handoff(for: projectPath)
         claimed = model.claims(for: projectPath)
         handoffExists = ProjectRegistry.exists(for: projectPath)
+        openRequests = readOpenRequests()
     }
 }
 
+/// A section's title, with an optional count or summary beside it. Headline
+/// weight in sentence case: the old tiny grey capitals were 10 pt at 1.9:1,
+/// and read as decoration rather than as the way into a section.
 @MainActor
 struct SectionHeader: View {
     let text: String
+    var detail: String?
 
-    init(_ text: String) { self.text = text }
+    init(_ text: String, detail: String? = nil) {
+        self.text = text
+        self.detail = detail
+    }
 
     var body: some View {
-        Text(text)
-            .font(.system(size: 10, weight: .semibold))
-            .foregroundStyle(.tertiary)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(text)
+                .font(.headline)
+            if let detail {
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// An agent's state as a tinted capsule. The word is always there, so the
+/// colour is never the only thing saying it.
+@MainActor
+struct StateBadge: View {
+    let state: AgentActivity.State
+    let label: String
+
+    var body: some View {
+        Text(label)
+            .font(.caption.weight(.medium))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 1)
+            .foregroundStyle(state.tint)
+            .background(state.tint.opacity(0.15), in: Capsule())
     }
 }
 #endif
