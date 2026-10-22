@@ -74,6 +74,19 @@ final class PhantomAgentTests: XCTestCase {
         XCTAssertEqual(here.map(\.pid), [other.pid])
     }
 
+    /// A shared pid is not enough to call a session ours when both sides have
+    /// session ids and they differ: the smoke test hands one stand-in pid to
+    /// both a Codex and a Claude hook, and Codex vanished from Claude's brief.
+    func testAHookSessionWithItsOwnIdIsListedDespiteASharedPid() {
+        let shared = Int(getpid())
+        bus.save([AgentActivity(id: "codex-1", provider: .codex, projectPath: project,
+                                currentTask: "he migrado el schema", pid: shared)])
+
+        let (here, _) = bus.peers(excluding: "claude-1", project: project, me: "claude",
+                                  selfPID: shared, selfSessionID: "claude-1")
+        XCTAssertEqual(here.map(\.id), ["codex-1"])
+    }
+
     /// End to end through the briefing, as the hook calls it.
     func testTheBriefingDoesNotListTheSessionReadingIt() {
         let me = Int(getpid())

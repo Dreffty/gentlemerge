@@ -482,7 +482,11 @@ public struct AgentBus: Sendable {
     ) -> (here: [AgentActivity], elsewhere: Int) {
         let ownMarks = Presence.identities(ofSession: selfSessionID ?? sessionID, pid: selfPID, paths: paths)
         let live = others(excluding: sessionID).filter { activity in
-            if let selfPID, activity.pid == selfPID { return false }
+            // A shared pid means ourselves only when nothing better says
+            // otherwise: two hook sessions with ids of their own are two
+            // sessions, even when one process stands in for both.
+            if let selfPID, activity.pid == selfPID,
+               activity.id.hasPrefix("presence:") || selfSessionID == nil { return false }
             if let selfSessionID, activity.id == selfSessionID { return false }
             if ownMarks.contains(activity.id) { return false }
             guard Self.isOwnPresenceMark(activity, me: me) else { return true }
