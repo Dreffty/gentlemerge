@@ -177,8 +177,10 @@ enum CLI {
                 resolved: Identity.resolve(cwd: directory, provider: .unknown, paths: paths))
             let label = identity.label
             _ = try paths.createDirectories()
+            // Our parent is the agent that spawned this server over stdio, and
+            // stays so for as long as the server lives.
             Presence.record(label: label, project: ProjectRegistry.canonicalPath(for: directory),
-                branch: nil, task: nil, paths: paths)
+                branch: nil, task: nil, pid: Int(getppid()), paths: paths)
             var server = MCPServer(paths: paths, cwd: directory, identity: label)
             server.version = AppInfo.version
             server.serve()
@@ -824,7 +826,10 @@ enum CLI {
             sessionID: label.map(AgentBus.readerSessionID(for:)),
             me: label,
             project: project,
-            branch: RepoIdentity.currentBranch(at: checkoutDirectory(arguments))
+            branch: RepoIdentity.currentBranch(at: checkoutDirectory(arguments)),
+            // Run from a session's own tool call, this is that session asking:
+            // it should not be listed as somebody else.
+            selfSessionID: ProcessInfo.processInfo.environment[Presence.sessionEnvironmentKey]
         ) {
             blocks.append(briefing)
         }
@@ -1824,12 +1829,18 @@ enum CLI {
             return 64
         default: briefMode = event == "SessionStart" ? .full : .delta
         }
+        // Who the reader is, in the two ways a mark can say it: the agent's
+        // pid (the hook hands it over) and the session id. Without them a
+        // session whose label did not match its own mark was told about itself.
+        let environment = ProcessInfo.processInfo.environment
         if let briefing = AgentBus(paths: paths).briefing(
             sessionID: sessionID,
             me: identity.label,
             project: directory,
             mode: briefMode,
-            persistCursor: true
+            persistCursor: true,
+            selfPID: environment[Presence.pidEnvironmentKey].flatMap(Int.init),
+            selfSessionID: sessionID ?? environment[Presence.sessionEnvironmentKey]
         ) {
             blocks.append(briefing)
         }
@@ -2382,12 +2393,22 @@ enum CLI {
                     provider: value(after: "--provider", in: arguments).flatMap(AgentProvider.init(rawValue:)) ?? .unknown,
                     paths: Paths.fromEnvironment())).label
         } catch { identity = nil }
+        let label = identity ?? provider ?? defaultAuthor()
+        // "you" is what nobody we can name resolves to: a person at a shell, or
+        // a script. A one-off `say` from there is not an agent working, and its
+        // mark was listed in briefings as one for half an hour (2026-10-21).
+        guard label != "you" else { return }
+        // The hook's payload carries the session id; a tool call has it in the
+        // environment, which `record` reads by itself.
+        let payloadSession = value(after: "--payload", in: arguments)
+            .flatMap { try? Data(contentsOf: URL(fileURLWithPath: $0)) }
+            .flatMap { try? JSONCoding.decoder().decode(JSONValue.self, from: $0) }
+            .flatMap { $0.string("session_id") }
         Presence.record(
-            label: identity
-                ?? provider
-                ?? defaultAuthor(),
+            label: label,
             project: ProjectRegistry.canonicalPath(for: checkout),
             branch: RepoIdentity.currentBranch(at: checkout),
+            sessionID: payloadSession,
             paths: Paths.fromEnvironment(),
             capabilities: arguments.contains("--capabilities")
                 ? splitCSV(values(after: "--capabilities", in: arguments)) : nil

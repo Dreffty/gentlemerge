@@ -27,6 +27,31 @@ public enum Presence {
     /// working" is a claim they can weigh for themselves.
     public static let timeToLive: TimeInterval = 30 * 60
 
+    /// How long a mark nobody can vouch for counts: no pid to probe and no
+    /// session behind it. That is a one-off command run from a shell — a
+    /// human's `say`, a script's `task add` — and it was showing up in every
+    /// briefing as "Agent · <project> (working)" for half an hour after the
+    /// command had returned (2026-10-21). Long enough that `who` right after
+    /// the command still shows it; short enough that nobody reads it as a
+    /// session.
+    public static let looseTimeToLive: TimeInterval = 2 * 60
+
+    /// Where Claude Code tells its hooks and tool calls which session they
+    /// belong to. Recorded so a reader can recognise its own mark by more than
+    /// its label.
+    public static let sessionEnvironmentKey = "CLAUDE_CODE_SESSION_ID"
+
+    /// A working directory that names no project: `/`, or the home folder.
+    /// A desktop app running in the background (Codex's, 2026-10-21) reports
+    /// one, and it read as "Agent · / (13m ago, working)" — somebody working,
+    /// on nothing anybody could find.
+    public static func isNoProject(_ path: String?, home: String = NSHomeDirectory()) -> Bool {
+        guard let path else { return false }
+        let trimmed = path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
+        let homeTrimmed = home.count > 1 && home.hasSuffix("/") ? String(home.dropLast()) : home
+        return trimmed == "/" || trimmed.isEmpty || trimmed == homeTrimmed
+    }
+
     /// Every live agent session is doing right now, recorded by the agents
     /// themselves. A public shape over `Mark`, so the callers that need the
     /// label as written can reach it without the internal type going public.
@@ -38,9 +63,19 @@ public enum Presence {
         public var pid: Int?
         public var task: String?
         public var capabilities: [String]
+        public var sessionID: String?
 
         /// A mark past its TTL is not worth believing, whoever reads it.
-        public var isExpired: Bool { Date().timeIntervalSince(updatedAt) >= timeToLive }
+        public var isExpired: Bool {
+            Date().timeIntervalSince(updatedAt) >= Presence.timeToLive(pid: pid, sessionID: sessionID)
+        }
+    }
+
+    /// The TTL a mark earns: the full half hour when something stands behind
+    /// it (a pid to probe, a session that wrote it), two minutes when nothing
+    /// does.
+    static func timeToLive(pid: Int?, sessionID: String?) -> TimeInterval {
+        pid == nil && sessionID == nil ? looseTimeToLive : timeToLive
     }
 
     /// Where a caller that genuinely knows the agent's own pid says so.
@@ -72,7 +107,8 @@ public enum Presence {
                 updatedAt: mark.updatedAt,
                 pid: mark.pid,
                 task: mark.task,
-                capabilities: mark.capabilities
+                capabilities: mark.capabilities,
+                sessionID: mark.sessionID
             )
         }
     }
@@ -85,6 +121,7 @@ public enum Presence {
         var pid: Int?
         var task: String?
         var capabilities: [String]
+        var sessionID: String?
 
         init(
             label: String,
@@ -93,7 +130,8 @@ public enum Presence {
             updatedAt: Date,
             pid: Int?,
             task: String?,
-            capabilities: [String] = []
+            capabilities: [String] = [],
+            sessionID: String? = nil
         ) {
             self.label = label
             self.projectPath = projectPath
@@ -102,10 +140,11 @@ public enum Presence {
             self.pid = pid
             self.task = task
             self.capabilities = capabilities
+            self.sessionID = sessionID
         }
 
         enum CodingKeys: String, CodingKey {
-            case label, projectPath, branch, updatedAt, pid, task, capabilities
+            case label, projectPath, branch, updatedAt, pid, task, capabilities, sessionID
         }
 
         init(from decoder: Decoder) throws {
@@ -117,10 +156,14 @@ public enum Presence {
             pid = try c.decodeIfPresent(Int.self, forKey: .pid)
             task = try c.decodeIfPresent(String.self, forKey: .task)
             capabilities = try c.decodeIfPresent([String].self, forKey: .capabilities) ?? []
+            sessionID = try c.decodeIfPresent(String.self, forKey: .sessionID)
         }
 
+        var ttl: TimeInterval { Presence.timeToLive(pid: pid, sessionID: sessionID) }
+
         /// A mark past its TTL is not worth believing, whoever reads it.
-        var isExpired: Bool { Date().timeIntervalSince(updatedAt) >= timeToLive }
+        var isExpired: Bool { isExpired(now: Date()) }
+        func isExpired(now: Date) -> Bool { now.timeIntervalSince(updatedAt) >= ttl }
     }
 
     /// Records that this agent is alive and where. Cheap enough to call on
@@ -131,11 +174,15 @@ public enum Presence {
         branch: String?,
         task: String? = nil,
         pid: Int? = nil,
+        sessionID: String? = nil,
         paths: Paths,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         now: Date = Date(),
         capabilities: [String]? = nil
     ) {
+        // Somebody working on no project is not news to anybody, and it is
+        // not a mark worth leaving.
+        guard !isNoProject(project) else { return }
         var mark = Mark(
             label: label,
             projectPath: project,
@@ -149,14 +196,27 @@ public enum Presence {
             // so no entry point stores a secret in it, and dropped entirely
             // when there is nothing safe to show.
             task: task.flatMap { Redactor.shared($0) },
-            capabilities: capabilities ?? []
+            capabilities: capabilities ?? [],
+            sessionID: (sessionID ?? environment[sessionEnvironmentKey])
+                .flatMap { $0.isEmpty ? nil : $0 }
         )
-        // Ordinary heartbeats do not withdraw an agent's advertised skills.
-        // An explicit [] is a deliberate withdrawal.
-        if capabilities == nil,
-           let data = try? Data(contentsOf: fileURL(for: mark, in: paths)),
+        if let data = try? Data(contentsOf: fileURL(for: mark, in: paths)),
            let previous = try? JSONCoding.decoder().decode(Mark.self, from: data) {
-            mark.capabilities = previous.capabilities
+            // Ordinary heartbeats do not withdraw an agent's advertised skills.
+            // An explicit [] is a deliberate withdrawal.
+            if capabilities == nil { mark.capabilities = previous.capabilities }
+            // A session's own tool calls cannot know its pid, and the hook
+            // that does wrote it here a moment ago. Overwriting it with nil
+            // would demote a live session to a two-minute loose mark — so the
+            // same agent keeps what the hook knew, as long as that process is
+            // still there and nothing says this is another session.
+            let sameSession = mark.sessionID == nil || previous.sessionID == nil
+                || mark.sessionID == previous.sessionID
+            if mark.pid == nil, sameSession, !previous.isExpired(now: now),
+               Liveness.isProcessAlive(previous.pid) == true {
+                mark.pid = previous.pid
+                if mark.sessionID == nil { mark.sessionID = previous.sessionID }
+            }
         }
         do {
             try FileManager.default.createDirectory(at: paths.presence, withIntermediateDirectories: true)
@@ -166,6 +226,9 @@ public enum Presence {
             // other agents, not the thing the caller asked for.
             Log.error("could not record presence: \(error.localizedDescription)")
         }
+        // Somebody has to throw the old marks away, and the only callers that
+        // run often enough are the ones writing. A few dozen small files.
+        prune(paths: paths, now: now)
     }
 
     /// Delete mark files past their TTL. Reads filter those anyway; this is
@@ -176,11 +239,23 @@ public enum Presence {
             at: paths.presence, includingPropertiesForKeys: nil
         ) else { return 0 }
         var removed = 0
-        for url in files where url.pathExtension == "json" {
-            guard let data = try? Data(contentsOf: url),
-                  let mark = try? JSONCoding.decoder().decode(Mark.self, from: data)
-            else { continue }
-            guard now.timeIntervalSince(mark.updatedAt) >= timeToLive else { continue }
+        for url in files {
+            if url.pathExtension == "json" {
+                guard let data = try? Data(contentsOf: url),
+                      let mark = try? JSONCoding.decoder().decode(Mark.self, from: data)
+                else { continue }
+                // Its own TTL, so a loose mark goes after two minutes instead
+                // of lingering for the full half hour of a session's.
+                guard mark.isExpired(now: now) || isNoProject(mark.projectPath) else { continue }
+            } else if url.lastPathComponent.hasPrefix(".tmp-") {
+                // What an interrupted atomic write leaves behind. A writer
+                // renames its temp file within milliseconds; one an hour old
+                // belongs to nobody (there were September ones still here).
+                let modified = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
+                guard let modified, now.timeIntervalSince(modified) >= timeToLive else { continue }
+            } else {
+                continue
+            }
             if (try? FileManager.default.removeItem(at: url)) != nil { removed += 1 }
         }
         return removed
@@ -200,7 +275,7 @@ public enum Presence {
                   let mark = try? JSONCoding.decoder().decode(Mark.self, from: data)
             else { return nil }
 
-            guard now.timeIntervalSince(mark.updatedAt) < timeToLive else { return nil }
+            guard !mark.isExpired(now: now), !isNoProject(mark.projectPath) else { return nil }
             // Only when somebody recorded a pid worth checking. `!= false` on
             // purpose: nil is "we cannot tell", which is not a reason to bury
             // somebody.
@@ -221,10 +296,29 @@ public enum Presence {
 
     public static func labels(withCapability capability: String, project: String?, paths: Paths) -> [String] {
         marks(paths: paths)
-            .filter { !$0.isExpired && Liveness.isProcessAlive($0.pid) != false
+            .filter { !$0.isExpired && !isNoProject($0.projectPath) && Liveness.isProcessAlive($0.pid) != false
                 && $0.capabilities.contains(capability) && (project == nil || $0.projectPath == project) }
             .sorted { $0.updatedAt > $1.updatedAt }
             .map(\.label)
+    }
+
+    /// The presence rows that are the reader itself, recognised by the session
+    /// that wrote them or the process behind them — not by the label, which
+    /// two sessions in one project share.
+    public static func identities(ofSession sessionID: String?, pid: Int?, paths: Paths) -> Set<String> {
+        guard sessionID != nil || pid != nil,
+              let files = try? FileManager.default.contentsOfDirectory(at: paths.presence, includingPropertiesForKeys: nil)
+        else { return [] }
+        var own: Set<String> = []
+        for url in files where url.pathExtension == "json" {
+            guard let data = try? Data(contentsOf: url),
+                  let mark = try? JSONCoding.decoder().decode(Mark.self, from: data)
+            else { continue }
+            if (sessionID != nil && mark.sessionID == sessionID) || (pid != nil && mark.pid == pid) {
+                own.insert(identity(of: mark))
+            }
+        }
+        return own
     }
 
     /// What makes two marks the same agent: who, where, and on what.
