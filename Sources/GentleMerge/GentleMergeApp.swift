@@ -66,6 +66,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first { $0.canBecomeMain }?.makeKeyAndOrderFront(nil)
         }
+        UISnapshot.runIfRequested(model: Shared.model)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
