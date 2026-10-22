@@ -14,8 +14,6 @@ struct MenuBarSummary: View {
     let model: InboxModel
     var openMainWindow: () -> Void
 
-    @Environment(\.openSettings) private var openSettings
-
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .firstTextBaseline) {
@@ -103,13 +101,11 @@ struct MenuBarSummary: View {
                         model.refreshBus()
                     }
                     .keyboardShortcut("r")
-                    Button("Settings…") {
-                        // A menu bar app is not the active app, so the window
-                        // would open behind whatever you were looking at.
-                        NSApp.activate(ignoringOtherApps: true)
-                        openSettings()
-                    }
-                    .keyboardShortcut(",")
+                    // `SettingsLink` rather than `openSettings`: the latter
+                    // needs the macOS 15 SDK, and CI builds against 14.
+                    // The Settings window brings the app forward itself.
+                    SettingsLink { Text("Settings…") }
+                        .keyboardShortcut(",")
                     Divider()
                     Button("Quit GentleMerge") { NSApp.terminate(nil) }
                         .keyboardShortcut("q")

@@ -35,6 +35,9 @@ struct GentleMergeApp: App {
 
         Settings {
             SettingsView(model: model)
+                // A menu bar app is not the active app, so the window would
+                // open behind whatever you were looking at.
+                .onAppear { NSApp.activate(ignoringOtherApps: true) }
         }
     }
 
