@@ -74,9 +74,29 @@ public enum Redactor {
     /// Order matters: the specific patterns run before the broad ones, so a key
     /// is reported as a key rather than as a long number.
     private static let rules: [(Kind, String)] = [
-        (.privateKey, #"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"#),
+        // Two shapes, and the whole block first so a well-formed key of any
+        // line layout is taken as one match. The second shape is a key that
+        // arrives without its `-----END-----`: requiring both delimiters meant
+        // a truncated paste — the head of a file, a body cut by a length limit
+        // — left the key material standing in full (audit 2026-10-24). One
+        // base64 run of 20+ characters is required, so naming the header in
+        // prose ("I found a -----BEGIN RSA PRIVATE KEY----- in config") is not
+        // a key and is not redacted: there is nothing there to leak.
+        (.privateKey, #"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\s*[A-Za-z0-9+/=]{20,})+"#),
         (.jwt, #"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}"#),
-        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,})"#),
+        // An incoming webhook URL *is* the credential: anyone holding it can
+        // post as you. Before the key rule so the URL is reported as what it
+        // is rather than as a key found inside it.
+        (.credentialsInURL, #"https://hooks\.slack\.com/services/[A-Za-z0-9/_+-]{15,}|https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{15,}"#),
+        // The last alternative is an AWS secret access key: 40 characters of
+        // base64 with no prefix to recognise it by. It is deliberately only
+        // matched when it carries a `+` or a `/`, which no hex digest ever
+        // does — see the non-goal pinned in the tests. A key made only of
+        // letters and digits (about a quarter of them) is still not caught
+        // here, because the rule that would catch it is the one that eats
+        // every commit SHA and checksum. Named forms
+        // (`aws_secret_access_key=…`) are covered by `assignment` below.
+        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,}|(?=[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/]))(?=[A-Za-z0-9+/]*[+/])[A-Za-z0-9+/]{40})"#),
         (.credentialsInURL, #"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@"#),
         (.email, #"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#),
         // IBAN before card: "ES91 2100 0418 4502 0005 1332" is an account, not
@@ -91,13 +111,25 @@ public enum Redactor {
 
     /// `password: hunter2`, `API_KEY=abc…`, `token = "…"`, `{"password":"…"}`
     /// — the name gives it away, so the value goes regardless of what it
-    /// looks like. The name may wear a snake_case prefix (`DB_PASSWORD`,
-    /// `APP_SECRET_KEY`): the trailing boundary still holds, so
-    /// `bypass = true` does not match. JSON quotes the name
-    /// (`"password":`), so one optional closing quote is allowed between
-    /// the name and the separator.
+    /// looks like. JSON quotes the name (`"password":`), so one optional
+    /// closing quote is allowed between the name and the separator.
+    ///
+    /// Two things the shape has to get right, each of which was wrong:
+    ///
+    /// - **An auth scheme is not the value.** `Authorization: Bearer <token>`
+    ///   put `[redacted]` over the word `Bearer` and left the token sitting
+    ///   next to it, which is worse than not filtering at all: the line reads
+    ///   as handled. The scheme word is consumed along with the value
+    ///   (audit 2026-10-24).
+    /// - **The name is whole segments, not any letters at all.** `[A-Za-z_]*`
+    ///   in front of the keyword let `pass` inside `bypass` be the name, so
+    ///   `bypass = true` and `compass: norte` were eaten and reported as a
+    ///   password — the comment here used to claim the opposite. The prefix is
+    ///   now snake_case/kebab segments (`DB_PASSWORD`, `api-key` still match),
+    ///   and a letter or digit may not sit immediately before or after the
+    ///   keyword.
     private static let assignment =
-        #"(?i)\b([A-Za-z_]*(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key))\b["']?\s*[:=]\s*(?:"[^"\n]{1,200}"|'[^'\n]{1,200}'|[^\s,;)\]}]{3,200})"#
+        #"(?i)\b((?:[A-Za-z0-9]+[_-])*(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key))(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?:"[^"\n]{1,200}"|'[^'\n]{1,200}'|[^\s,;)\]}]{3,200})"#
 
     /// Every pattern, so a test can prove they all compile. A rule that does
     /// not compile is skipped at runtime, and skipping is invisible.

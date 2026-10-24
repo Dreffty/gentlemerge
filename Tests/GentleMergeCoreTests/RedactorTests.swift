@@ -153,6 +153,61 @@ final class RedactorTests: XCTestCase {
         }
     }
 
+    /// The case that read as handled and was not: `[redacted]` landed on the
+    /// word `Bearer` and the token stayed on the line. Asserting the
+    /// placeholder is present was what let it pass for so long — what matters
+    /// is that the secret is absent.
+    func testAnAuthSchemeIsNotMistakenForTheValue() {
+        let cases = [
+            "Authorization: Bearer TESTTOKEN0000000000FAKE",
+            "authorization: bearer TESTTOKEN0000000000FAKE",
+            "Authorization: Basic TESTTOKEN0000000000FAKE",
+            "token: Bearer TESTTOKEN0000000000FAKE",
+        ]
+        for text in cases {
+            let result = scrub(text)
+            XCTAssertFalse(
+                result.text.contains("TESTTOKEN0000000000FAKE"),
+                "the token survived next to the placeholder: \(result.text)"
+            )
+            XCTAssertTrue(result.text.contains("[redacted]"), result.text)
+        }
+    }
+
+    /// A key pasted without its `-----END-----` — the head of a file, a body
+    /// cut by a length limit — is still a key.
+    func testAPrivateKeyWithoutItsClosingDelimiterStillGoes() {
+        let result = scrub(
+            "esto estaba arriba del fichero: -----BEGIN OPENSSH PRIVATE KEY----- "
+                + "FAKEKEYCONTENTFAKEKEYCONTENTFAKEKEYCONTENT"
+        )
+        XCTAssertFalse(result.text.contains("FAKEKEYCONTENT"), result.text)
+        XCTAssertTrue(result.kinds.contains(.privateKey))
+    }
+
+    func testTheFormatsAddedAfterTheirLeakAreCaught() {
+        let cases: [(text: String, placeholder: String)] = [
+            // The id (AKIA…) was already caught; the secret beside it, which is
+            // the half that actually opens the account, was not.
+            ("aws secret wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY here", "[redacted key]"),
+            ("npm_TEST0000000000000000000000000000000000", "[redacted key]"),
+            ("refresh 1//0gTEST000000000000000000000000", "[redacted key]"),
+            (
+                "post to https://hooks.slack.com/services/T00000000/B00000000/TEST0000000000000000000",
+                "[redacted credentials]"
+            ),
+            (
+                "hook https://discord.com/api/webhooks/123456789/TEST00000000000000000000",
+                "[redacted credentials]"
+            ),
+        ]
+        for (text, placeholder) in cases {
+            let result = scrub(text)
+            XCTAssertTrue(result.didRedact, "missed: \(text)")
+            XCTAssertTrue(result.text.contains(placeholder), "\(text) → \(result.text)")
+        }
+    }
+
     func testAJWTIsCaughtWhole() {
         let jwt = "eyJhbGciOiJIUzI1NiJ9.TESTPAYLOADTESTPAYLOADTEST.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c"
         let result = scrub("send \(jwt) in the header")
@@ -178,6 +233,28 @@ final class RedactorTests: XCTestCase {
     func testNonGoalsStayPinned() {        XCTAssertFalse(scrub("landed 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b").didRedact)
         XCTAssertFalse(scrub("checksum U2FsdGVkX19zYWx0ZWRLZXlBY2Nlc3NfdG9rZGVu").didRedact)
         XCTAssertFalse(scrub("ports 8080 3000, version 2.38.1, line 42").didRedact)
+        // The AWS secret rule is bounded by the line above it: 40 characters of
+        // nothing but letters and digits is the shape of a digest, so a key
+        // that happens to carry no `+` or `/` is left alone on purpose. The
+        // named form is what covers it (`aws_secret_access_key=…`).
+        XCTAssertFalse(scrub("blob U2FsdGVkX19zYWx0ZWRLZXlBY2Nlc3NfdG9rZGVu").didRedact)
+        XCTAssertTrue(scrub("aws_secret_access_key=U2FsdGVkX19zYWx0ZWRLZXlBY2Nl").didRedact)
+    }
+
+    /// Naming a PEM header is not pasting a key, and the filter that eats the
+    /// sentence anyway is the filter people turn off.
+    func testTalkingAboutAPrivateKeyIsNotPastingOne() {
+        let result = scrub("vi un -----BEGIN RSA PRIVATE KEY----- en config.yml, lo miras?")
+        XCTAssertFalse(result.didRedact, result.text)
+        XCTAssertTrue(result.text.contains("config.yml"))
+    }
+
+    /// `pass` lives inside plenty of ordinary words. The name has to be whole
+    /// segments or the filter eats configuration lines and prose.
+    func testAKeywordInsideAnotherWordIsNotASecretName() {
+        for text in ["bypass = true", "bypass=true", "compass: norte", "passthrough = 1"] {
+            XCTAssertFalse(scrub(text).didRedact, "ate an ordinary line: \(text)")
+        }
     }
 
     /// The compiled patterns are shared across threads (autoLand scrubs off
