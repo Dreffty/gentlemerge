@@ -189,7 +189,7 @@ final class RedactorTests: XCTestCase {
         let cases: [(text: String, placeholder: String)] = [
             // The id (AKIA…) was already caught; the secret beside it, which is
             // the half that actually opens the account, was not.
-            ("aws secret wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY here", "[redacted key]"),
+            ("aws secret TESTFAKE00/0000000000/00000000000000FAKE here", "[redacted key]"),
             ("npm_TEST0000000000000000000000000000000000", "[redacted key]"),
             ("refresh 1//0gTEST000000000000000000000000", "[redacted key]"),
             (
