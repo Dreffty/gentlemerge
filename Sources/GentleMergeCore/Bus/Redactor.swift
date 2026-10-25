@@ -88,15 +88,28 @@ public enum Redactor {
         // post as you. Before the key rule so the URL is reported as what it
         // is rather than as a key found inside it.
         (.credentialsInURL, #"https://hooks\.slack\.com/services/[A-Za-z0-9/_+-]{15,}|https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{15,}"#),
-        // The last alternative is an AWS secret access key: 40 characters of
-        // base64 with no prefix to recognise it by. It is deliberately only
-        // matched when it carries a `+` or a `/`, which no hex digest ever
-        // does — see the non-goal pinned in the tests. A key made only of
-        // letters and digits (about a quarter of them) is still not caught
-        // here, because the rule that would catch it is the one that eats
-        // every commit SHA and checksum. Named forms
-        // (`aws_secret_access_key=…`) are covered by `assignment` below.
-        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,}|(?=[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/]))(?=[A-Za-z0-9+/]*[+/])[A-Za-z0-9+/]{40})"#),
+        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,})"#),
+        // An AWS secret access key: 40 characters of base64 with no prefix to
+        // recognise it by. What tells it from everything else that shares the
+        // alphabet:
+        //
+        // - **It carries a `+` or a `/`** — no hex digest does, which keeps the
+        //   commit SHA and the checksum pinned in the tests free. About three
+        //   keys in ten have neither and are not caught; the rule that would
+        //   catch them is the one that eats every digest. Named forms
+        //   (`aws_secret_access_key=…`) are `assignment`'s, and catch those.
+        // - **It stands alone.** The first version stopped at the `/` check,
+        //   and a `/` is exactly what a path has: any forty-character stretch
+        //   of one ending at a `_` or `.` matched. Measured, it broke 199 of
+        //   5,723 real paths on a working Mac and one macOS temp path in six —
+        //   among them CI's own sandbox, so an agent handed an attachment was
+        //   handed `/[redacted key]_0slzph…/report.md` and a file that did not
+        //   exist (2026-10-25). So nothing that belongs to a path or a word may
+        //   sit on either side, and it may not begin with `/`. That cost 1.6
+        //   points of recall and brought both counts to zero.
+        // - **It has a digit and a capital**, which a random key nearly always
+        //   does and a stretch of English or of a directory name rarely does.
+        (.apiKey, #"(?<![A-Za-z0-9+/._~-])(?!/)(?=[A-Za-z0-9+/]{0,39}[+/])(?=[A-Za-z0-9+/]{0,39}[0-9])(?=[A-Za-z0-9+/]{0,39}[A-Z])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/_~-])(?!\.[A-Za-z0-9])"#),
         (.credentialsInURL, #"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@"#),
         (.email, #"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#),
         // IBAN before card: "ES91 2100 0418 4502 0005 1332" is an account, not

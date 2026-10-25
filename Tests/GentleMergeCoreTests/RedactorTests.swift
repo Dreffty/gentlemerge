@@ -241,6 +241,46 @@ final class RedactorTests: XCTestCase {
         XCTAssertTrue(scrub("aws_secret_access_key=U2FsdGVkX19zYWx0ZWRLZXlBY2Nl").didRedact)
     }
 
+    /// The first version of the AWS rule keyed on a `/` to tell a key from a
+    /// hex digest — and a `/` is exactly what a path has. On the macOS CI
+    /// runner the sandbox lives under the path below, whose
+    /// `private/var/folders/s6/5hzmn6lx4dz5nxs7k` is forty characters of the
+    /// base64 alphabet ending at an underscore: it was taken for a key, the
+    /// receiver of an attachment was handed `/[redacted key]_0slzph…`, and the
+    /// file it was told to open did not exist. A path that reaches another
+    /// agent is often the whole message, so every one of these must survive.
+    func testAPathIsNeverMistakenForAKey() {
+        let paths = [
+            // The one that broke CI, verbatim.
+            "/private/var/folders/s6/5hzmn6lx4dz5nxs7k_0slzph0000gn/T/gentlemerge-smoke.T0u4JR/home/artifacts/x/report.md",
+            "/var/folders/s6/5hzmn6lx4dz5nxs7k_0slzph0000gn/T/",
+            "~/.gentlemerge/artifacts/3f2a9c81d0e4b7a6f5c2e1d0b9a8f7e6/report.md",
+            "Sources/GentleMergeCore/Bus/Redactor.swift",
+            "https://github.com/Dreffty/gentlemerge/pull/5",
+        ]
+        for path in paths {
+            let result = scrub("ábrelo en \(path) cuando puedas")
+            XCTAssertFalse(result.didRedact, "a path was redacted: \(result.text)")
+            XCTAssertTrue(result.text.contains(path), result.text)
+        }
+    }
+
+    /// What makes it a key rather than a stretch of a path: it stands alone.
+    /// These are the places a pasted key actually sits.
+    func testAStandaloneAWSSecretIsCaughtWhereverItSits() {
+        let key = "TESTFAKE00/0000000000/00000000000000FAKE"
+        for text in [
+            "the secret is \(key)",
+            "the secret is \(key).",
+            "secret: \"\(key)\"",
+            "(\(key))",
+            key,
+        ] {
+            let result = scrub(text)
+            XCTAssertFalse(result.text.contains(key), "missed in: \(text) → \(result.text)")
+        }
+    }
+
     /// Naming a PEM header is not pasting a key, and the filter that eats the
     /// sentence anyway is the filter people turn off.
     func testTalkingAboutAPrivateKeyIsNotPastingOne() {
