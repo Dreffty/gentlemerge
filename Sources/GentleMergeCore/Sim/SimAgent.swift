@@ -29,20 +29,62 @@ public enum SimError: Error, LocalizedError {
     }
 }
 
-/// ADAPTED: reject Git overrides rather than sanitize every nested Core call.
-/// Shell merges inherited environment even for Git calls made during ingestion.
-/// Conservatively reject GIT_* overrides (including empty values) before writes.
-/// GIT_PAGER is harmless for these noninteractive commands; leave it alone.
-/// Reporting only names avoids disclosing environment values.
+/// The demo builds a throwaway repository and commits in it, and `Shell` merges
+/// the inherited environment into every git call it makes — including the ones
+/// made by the nested CLI processes it spawns. So the environment has to be
+/// dealt with before anything is written. There are two kinds, and they want
+/// opposite treatment.
+///
+/// **Refused**: the variables that point git at a *different* repository,
+/// index or config. Nothing good can come of running the demo under those —
+/// at best it fails confusingly, at worst it commits into the repository the
+/// user is standing in. Named, never valued, so a refusal cannot disclose a
+/// path somebody set in secret.
+///
+/// **Neutralised**: the variables that only decide whether git stops to talk
+/// to a human. Refusing those was over-broad and it cost the project its
+/// front door: `GIT_EDITOR` is set by Claude Code itself (`GIT_EDITOR=true`),
+/// so `gentlemerge demo` — the README's "try it without any AI" — refused to
+/// start inside the agent this exists to coordinate, with a message about
+/// unsetting variables the reader never set (audit 2026-10-24). They are
+/// pinned to harmless values instead of being rejected: `setenv` here reaches
+/// `ProcessInfo.processInfo.environment`, which is what `Shell` hands to every
+/// child, so an inherited `GIT_EDITOR=vim` cannot sit waiting for a keystroke
+/// that is never coming either.
 enum SimEnvironment {
-    static func validate() throws {
-        let overrides = ProcessInfo.processInfo.environment.keys.filter {
-            $0.hasPrefix("GIT_") && $0 != "GIT_PAGER"
+    /// Points git somewhere else. These stop the demo.
+    static let redirecting: Set<String> = [
+        "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_WORK_TREE_OVERRIDE",
+        "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+    ]
+
+    /// Only decides whether git waits for a human, and what it is pinned to so
+    /// that it does not.
+    static let neutralised: [String: String] = [
+        "GIT_EDITOR": "true",
+        "GIT_SEQUENCE_EDITOR": "true",
+        "GIT_PAGER": "cat",
+        "GIT_ASKPASS": "true",
+        "GIT_TERMINAL_PROMPT": "0",
+    ]
+
+    static func validate(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws {
+        let overrides = environment.keys.filter {
+            redirecting.contains($0) || $0.hasPrefix("GIT_CONFIG_KEY_")
+                || $0.hasPrefix("GIT_CONFIG_VALUE_")
         }.sorted()
         guard overrides.isEmpty else {
-            throw SimError.expectationFailed("refusing inherited Git environment: " + overrides.joined(separator: ", ")
-                + ". Unset these variables before running demo or sim.")
+            throw SimError.expectationFailed(
+                "refusing inherited Git environment: " + overrides.joined(separator: ", ")
+                    + ". These point git at another repository; unset them before running demo or sim.")
         }
+        for (name, value) in neutralised { setenv(name, value, 1) }
     }
 }
 
