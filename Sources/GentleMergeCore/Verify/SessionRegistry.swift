@@ -71,13 +71,46 @@ public struct SessionRegistry: Sendable {
             projectPath: projectPath,
             startedAt: date,
             lastSeenAt: date,
-            baselineCommit: Self.head(of: projectPath),
+            // A baseline taken earlier wins (see `recordBaseline`): HEAD *now* is where
+            // the project stands when this event is finally drained, which with the app
+            // closed can be long after the session began and after others committed.
+            baselineCommit: sessions[id]?.baselineCommit ?? Self.head(of: projectPath),
             pid: pid,
             tty: tty,
             terminalProgram: terminalProgram,
-            label: label
+            label: label ?? sessions[id]?.label
         )
         prune()
+        save()
+    }
+
+    /// Writes down where the project stood at the moment a session began.
+    ///
+    /// Called from the SessionStart hook itself, which is the one moment that is
+    /// true. `started` runs when the spooled event is drained — three seconds later
+    /// with the app up, but whenever the next `brief` / `precommit` happens to run
+    /// without it — and it took HEAD at that time, so every commit that landed in
+    /// between fell outside "what landed since your session started". Does nothing
+    /// when a baseline is already there.
+    public mutating func recordBaseline(
+        id: String,
+        provider: AgentProvider,
+        projectPath: String?,
+        at date: Date,
+        label: String? = nil
+    ) {
+        guard sessions[id]?.baselineCommit == nil, let head = Self.head(of: projectPath) else { return }
+        if var existing = sessions[id] {
+            existing.baselineCommit = head
+            existing.label = existing.label ?? label
+            sessions[id] = existing
+        } else {
+            sessions[id] = SessionRecord(
+                id: id, provider: provider, projectPath: projectPath,
+                startedAt: date, lastSeenAt: date, baselineCommit: head, label: label
+            )
+            prune()
+        }
         save()
     }
 

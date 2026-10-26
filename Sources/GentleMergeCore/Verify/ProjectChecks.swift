@@ -158,6 +158,11 @@ public enum ProjectChecks {
 
         for (name, kind) in [("build", Check.Kind.build), ("test", .test), ("typecheck", .typecheck), ("lint", .lint)]
         where scripts[name] != nil {
+            // `npm init` writes `echo "Error: no test specified" && exit 1` as the test
+            // script. It is a placeholder, not a test suite: running it as a check made
+            // every `land` in such a project fail (and the dry run announce it as a check
+            // that would pass), until someone typed --skip-checks.
+            if name == "test", let script = scripts[name] as? String, isPlaceholderTestScript(script) { continue }
             // Name it exactly as it runs, so the report and your terminal agree.
             let command = name == "test" ? "\(runner) test" : "\(runner) run \(name)"
             checks.append(Check(name: command, command: command, kind: kind, timeout: 600))
@@ -173,6 +178,11 @@ public enum ProjectChecks {
         }
 
         return checks
+    }
+
+    /// The script `npm init` / `yarn init` leave behind.
+    static func isPlaceholderTestScript(_ script: String) -> Bool {
+        script.lowercased().contains("no test specified")
     }
 
     /// The lockfile is the honest answer to "which package manager is this".

@@ -288,6 +288,15 @@ final class AuditCLITests: XCTestCase {
         XCTAssertEqual(run(["config", "set", "allowDispatch", "maybe"]).status, 64)
     }
 
+    // review --since with a revision that does not exist
+
+    func testReviewRefusesABaselineThatIsNotACommit() throws {
+        XCTAssertTrue(Shell.run("/usr/bin/env", ["git", "init", "-q"], in: root).succeeded)
+        let out = run(["review", ".", "--since", "deadbeefdeadbeef"])
+        XCTAssertEqual(out.status, 1, out.stdout)
+        XCTAssertTrue(out.stderr.contains("not a commit"), out.stderr)
+    }
+
     // history: an entry with no project must not borrow the folder you stand in
 
     func testHistoryDoesNotShowTheCurrentFolderForEntriesWithoutAProject() throws {

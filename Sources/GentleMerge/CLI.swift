@@ -902,9 +902,17 @@ enum CLI {
         let project = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         let includeSlow = arguments.contains("--slow")
         let baseline = value(after: "--since", in: arguments)
+        // A revision that does not exist is an error, not "nothing changed": a typo in
+        // --since printed a partial report (the untracked files only) and exited 0.
+        if let baseline, GitSnapshot.isRepository(project.path),
+           !WorkInspector.isCommit(baseline, in: project) {
+            FileHandle.standardError.write(Data("--since \(baseline): not a commit in this repository\n".utf8))
+            return 1
+        }
 
         let work = WorkInspector.summarize(projectPath: project.path, baseline: baseline)
         print("WHAT CHANGED")
+        if let problem = work.problem { print("  ⚠ \(problem)") }
         if !work.isRepository {
             print("  not a git repository")
         } else if work.changes.isEmpty {
@@ -1844,6 +1852,7 @@ enum CLI {
         let directory = projectDirectory(arguments, allowPositional: false)
 
         var event = "SessionStart"
+        var sessionSource: String?
         var sessionID: String?
         // No `--provider` means we do not know who this is, and guessing Claude
         // would hand a Claude session's messages to whoever ran the hook.
@@ -1854,6 +1863,7 @@ enum CLI {
            let payload = try? JSONCoding.decoder().decode(JSONValue.self, from: data) {
             event = payload.string("hook_event_name") ?? event
             sessionID = payload.string("session_id")
+            sessionSource = payload.string("source")
         }
         if let name = value(after: "--provider", in: arguments) {
             provider = AgentProvider(rawValue: name) ?? .unknown
@@ -1878,6 +1888,17 @@ enum CLI {
                     paths: paths))
         } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1
+        }
+
+        // Where the project stands *now*, at the moment the session begins: this hook
+        // is the one place that knows. Draining the spooled event later takes HEAD at
+        // that later time (see `SessionRegistry.recordBaseline`).
+        if event == "SessionStart", let sessionID, sessionSource == nil || ["startup", "resume"].contains(sessionSource!) {
+            var registry = SessionRegistry(url: paths.sessions)
+            registry.recordBaseline(
+                id: sessionID, provider: provider ?? .unknown,
+                projectPath: checkoutDirectory(arguments, allowPositional: false), at: Date(),
+                label: identity.verified ? identity.label : nil)
         }
 
         var blocks: [String] = []
