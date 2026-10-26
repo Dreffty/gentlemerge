@@ -61,13 +61,17 @@ final class GateEndToEndTests: XCTestCase {
     /// A process environment for a commit nobody configured: the committer's
     /// own home, and `GENTLEMERGE_BIN` and the escape hatch truly absent — not
     /// set to empty, which would only prove the `:-` expansion.
-    private func environment(home: String? = nil) -> [String: String] {
+    /// `label: nil` leaves the committer with no `GENTLEMERGE_LABEL` at all.
+    private func environment(home: String? = nil, label: String? = "hermes",
+                             extra: [String: String] = [:]) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        env.removeValue(forKey: "GENTLEMERGE_BIN")
-        env.removeValue(forKey: "GENTLEMERGE_SKIP")
+        for key in ["GENTLEMERGE_BIN", "GENTLEMERGE_SKIP", "GENTLEMERGE_LABEL", "GENTLEMERGE_NAME"] {
+            env.removeValue(forKey: key)
+        }
         env["HOME"] = home ?? userHome.path
         env["GENTLEMERGE_HOME"] = stateHome.path
-        env["GENTLEMERGE_LABEL"] = "hermes"
+        if let label { env["GENTLEMERGE_LABEL"] = label }
+        for (key, value) in extra { env[key] = value }
         return env
     }
 
@@ -109,6 +113,69 @@ final class GateEndToEndTests: XCTestCase {
                        "the default hook could not find a gate that is right where it points: \(commit.output)")
         XCTAssertNotEqual(commit.status, 0, "the invasion was committed: \(commit.output)")
         XCTAssertEqual(head, before, "HEAD moved: the commit landed")
+    }
+
+    // MARK: - Several agents in one checkout, with no worktree label
+
+    private func stageClaimedFile() throws {
+        try FileManager.default.createDirectory(at: repo.appendingPathComponent("src"), withIntermediateDirectories: true)
+        try Data("x\n".utf8).write(to: repo.appendingPathComponent("src/app.js"))
+        git(["add", "-A"])
+    }
+
+    /// The layout this tool is actually run in: no labelled worktree, each
+    /// agent saying who it is through `GENTLEMERGE_LABEL`. Before, the gate
+    /// read only the worktree label, so here every claim was somebody else's —
+    /// the agent whose own edit claimed `src/` could not commit `src/`.
+    func testAnAgentCommitsWhatItsOwnEditClaimed() throws {
+        try stageClaimedFile()
+        let before = head
+
+        let commit = run("/usr/bin/env", ["git", "commit", "-qm", "claude commits its own work"],
+                         env: environment(label: "claude"), in: repo)
+
+        XCTAssertEqual(commit.status, 0, "an agent was blocked by its own claim: \(commit.output)")
+        XCTAssertNotEqual(head, before)
+    }
+
+    /// The commit releases what it landed, under the identity it was judged by.
+    func testTheCommitReleasesTheCommittersOwnClaim() throws {
+        let postCommit = repo.appendingPathComponent(".git/hooks/post-commit")
+        try GitHookInstaller.postCommitScript().write(to: postCommit, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: postCommit.path)
+        try stageClaimedFile()
+
+        let commit = run("/usr/bin/env", ["git", "commit", "-qm", "claude lands src"],
+                         env: environment(label: "claude"), in: repo)
+        XCTAssertEqual(commit.status, 0, commit.output)
+
+        let live = PathClaims(paths: Paths(home: stateHome)).load().filter { $0.isLive(at: Date()) }
+        XCTAssertTrue(live.isEmpty, "the claim outlived the commit that landed it: \(live)")
+    }
+
+    /// Fail closed is unchanged: nobody to judge by, so every live claim blocks.
+    func testWithNoIdentityEveryLiveClaimStillBlocks() throws {
+        try stageClaimedFile()
+        let before = head
+
+        let commit = run("/usr/bin/env", ["git", "commit", "-qm", "anonymous"],
+                         env: environment(label: nil), in: repo)
+
+        XCTAssertNotEqual(commit.status, 0, commit.output)
+        XCTAssertEqual(head, before)
+    }
+
+    /// 2026-10-07 stays fixed: an unverified name is a way to spell yourself,
+    /// never proof — it must not let a commit pass as the claim's holder.
+    func testAnUnverifiedNameIsNotAnIdentityForTheGate() throws {
+        try stageClaimedFile()
+        let before = head
+
+        let commit = run("/usr/bin/env", ["git", "commit", "-qm", "borrowed name"],
+                         env: environment(label: nil, extra: ["GENTLEMERGE_NAME": "claude"]), in: repo)
+
+        XCTAssertNotEqual(commit.status, 0, "an unverified name passed as the holder: \(commit.output)")
+        XCTAssertEqual(head, before)
     }
 
     /// The control: the same hook lets through what nobody claimed, so a block
