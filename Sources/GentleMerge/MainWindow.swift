@@ -227,17 +227,7 @@ private struct ProjectPane: View {
 
     /// Keep the task board, the claim list and the open requests current
     /// without a `git log`.
-    private func refreshShared() {
-        handoff = model.handoffWithoutCommits(for: projectPath)
-        claimed = model.claims(for: projectPath)
-        handoffExists = ProjectRegistry.exists(for: projectPath)
-        openRequests = readOpenRequests()
-    }
-
-    private func readOpenRequests() -> [AgentRequest] {
-        Requests(paths: model.paths).all()
-            .filter { $0.projectPath == projectPath && $0.isOpenInTheWindow }
-    }
+    private func refreshShared() { load(refreshingCommits: false) }
 
     /// What the Review button will review, said out loud in its tooltip: the
     /// baseline it uses is the newest session's, and with no session there is
@@ -537,12 +527,43 @@ private struct ProjectPane: View {
         reload()
     }
 
-    private func reload() {
-        handoff = model.handoff(for: projectPath)
-        claimed = model.claims(for: projectPath)
-        handoffExists = ProjectRegistry.exists(for: projectPath)
-        openRequests = readOpenRequests()
+    private func reload() { load(refreshingCommits: true) }
+
+    /// Everything the pane shows, read off the main thread.
+    ///
+    /// Reading the handoff opens a file in the project, and a project in Downloads,
+    /// Desktop or Documents makes the first `open()` wait for macOS's privacy prompt:
+    /// done in `onAppear` that froze the whole window (AppKit paints it before
+    /// `applicationDidFinishLaunching` runs, so the app's own start-up — the PID file,
+    /// the spool drain, the timer, the notifications — waited on the prompt too).
+    private func load(refreshingCommits: Bool) {
+        let path = projectPath
+        let paths = model.paths
+        Task {
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                PaneSnapshot(
+                    handoff: ProjectRegistry.handoff(for: path, refreshingCommits: refreshingCommits),
+                    claimed: TaskClaims(paths: paths).active(for: path),
+                    handoffExists: ProjectRegistry.exists(for: path),
+                    openRequests: Requests(paths: paths).all()
+                        .filter { $0.projectPath == path && $0.isOpenInTheWindow }
+                )
+            }.value
+            // The person may have moved to another project while this was reading.
+            guard path == projectPath else { return }
+            handoff = snapshot.handoff
+            claimed = snapshot.claimed
+            handoffExists = snapshot.handoffExists
+            openRequests = snapshot.openRequests
+        }
     }
+}
+
+private struct PaneSnapshot: Sendable {
+    var handoff: ProjectHandoff
+    var claimed: [String: TaskClaim]
+    var handoffExists: Bool
+    var openRequests: [AgentRequest]
 }
 
 /// A section's title, with an optional count or summary beside it. Headline
