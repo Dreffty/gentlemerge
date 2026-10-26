@@ -96,7 +96,8 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
                 // (audit Tier 5 #25).
                 let nextIsValue = index + 1 < raw.count && !Self.looksLikeFlag(raw[index + 1])
                 index += nextIsValue ? 2 : 1
-            } else if Self.looksLikeFlag(argument) {
+            } else if Self.looksLikeFlag(argument) || argument == "-" {
+                // A bare "-" is the conventional "standard input" and never somebody's text.
                 index += 1
             } else {
                 result.append(argument)

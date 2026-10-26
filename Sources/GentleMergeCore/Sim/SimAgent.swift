@@ -82,7 +82,9 @@ enum SimEnvironment {
         guard overrides.isEmpty else {
             throw SimError.expectationFailed(
                 "refusing inherited Git environment: " + overrides.joined(separator: ", ")
-                    + ". These point git at another repository; unset them before running demo or sim.")
+                    + ". These change where git looks for the repository or which configuration it reads"
+                    + " (hooks included), so the demo could not be trusted to check anything. Run it without"
+                    + " them: env -u " + overrides.joined(separator: " -u ") + " gentlemerge demo")
         }
         for (name, value) in neutralised { setenv(name, value, 1) }
     }

@@ -192,6 +192,52 @@ public enum Redactor {
         return compiledANSI.stringByReplacingMatches(in: text, range: range, withTemplate: "")
     }
 
+    // MARK: - Long numbers that are not secrets
+
+    /// Whether a run of seven or more digits is a number worth hiding.
+    ///
+    /// The rule is deliberately broad — phone numbers, document and account ids — and
+    /// two ordinary things in an agent's notes hit it by accident, each costing the
+    /// reader something real:
+    ///
+    /// - **A file path.** `/backups/20261026/log.txt`, a session id used as a folder
+    ///   name, a timestamped file: the path came back as `/backups/[redacted number]/…`
+    ///   and pointed at nothing, which breaks an attachment's pointer and a task that
+    ///   names the folder. Inside a token that is a file path (starts with `/`, `./`,
+    ///   `../` or `~/`, and is not a URL) a digit run is a name, not an account.
+    /// - **A date written `YYYYMMDD`** (`build 20261026`, `release-20261026`): a valid
+    ///   calendar date is not an identifier of a person.
+    ///
+    /// Anything else of that length is still redacted, `account 21452098` included.
+    static func isWorthRedactingAsANumber(in text: String, at range: Range<String.Index>) -> Bool {
+        let digits = text[range]
+        if digits.count == 8, isCalendarDate(String(digits)) { return false }
+
+        let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'`(),;<>[]{}"))
+        var start = range.lowerBound
+        while start > text.startIndex {
+            let before = text.index(before: start)
+            if text[before].unicodeScalars.allSatisfy(separators.contains) { break }
+            start = before
+        }
+        let token = text[start..<range.lowerBound]
+        guard token.hasPrefix("/") || token.hasPrefix("./") || token.hasPrefix("../") || token.hasPrefix("~/") else {
+            return true
+        }
+        var end = range.upperBound
+        while end < text.endIndex, !text[end].unicodeScalars.allSatisfy(separators.contains) {
+            end = text.index(after: end)
+        }
+        return text[start..<end].contains("://")
+    }
+
+    private static func isCalendarDate(_ digits: String) -> Bool {
+        guard digits.count == 8, let year = Int(digits.prefix(4)), (1900...2099).contains(year),
+              let month = Int(digits.dropFirst(4).prefix(2)), (1...12).contains(month),
+              let day = Int(digits.suffix(2)), (1...31).contains(day) else { return false }
+        return true
+    }
+
     // MARK: - Scrubbing
 
     public static func scrub(_ text: String) -> Result {
@@ -201,7 +247,10 @@ public enum Redactor {
         var kinds: [Kind] = []
         var redactedCharacters = 0
 
-        func apply(_ kind: Kind, _ regex: NSRegularExpression?, keepingPrefix: Bool = false) {
+        func apply(
+            _ kind: Kind, _ regex: NSRegularExpression?, keepingPrefix: Bool = false,
+            where shouldRedact: ((String, Range<String.Index>) -> Bool)? = nil
+        ) {
             guard let regex else {
                 // Failing open here would leak exactly what this exists to stop.
                 // (The missing compile is already logged where the cache built.)
@@ -213,6 +262,7 @@ public enum Redactor {
 
             for match in matches.reversed() {
                 guard let matchRange = Range(match.range, in: working) else { continue }
+                if let shouldRedact, !shouldRedact(working, matchRange) { continue }
                 let original = String(working[matchRange])
                 var replacement = kind.placeholder
 
@@ -229,7 +279,13 @@ public enum Redactor {
         }
 
         apply(.assignedSecret, compiledAssignment, keepingPrefix: true)
-        for (kind, regex) in compiledRules { apply(kind, regex) }
+        for (kind, regex) in compiledRules {
+            if kind == .longNumber {
+                apply(kind, regex, where: { text, range in Self.isWorthRedactingAsANumber(in: text, at: range) })
+            } else {
+                apply(kind, regex)
+            }
+        }
 
         // If most of it was secret, the leftovers are not worth sharing: they
         // are the shape of the secret with the secret taken out.
