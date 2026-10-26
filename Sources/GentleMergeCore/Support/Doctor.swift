@@ -106,6 +106,20 @@ public struct Doctor: Sendable {
         return Check(name: "app", level: .ok, detail: "not running — the CLI works without it")
     }
 
+    /// The path the installed hook will try, worked out by the shell and not
+    /// by us: its `AI_DEFAULT=` line plus its `GENTLEMERGE_BIN` override, under
+    /// this process's environment. nil when the hook has no such line (a
+    /// foreign or older format) or `sh` cannot answer — the caller falls back.
+    static func gateTheHookResolves(hook: URL, environment: [String: String]? = nil) -> String? {
+        guard let body = try? String(contentsOf: hook, encoding: .utf8),
+              let line = body.split(separator: "\n").first(where: { $0.hasPrefix("AI_DEFAULT=") })
+        else { return nil }
+        let output = Shell.run("/bin/sh", ["-c", "\(line)\nprintf %s \"${GENTLEMERGE_BIN:-$AI_DEFAULT}\""],
+                               environment: environment, timeout: 5)
+        guard output.succeeded, !output.timedOut, !output.stdout.isEmpty else { return nil }
+        return output.stdout
+    }
+
     static func gitHooks(paths: Paths, repo: URL) -> Check {
         let installer = GitHookInstaller(paths: paths)
         let directory: URL
@@ -131,7 +145,19 @@ public struct Doctor: Sendable {
             // "commits pass unchecked" for a perfectly healthy install. Its own
             // `DoctorTests` only ever set `GENTLEMERGE_BIN`, so the path was
             // never exercised (audit Tier 5 #44).
-            let gate = ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"]
+            //
+            // And `paths.bin` was itself only a model of where the hook looks,
+            // which is the deeper problem: the model and the hook disagreed.
+            // Every standard-home hook looked for a directory literally named
+            // `$HOME` (single-quoted, never expanded), passed every commit
+            // unchecked, and doctor — finding the binary right where it
+            // modelled it — reported the gate live (audit 2026-10-26). So the
+            // hook is asked: its own `AI_DEFAULT=` line is evaluated by `sh`
+            // exactly as git evaluates it on every commit. Running one
+            // assignment from a hook git already runs whole adds no exposure.
+            let gate = Self.gateTheHookResolves(
+                hook: directory.appendingPathComponent("pre-commit"))
+                ?? ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"]
                 ?? paths.bin.appendingPathComponent("gentlemerge").path
             if !FileManager.default.isExecutableFile(atPath: gate) {
                 return Check(name: "git-hooks", level: .warn,

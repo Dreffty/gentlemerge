@@ -143,16 +143,22 @@ final class InstallerQuotingTests: XCTestCase {
 
         let hooksDir = repo.appendingPathComponent(".git/hooks")
         try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
-        let installer = GitHookInstaller(paths: paths)
-        let scripts: [(String, String)] = GitHookInstaller.hookNames
-            .map { ($0, GitHookInstaller.script(gateDefault: "/nonexistent/gentlemerge")) }
-            + [("post-commit", GitHookInstaller.postCommitScript(gateDefault: "/nonexistent/gentlemerge"))]
-        for (name, body) in scripts {
-            let path = hooksDir.appendingPathComponent(name)
-            try body.write(to: path, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
+        // The hooks a custom-home install actually writes: pointing at
+        // `paths.bin`. This fixture used to write `/nonexistent/gentlemerge`
+        // and call it healthy — a commit through those hooks passes unchecked,
+        // and the assertion below held only because doctor never read the
+        // hook it was vouching for (audit 2026-10-26).
+        func writeHooks(gate: String) throws {
+            let scripts: [(String, String)] = GitHookInstaller.hookNames
+                .map { ($0, GitHookInstaller.script(gateDefault: gate)) }
+                + [("post-commit", GitHookInstaller.postCommitScript(gateDefault: gate))]
+            for (name, body) in scripts {
+                let path = hooksDir.appendingPathComponent(name)
+                try body.write(to: path, atomically: true, encoding: .utf8)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: path.path)
+            }
         }
-        _ = installer
+        try writeHooks(gate: GitHookInstaller.gateDefault(paths: paths))
 
         // The binary exists under `paths.bin`, which is where the install put it.
         let binary = paths.bin.appendingPathComponent("gentlemerge")
@@ -165,5 +171,12 @@ final class InstallerQuotingTests: XCTestCase {
             "a healthy install must not be reported as unchecked: \(check.detail)"
         )
         XCTAssertFalse(check.detail.contains("gate binary is missing"))
+
+        // And hooks that cannot find the gate are reported as what they are,
+        // even with the binary sitting right where doctor used to look.
+        try writeHooks(gate: "/nonexistent/gentlemerge")
+        let broken = Doctor.gitHooks(paths: paths, repo: repo)
+        XCTAssertEqual(broken.level, .warn, "hooks that check nothing were vouched for: \(broken.detail)")
+        XCTAssertTrue(broken.detail.contains("commits pass unchecked"), broken.detail)
     }
 }

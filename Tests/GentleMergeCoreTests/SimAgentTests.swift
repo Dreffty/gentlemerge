@@ -177,4 +177,46 @@ final class SimAgentTests: XCTestCase {
         XCTAssertEqual(store.drain(), [envelope])
         XCTAssertTrue(store.drain().isEmpty)
     }
+
+    // MARK: - The inherited Git environment
+
+    /// `GIT_EDITOR=true` is what Claude Code sets, so refusing it meant the
+    /// demo would not start inside the agent this project exists to
+    /// coordinate. These only decide whether git waits for a human, and they
+    /// are pinned rather than rejected.
+    func testTheVariablesThatOnlyWaitForAHumanAreNeutralisedNotRefused() throws {
+        XCTAssertNoThrow(try SimEnvironment.validate(environment: [
+            "GIT_EDITOR": "vim",
+            "GIT_PAGER": "less",
+            "GIT_SEQUENCE_EDITOR": "nano",
+            "GIT_TERMINAL_PROMPT": "1",
+        ]))
+        // Pinned on the process, because that is what `Shell` hands to every
+        // child — including the nested CLI calls the demo makes.
+        XCTAssertEqual(ProcessInfo.processInfo.environment["GIT_EDITOR"], "true")
+        XCTAssertEqual(ProcessInfo.processInfo.environment["GIT_PAGER"], "cat")
+    }
+
+    /// A variable that points git at another repository is a different matter:
+    /// the demo commits, and it must not commit into the caller's checkout.
+    func testAVariableThatPointsGitElsewhereStillStopsTheDemo() {
+        for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_KEY_0"] {
+            do {
+                try SimEnvironment.validate(environment: [name: "/somewhere/else"])
+                XCTFail("\(name) must stop the demo")
+            } catch {
+                let message = error.localizedDescription
+                XCTAssertTrue(message.contains(name), message)
+                XCTAssertFalse(
+                    message.contains("/somewhere/else"),
+                    "the refusal names the variable, never its value: \(message)"
+                )
+            }
+        }
+    }
+
+    func testAnEmptyGitEnvironmentIsFine() {
+        XCTAssertNoThrow(try SimEnvironment.validate(environment: [:]))
+        XCTAssertNoThrow(try SimEnvironment.validate(environment: ["PATH": "/usr/bin"]))
+    }
 }

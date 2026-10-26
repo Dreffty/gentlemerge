@@ -1226,21 +1226,47 @@ enum CLI {
     /// `precommit --enforce` — the gate the git hook calls. The overlap report
     /// prints first (context), then the claims/ownership/request violations
     /// (decision): a blocking one exits 1, and git refuses the commit.
+    /// Who is committing, as far as the gate is concerned: a *verified*
+    /// identity or nobody.
+    ///
+    /// `Identity.verified` already names the two sources the rest of the
+    /// system trusts — `GENTLEMERGE_LABEL` and the worktree's own label — and
+    /// refuses to let a caller holding either speak as anybody else. The gate
+    /// read only the second. That suits the README's layout, one labelled
+    /// worktree per agent, and nothing else: several agents sharing one
+    /// checkout, which is how this tool is actually run, have no worktree label
+    /// to tell them apart. There every claim was somebody else's, so an agent
+    /// was blocked from committing the very file its own edit had just claimed,
+    /// and installing the gate would have stopped every agent at once
+    /// (2026-10-26). Each agent now says who it is through its own
+    /// environment, and the gate believes it exactly as far as everything else
+    /// does.
+    ///
+    /// What stays out is what 2026-10-07 removed: an unverified source — a
+    /// presence mark, `GENTLEMERGE_NAME`, the provider — never becomes `me`,
+    /// so a commit cannot borrow the identity of whoever happens to be alive.
+    /// As the README says, this coordinates cooperative agents; one that sets a
+    /// variable to pass as another is as far outside that as `--no-verify`.
+    private static func committerLabel(at directory: String, paths: Paths) -> String? {
+        let identity = Identity.resolve(cwd: directory, provider: .unknown, paths: paths)
+        return identity.verified ? identity.label : nil
+    }
+
     private static func precommitEnforce(_ arguments: [String], in directory: String, paths: Paths) -> Int32 {
         let staged = arguments.contains("--staged")
         let repo = URL(fileURLWithPath: directory)
         let project = ProjectRegistry.canonicalPath(for: directory)
 
-        // Identity for enforcement is the *worktree's own* label, and nothing
-        // else. We deliberately do not fall back to the project's single live
-        // presence mark: a mark belongs to a session, not to the directory
-        // committing here, so adopting one made `me` equal whoever happened to
-        // be alive. When that happened to be the claim holder, rule 1's
-        // `$0.label != me` skipped its own claim and the commit sailed through
-        // (audit 2026-10-07). With no label, `evaluate` still blocks on live
-        // claims — it just cannot apply ownership zones, which need somebody to
-        // tell owner from invader.
-        let label = WorktreeLabel.read(cwd: repo)
+        // Identity for enforcement is a *verified* label (see `committerLabel`),
+        // and nothing else. We deliberately do not fall back to the project's
+        // single live presence mark: a mark belongs to a session, not to the
+        // directory committing here, so adopting one made `me` equal whoever
+        // happened to be alive. When that happened to be the claim holder, rule
+        // 1's `$0.label != me` skipped its own claim and the commit sailed
+        // through (audit 2026-10-07). With no label, `evaluate` still blocks on
+        // live claims — it just cannot apply ownership zones, which need
+        // somebody to tell owner from invader.
+        let label = committerLabel(at: directory, paths: paths)
 
         // The existing overlap report, exactly as `precommit` prints it.
         let baseline = value(after: "--since", in: arguments)
@@ -1342,12 +1368,13 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         let directory = projectDirectory(arguments, allowPositional: false)
         let project = ProjectRegistry.canonicalPath(for: directory)
-        // Only the worktree's own label releases claims. Falling back to the
-        // project's single live presence mark released *somebody else's*
-        // claims — unblocking other agents on files this worktree never owned.
-        // Without a label the claims simply wait out their TTL, which is the
-        // safe direction.
-        guard let label = WorktreeLabel.read(cwd: URL(fileURLWithPath: directory)) else { return 0 }
+        // Only a verified label releases claims — the same one the gate judged
+        // this commit by (`committerLabel`), so what it let through as yours is
+        // what gets released as yours. Falling back to the project's single
+        // live presence mark released *somebody else's* claims — unblocking
+        // other agents on files this worktree never owned. Without a label the
+        // claims simply wait out their TTL, which is the safe direction.
+        guard let label = committerLabel(at: directory, paths: paths) else { return 0 }
         let output = Shell.run(
             "/usr/bin/env",
             ["git", "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "HEAD"],

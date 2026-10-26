@@ -74,9 +74,12 @@ The optional macOS menu-bar app shows the board, approvals and reviews. Everythi
 **macOS / Linux / WSL2**
 ```sh
 git clone https://github.com/Dreffty/gentlemerge && cd gentlemerge
-make install            # → ~/.local/bin/gentlemerge (Linux) · /usr/local/bin (macOS)
+make install            # → ~/.local/bin/gentlemerge · elsewhere with PREFIX=<dir>
 gentlemerge install     # hooks for Claude Code / Codex if present (idempotent, backed up, reversible)
 ```
+`~/.local/bin` needs no sudo and is the default on both platforms; `make install`
+says so if it is not on your `PATH`, or if an older copy earlier in `PATH` is
+still the one that runs.
 
 **Set up a repo for several agents**
 ```sh
@@ -90,6 +93,14 @@ what the gate judges "mine" from. Labels are ASCII (`[A-Za-z0-9#-_.]`, 24 chars)
 — anything else is stripped, and the same stripping is applied when git hands the
 label back, so `--label "🚀rocket"` and `--label rocket` are one agent rather
 than two.
+
+**Several agents in one checkout instead?** Then no worktree label can tell them
+apart, and the gate would treat an agent's own claims as somebody else's — it
+would refuse to let it commit the files its own edits just claimed. Give each
+agent its label through its environment instead: `GENTLEMERGE_LABEL=claude` in
+Claude Code's settings (`"env"`), `codex` in Codex's, and so on. The gate takes
+that, or a worktree label, and never a guess.
+
 Declare zones in `.gentlemerge/HANDOFF.md`:
 ```markdown
 ## Ownership
@@ -122,11 +133,13 @@ gentlemerge demo        # three simulated agents, one temp repo, the whole proto
 **What "verified on CI" means, and what it does not.** macOS runs the whole
 pipeline on every push: `swift build -c release`, the full test suite, the build
 contract, the app bundle and the headless smoke test. Linux runs
-`swift build -c release` — the CLI and both libraries compile there — and then
-**stops**, because the test module does not compile on the toolchain CI uses
-(XCTest's `@MainActor` isolation is applied more strictly there). So:
+`swift build -c release` — the CLI and both libraries compile there — and
+**stops there by design**: the test module does not compile on the toolchain CI
+uses (XCTest's `@MainActor` isolation is applied more strictly there), so the
+workflow skips the steps that would need it rather than failing on them. A
+skipped step is not a passing one, which is the point of this section. So:
 
-- **macOS is verified**: 724 tests and the smoke test pass on every commit.
+- **macOS is verified**: 758 tests and the smoke test pass on every commit.
 - **Linux is only shown to build.** No test and no smoke test has ever run
   there, so nothing about it is *verified* behaviour — it is behaviour that
   compiles. If you rely on the Linux path, treat this as the gap it is.
