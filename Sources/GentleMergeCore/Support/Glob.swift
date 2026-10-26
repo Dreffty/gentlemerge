@@ -17,11 +17,48 @@ public enum Glob {
         if pattern.hasPrefix("/") {
             let parts = pattern.split(separator: "/").map(String.init)
             for start in 0..<parts.count {
+                // A window has to start on a real directory or file name. The last
+                // window of `/Users/dev/app/lib/data/**` is `**` on its own, which
+                // matches every path in the repository: a claim on `lib/data` blocked
+                // commits to README.md. Anchoring on a literal component keeps the
+                // window meaning "this directory or something named like it".
+                let head = parts[start]
+                if head.contains("*") || head.contains("?") { continue }
                 if matchesOnce(parts[start...].joined(separator: "/"), s) { return true }
             }
             return false
         }
         return matchesOnce(pattern, s)
+    }
+
+    /// An absolute pattern made repository-relative, when it lies under one of
+    /// `roots` (the checkout, the repository root, the git top level).
+    ///
+    /// Done where a claim is *recorded*, because that is the only place that knows
+    /// where the repository is. `matches` can only guess with windows; a claim
+    /// stored as `lib/data/**` needs no guessing. A symlinked prefix (`/tmp` is
+    /// `/private/tmp`) is resolved before comparing. A pattern outside every root
+    /// comes back unchanged.
+    public static func relativize(_ pattern: String, roots: [String]) -> String {
+        guard pattern.hasPrefix("/") else { return pattern }
+        let parts = pattern.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        let firstWild = parts.firstIndex { $0.contains("*") || $0.contains("?") } ?? parts.count
+        let literal = "/" + parts[..<firstWild].joined(separator: "/")
+        let rest = parts[firstWild...].joined(separator: "/")
+        let literalForms = Set([literal, URL(fileURLWithPath: literal).resolvingSymlinksInPath().path])
+
+        for root in roots where root.hasPrefix("/") {
+            for form in literalForms {
+                for candidate in Set([root, URL(fileURLWithPath: root).resolvingSymlinksInPath().path]) {
+                    let base = candidate.count > 1 && candidate.hasSuffix("/") ? String(candidate.dropLast()) : candidate
+                    if form == base { return rest.isEmpty ? "**" : rest }
+                    guard form.hasPrefix(base + "/") else { continue }
+                    let inside = String(form.dropFirst(base.count + 1))
+                    return [inside, rest].filter { !$0.isEmpty }.joined(separator: "/")
+                }
+            }
+        }
+        return pattern
     }
 
     private static func matchesOnce(_ pattern: String, _ path: String) -> Bool {

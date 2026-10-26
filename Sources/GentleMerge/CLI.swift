@@ -181,7 +181,8 @@ enum CLI {
             // stays so for as long as the server lives.
             Presence.record(label: label, project: ProjectRegistry.canonicalPath(for: directory),
                 branch: nil, task: nil, pid: Int(getppid()), paths: paths)
-            var server = MCPServer(paths: paths, cwd: directory, identity: label)
+            var server = MCPServer(paths: paths, cwd: directory, identity: label,
+                                   identityVerified: identity.verified)
             server.version = AppInfo.version
             server.serve()
             return 0
@@ -663,7 +664,14 @@ enum CLI {
             toBranch: value(after: "--to-branch", in: arguments),
             verified: identity.verified
         )
-        let result = bus.post(message)
+        let result: Redactor.Result
+        do { result = try bus.send(message) }
+        catch {
+            // Said as plainly as the success: the other agents were NOT told.
+            FileHandle.standardError.write(Data(
+                "Not sent — the message log could not be written (\(error.localizedDescription)). See `gentlemerge doctor`.\n".utf8))
+            return 1
+        }
 
         if result.isSuppressed {
             print("Withheld — that was almost entirely \(result.summary). Nothing useful was shared.")
@@ -1456,7 +1464,8 @@ enum CLI {
         paths: Paths,
         arguments: [String]
     ) -> String? {
-        let label = value(after: "--as", in: arguments) ?? defaultAuthor()
+        let label = (try? actingLabel(arguments, explicit: value(after: "--as", in: arguments)))
+            ?? value(after: "--as", in: arguments) ?? defaultAuthor()
         guard let id = TaskClaims(paths: paths).currentSessionID(for: label, in: directory) else {
             return nil
         }
@@ -1670,7 +1679,9 @@ enum CLI {
 
         // `--as` for the cases `defaultAuthor()` cannot see: a wrapper running
         // on Hermes' behalf, or a subagent that wants its own name on it.
-        let label = value(after: "--as", in: arguments) ?? defaultAuthor()
+        let label: String
+        do { label = try actingLabel(arguments, explicit: value(after: "--as", in: arguments)) }
+        catch { FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1 }
         let claims = TaskClaims(paths: Paths.fromEnvironment())
 
         do {
@@ -2157,6 +2168,11 @@ enum CLI {
         }
 
         let project = ProjectRegistry.canonicalPath(for: directory)
+        // Recorded relative to the repository: an absolute path under this checkout
+        // is what an agent naturally writes, and stored as written it protected the
+        // wrong thing (see `Glob.relativize`).
+        let roots = repositoryRoots(for: checkoutDirectory(arguments, allowPositional: false))
+        let recorded = patterns.map { Glob.relativize($0, roots: roots) }
         let intent = value(after: "--intent", in: arguments)
         // A claim that is born expired protects nothing and says it worked: `--ttl 0`
         // and `--ttl -5` both printed "Claimed … 0m left" and exited 0 while
@@ -2177,7 +2193,7 @@ enum CLI {
         }
 
         do {
-            for pattern in patterns {
+            for pattern in recorded {
                 let claim = try PathClaims(paths: paths).claim(
                     pattern: pattern,
                     label: label,
@@ -2216,10 +2232,12 @@ enum CLI {
         }
 
         let project = ProjectRegistry.canonicalPath(for: directory)
+        let roots = repositoryRoots(for: checkoutDirectory(arguments, allowPositional: false))
         let patterns = (value(after: "--paths", in: arguments) ?? "")
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+            .map { Glob.relativize($0, roots: roots) }
 
         do {
             try PathClaims(paths: paths).release(label: label, project: project, patterns: patterns.isEmpty ? nil : patterns)
@@ -2329,7 +2347,7 @@ enum CLI {
         case "list", nil:
             let label = value(after: "--as", in: arguments)
                 ?? value(after: "--from", in: arguments)
-                ?? WorktreeLabel.read(cwd: URL(fileURLWithPath: directory))
+                ?? (try? actingLabel(arguments, explicit: nil))
                 ?? defaultAuthor()
             let rows: [AgentRequest]
             if arguments.contains("--mine") {
@@ -2439,6 +2457,34 @@ enum CLI {
             FileHandle.standardError.write(Data("git-hooks failed: \(error.localizedDescription)\n".utf8))
             return 1
         }
+    }
+
+    /// The directories an absolute path may be relative to: the worktree's own top
+    /// level, and the repository's canonical root.
+    private static func repositoryRoots(for checkout: String) -> [String] {
+        var roots: [String] = []
+        if let top = GitSnapshot(anyPathInside: checkout)?.repository.path { roots.append(top) }
+        roots.append(ProjectRegistry.canonicalPath(for: checkout))
+        return roots
+    }
+
+    /// Who is acting, the way `say` and `task add` already decide it: the env label,
+    /// then *this checkout's* worktree label, and only then the provider guess.
+    ///
+    /// `task claim`, `watch` and the session baseline asked `defaultAuthor()`
+    /// instead — the provider the environment hints at — so an agent in the worktree
+    /// labelled `hermes` claimed tasks and filed watches as `claude` (or as `you`),
+    /// and the real `claude` could claim the same task without a word of conflict.
+    /// `explicit` (`--as`) goes through `reconcile`, so nobody speaks as a label
+    /// their worktree does not carry.
+    private static func actingLabel(_ arguments: [String], explicit: String?) throws -> String {
+        let resolved = Identity.resolve(
+            cwd: checkoutDirectory(arguments, allowPositional: false),
+            provider: .unknown, paths: Paths.fromEnvironment())
+        let identity = try Identity.reconcile(explicit: explicit, resolved: resolved)
+        // A human at a plain shell resolves to "you"; an agent whose worktree has no
+        // label keeps the provider guess it always had.
+        return identity.source == .human && explicit == nil ? defaultAuthor() : identity.label
     }
 
     /// Agents run these commands themselves; the label is who to credit.
@@ -2553,7 +2599,9 @@ enum CLI {
         let scoped = arguments.contains("--global") ? nil : directory
         // Whoever asks is who gets told. `--as` covers the cases the environment
         // cannot see — a wrapper asking on Hermes' behalf, mostly.
-        let owner = value(after: "--as", in: arguments) ?? defaultAuthor()
+        let owner: String
+        do { owner = try actingLabel(arguments, explicit: value(after: "--as", in: arguments)) }
+        catch { FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1 }
 
         // Written by a human or by an agent, and it ends up in somebody else's
         // context: scrubbed here as well as on its way onto the bus.

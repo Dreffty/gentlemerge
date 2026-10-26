@@ -14,8 +14,14 @@ public struct MCPServer {
     /// (docs/ARCHITECTURE.md, "Session identity").
     public let sessionID: String
     public var version = "1.0"
-    public init(paths: Paths, cwd: String, identity: String) {
+    /// Whether `identity` came from the worktree or the environment rather than
+    /// from a free-text `--label`. A request from an unverified sender can never
+    /// start a headless agent, and this used to be hardcoded to false — so an
+    /// MCP client in a labelled worktree could delegate, but never dispatch.
+    public let identityVerified: Bool
+    public init(paths: Paths, cwd: String, identity: String, identityVerified: Bool = false) {
         self.paths = paths; self.cwd = cwd; self.identity = identity
+        self.identityVerified = identityVerified
         self.sessionID = "mcp-\(identity)-\(UUID().uuidString.prefix(8).lowercased())"
     }
     public func handle(line: String) -> String? {
@@ -75,18 +81,24 @@ public struct MCPServer {
                     case "precommit":
                         let gate = PrecommitGate(paths: paths)
                         let files = gate.stagedFiles(repo: URL(fileURLWithPath: directory))
+                        // Same inputs as the git hook, liveness included: without it this
+                        // reported "blocked" for claims of sessions the hook would reap.
                         let violations = PrecommitGate.evaluate(staged: files, me: identity,
                             claims: PathClaims(paths: paths).live(project: project),
                             ownership: Ownership.effective(project: project, paths: paths).ownership,
-                            activeRequests: Requests(paths: paths).inProgress(assignedTo: identity, project: project))
+                            activeRequests: Requests(paths: paths).inProgress(assignedTo: identity, project: project),
+                            presence: Presence.marks(paths: paths),
+                            isPIDAlive: { Liveness.isProcessAlive($0) })
                         text = violations.isEmpty ? "No staged path violations." : violations.map { "\($0.path): \($0.reason)" }.joined(separator: "\n")
                         return toolReply(id, text, isError: violations.contains(where: { $0.blocking }))
                     case "claim":
                         let patterns = args["paths"]?.arrayValue?.compactMap(\.stringValue) ?? []
                         var ttl = 30.0
                         if case .number(let value) = args["ttl_minutes"] { ttl = value }
-                        text = try patterns.map {
-                            let claim = try PathClaims(paths: paths).claim(pattern: $0, label: identity,
+                        let claimRoots = Self.repositoryRoots(directory: directory, project: project)
+                        text = try patterns.map { raw in
+                            let pattern = Glob.relativize(raw, roots: claimRoots)
+                            let claim = try PathClaims(paths: paths).claim(pattern: pattern, label: identity,
                                 project: project, intent: args["intent"]?.stringValue, ttl: ttl * 60)
                             return "claimed \(claim.pattern) until \(claim.expires)"
                         }.joined(separator: "\n")
@@ -159,7 +171,7 @@ public struct MCPServer {
                             text: args["text"]?.stringValue ?? "", projectPath: project)
                         text = "sent"
                     case "delegate":
-                        let request = try AgentBus(paths: paths).delegate(from: identity, fromVerified: false,
+                        let request = try AgentBus(paths: paths).delegate(from: identity, fromVerified: identityVerified,
                             to: args["to"]?.stringValue ?? "", projectPath: project,
                             title: args["title"]?.stringValue ?? "", spec: args["spec"]?.stringValue ?? "",
                             inputs: args["inputs"]?.arrayValue?.compactMap(\.stringValue) ?? [],
@@ -175,8 +187,10 @@ public struct MCPServer {
                         text = try RequestActions.perform(action: args["action"]?.stringValue ?? "",
                             id: args["id"]?.stringValue ?? "", by: identity, result: args["result"]?.stringValue, paths: paths)
                     case "release":
+                        let releaseRoots = Self.repositoryRoots(directory: directory, project: project)
                         try PathClaims(paths: paths).release(label: identity, project: project,
-                            patterns: args["paths"]?.arrayValue?.compactMap(\.stringValue))
+                            patterns: args["paths"]?.arrayValue?.compactMap(\.stringValue)
+                                .map { Glob.relativize($0, roots: releaseRoots) })
                         text = "released"
                     case "watch_add":
                         text = try Self.addWatch(kind: args["kind"]?.stringValue ?? "",
@@ -187,7 +201,8 @@ public struct MCPServer {
                         let standing = Watches(paths: paths).pending().filter { $0.projectPath == project }
                         text = standing.isEmpty ? "nothing being watched" : standing.map { $0.listLine() }.joined(separator: "\n")
                     case "watch_rm":
-                        let found = Watches(paths: paths).matching(prefix: args["id"]?.stringValue ?? "")
+                        let found = Watches(paths: paths).matching(
+                            prefix: args["id"]?.stringValue ?? "", owner: identity)
                         guard found.count == 1 else {
                             throw WatchError.ambiguous(prefix: args["id"]?.stringValue ?? "", count: found.count)
                         }
@@ -206,7 +221,14 @@ public struct MCPServer {
             let updates = AgentBus(paths: paths).briefing(
                 sessionID: sessionID, me: identity, project: project, mode: mode)
             var sections = [String]()
-            if mode == .full, let context = ProjectRegistry.sessionContext(for: project) {
+            // A read, like the CLI's `brief`: the cached map is shown as it is
+            // (`refreshingMap: false`) instead of walking the tree and rewriting the
+            // repository's HANDOFF.md behind the agent's back — which left the tree
+            // dirty after every MCP brief and so blocked `land` — and the task claims
+            // are included, as the CLI includes them.
+            if mode == .full, let context = ProjectRegistry.sessionContext(
+                for: project, refreshingMap: false,
+                claims: TaskClaims(paths: paths).active(for: project)) {
                 sections.append(context)
             }
             if let updates, !updates.isEmpty { sections.append(updates) }
@@ -253,6 +275,12 @@ public struct MCPServer {
                     if key == "kind" && !["session-end", "session-idle", "task-done"].contains(text) { return "invalid kind" }
                 case ("array", .array(let items)):
                     if items.contains(where: { $0.stringValue == nil }) { return "\(key) must contain strings" }
+                    // An empty entry is not a path. As a claim it overlaps every other
+                    // claim in the project (an empty literal prefix means "anything"),
+                    // so one `paths: [""]` shut every other agent out for half an hour.
+                    if items.contains(where: { ($0.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) {
+                        return "\(key) must not contain empty strings"
+                    }
                     if required.contains(key) && items.isEmpty { return "\(key) must not be empty" }
                 case ("number", .number(let number)):
                     guard number.isFinite, number > 0, number < Double(Int.max) / 60 else { return "\(key) is out of range" }
@@ -282,6 +310,15 @@ public struct MCPServer {
         Tool(name: "watch_rm", description: "Call off a watch by id prefix.", details: "Only your own watches.", fields: ["id": "string", "project": "string"], required: ["id"]),
         Tool(name: "tool_help", description: "Full docs for one tool.", details: "Arguments, required flags and the rules the blurb leaves out.", fields: ["name": "string"], required: ["name"]),
     ]
+
+    /// What an absolute path in a claim may be relative to: the worktree's top
+    /// level (the cwd may be a subdirectory of it) and the repository's root.
+    static func repositoryRoots(directory: String, project: String) -> [String] {
+        var roots: [String] = []
+        if let top = GitSnapshot(anyPathInside: directory)?.repository.path { roots.append(top) }
+        roots.append(project)
+        return roots
+    }
 
     /// The `watch add` half of the CLI's `watch` command, minus the terminal:
     /// same task resolution, same refusals, same scrubbed note.

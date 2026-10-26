@@ -19,6 +19,10 @@ public struct SessionRecord: Codable, Sendable, Identifiable, Equatable {
     public var pid: Int?
     public var tty: String?
     public var terminalProgram: String?
+    /// The worktree label the hook resolved (nil for a session whose worktree has
+    /// none). What a `watch` names: a Claude session in the worktree labelled
+    /// `hermes` is `hermes`, not "claude".
+    public var label: String?
 
     public var isLive: Bool { endedAt == nil }
 }
@@ -58,7 +62,8 @@ public struct SessionRegistry: Sendable {
         at date: Date,
         pid: Int? = nil,
         tty: String? = nil,
-        terminalProgram: String? = nil
+        terminalProgram: String? = nil,
+        label: String? = nil
     ) {
         sessions[id] = SessionRecord(
             id: id,
@@ -69,7 +74,8 @@ public struct SessionRegistry: Sendable {
             baselineCommit: Self.head(of: projectPath),
             pid: pid,
             tty: tty,
-            terminalProgram: terminalProgram
+            terminalProgram: terminalProgram,
+            label: label
         )
         prune()
         save()
@@ -84,7 +90,8 @@ public struct SessionRegistry: Sendable {
         at date: Date,
         pid: Int? = nil,
         tty: String? = nil,
-        terminalProgram: String? = nil
+        terminalProgram: String? = nil,
+        label: String? = nil
     ) {
         if var existing = sessions[id] {
             existing.lastSeenAt = date
@@ -94,6 +101,7 @@ public struct SessionRegistry: Sendable {
             existing.pid = existing.pid ?? pid
             existing.tty = existing.tty ?? tty
             existing.terminalProgram = existing.terminalProgram ?? terminalProgram
+            existing.label = existing.label ?? label
             sessions[id] = existing
         } else {
             sessions[id] = SessionRecord(
@@ -105,7 +113,8 @@ public struct SessionRegistry: Sendable {
                 baselineCommit: nil,
                 pid: pid,
                 tty: tty,
-                terminalProgram: terminalProgram
+                terminalProgram: terminalProgram,
+                label: label
             )
             prune()
         }

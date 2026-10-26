@@ -259,7 +259,8 @@ public final class InboxModel {
                 at: envelope.receivedAt,
                 pid: envelope.pid,
                 tty: envelope.tty,
-                terminalProgram: envelope.terminalProgram
+                terminalProgram: envelope.terminalProgram,
+                label: envelope.sessionLabel
             )
         }
 
@@ -284,7 +285,8 @@ public final class InboxModel {
                 at: date,
                 pid: envelope.pid,
                 tty: envelope.tty,
-                terminalProgram: envelope.terminalProgram
+                terminalProgram: envelope.terminalProgram,
+                label: envelope.sessionLabel
             )
 
         case .resolveSession(let sessionID, let status):
@@ -337,7 +339,12 @@ public final class InboxModel {
 
         settleWatches(
             sessionID: envelope.sessionID,
-            label: AgentBus.label(for: envelope.provider),
+            // The session's own label, as the hook resolved it. The provider's
+            // default ("claude") is only the fallback: a rule `watch idle hermes`
+            // used to be matched against "claude" for the Claude session in the
+            // worktree labelled hermes, so it never fired — and the rule for
+            // `claude` fired in its place, announcing the wrong agent.
+            label: envelope.sessionLabel ?? AgentBus.label(for: envelope.provider),
             project: envelope.workingDirectory,
             ended: ended,
             now: now
@@ -513,7 +520,7 @@ public final class InboxModel {
             // project is still a session somebody was waiting on.
             settleWatches(
                 sessionID: activity.id,
-                label: AgentBus.label(for: activity.provider),
+                label: record?.label ?? AgentBus.label(for: activity.provider),
                 project: project,
                 ended: true,
                 now: now
