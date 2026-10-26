@@ -39,7 +39,7 @@ public enum Retention {
         let cutoff = now.addingTimeInterval(-Double(days) * 86_400)
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: paths.dispatch.path) else { return 0 }
         var removed = 0
-        for name in names where name.hasSuffix(".log") || name.hasSuffix(".prompt.md") {
+        for name in names where name.hasSuffix(".log") || name.hasSuffix(".prompt.md") || name.hasSuffix(".started") {
             let url = paths.dispatch.appendingPathComponent(name)
             let modified = (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate] as? Date)
             guard let modified, modified < cutoff else { continue }

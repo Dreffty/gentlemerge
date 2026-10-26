@@ -65,6 +65,10 @@ public final class InboxModel {
     public var onDispatchApproval: ((AgentRequest, AgentTarget, String) -> Void)?
     @ObservationIgnored var runDispatch: (AgentRequest, AgentTarget) throws -> Task<Void, Never>
     private var dispatchedRequestIDs: Set<String> = []
+    /// Whether this process may start headless agents. On for the app (and for
+    /// tests that drive a model directly); off for the one-shot drains the CLI and
+    /// the MCP server run before every read.
+    var mayDispatch = true
     private var approvalNotifiedIDs: Set<String> = []
     private var dispatchSkipReasons: [String: Set<String>] = [:]
 
@@ -127,6 +131,10 @@ public final class InboxModel {
     nonisolated public static func drainHeadless(paths: Paths) {
         MainActor.assumeIsolated {
             let model = InboxModel(paths: paths)
+            // A short-lived process cannot wait for a headless agent to finish, so it
+            // must not start one: the child outlived its parent with nobody to record
+            // how it ended. Starting agents is the app's job (like nudges).
+            model.mayDispatch = false
             model.loadState()
             model.drainNow()
             model.saveState()
@@ -871,6 +879,7 @@ public final class InboxModel {
     }
 
     private func refreshDispatch(now: Date = Date()) {
+        guard mayDispatch else { return }
         let assigned = Requests(paths: paths).all().filter { $0.state == .assigned }
         let ids = Set(assigned.map(\.id))
         pendingApprovals = pendingApprovals.filter { ids.contains($0.key) }
@@ -901,6 +910,15 @@ public final class InboxModel {
                 // Mark before starting: a slow child may stay assigned past the
                 // quiet period. Neither another tick nor a start failure retries it.
                 dispatchedRequestIDs.insert(request.id)
+                // And on disk, once, for every process: see `Dispatcher.claimStart`.
+                guard Dispatcher(paths: paths).claimStart(of: request.id) else {
+                    if dispatchSkipReasons[request.id, default: []].insert("already started").inserted {
+                        ledger.append(LedgerEntry(kind: .note, itemID: request.id,
+                            project: request.projectPath, title: "dispatch.skipped",
+                            reason: "already started by another process"))
+                    }
+                    continue
+                }
                 lastDispatched[target.label] = now
                 pendingApprovals.removeValue(forKey: request.id)
                 do {
