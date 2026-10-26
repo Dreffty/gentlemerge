@@ -644,6 +644,7 @@ public final class InboxModel {
             )
 
         activity.provider = envelope.provider
+        activity.label = envelope.sessionLabel ?? activity.label
         activity.projectPath = envelope.workingDirectory.map(ProjectRegistry.canonicalPath(for:)) ?? activity.projectPath
         activity.updatedAt = envelope.receivedAt
         // Where the session runs. The pid is the whole point: without it the
@@ -1253,7 +1254,7 @@ public final class InboxModel {
                 provider: activity?.provider ?? .unknown,
                 project: message.projectPath,
                 title: "nudge \(message.from) → \(message.to ?? "everyone")",
-                summary: activity.map { "\($0.provider.displayName) · \($0.projectName) · \($0.stateLabel)" },
+                summary: activity.map { "\($0.displayName) · \($0.projectName) · \($0.stateLabel)" },
                 reason: reason
             )
         )

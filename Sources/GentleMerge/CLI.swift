@@ -329,7 +329,7 @@ enum CLI {
         }
 
         let live = AgentBus(paths: paths).activities().filter(\.isLive)
-        print("agents running:  \(live.isEmpty ? "none" : live.map { "\($0.provider.displayName)/\($0.projectName)" }.joined(separator: ", "))")
+        print("agents running:  \(live.isEmpty ? "none" : live.map { "\($0.displayName)/\($0.projectName)" }.joined(separator: ", "))")
 
         let queued = (try? FileManager.default.contentsOfDirectory(atPath: paths.spool.path))?
             .filter { $0.hasSuffix(".json") }.count ?? 0

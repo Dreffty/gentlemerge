@@ -39,6 +39,12 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
     /// activities written before we kept it decode fine, and a binary that
     /// predates it ignores the key.
     public var socketPath: String?
+    /// The label this agent goes by (the worktree's, or the one on its presence
+    /// mark) — what `say --to` routes by. The provider alone cannot say it: a
+    /// Hermes, a Gemini and an OpenCode are all "an agent", and the briefing listed
+    /// every one of them as "Agent · <project>", so nobody reading it knew whom to
+    /// address. nil for an activity recorded before labels were kept.
+    public var label: String?
 
     /// `lastEvent` for a session the sweep buried. One word, because it is also
     /// what the presentation matches on.
@@ -56,7 +62,8 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         pid: Int? = nil,
         tty: String? = nil,
         terminalProgram: String? = nil,
-        socketPath: String? = nil
+        socketPath: String? = nil,
+        label: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -70,6 +77,16 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         self.tty = tty
         self.terminalProgram = terminalProgram
         self.socketPath = socketPath
+        self.label = label
+    }
+
+    /// How to name this agent to a person or to another agent: its label when that
+    /// says more than the provider does, the provider's name otherwise.
+    public var displayName: String {
+        guard let label, !label.isEmpty, label != AgentBus.label(for: provider) else {
+            return provider.displayName
+        }
+        return provider == .unknown ? label : "\(provider.displayName) (\(label))"
     }
 
     public var projectName: String {
@@ -118,7 +135,7 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
 
     /// One line for another agent to read.
     public func briefingLine(now: Date = Date()) -> String {
-        var line = "- \(provider.displayName) · \(projectName)"
+        var line = "- \(displayName) · \(projectName)"
         if let currentTask, !currentTask.isEmpty {
             line += " — “\(BriefingRenderer.quote(currentTask))”"
         } else if let lastEvent, !lastEvent.isEmpty, !diedUncleanly {

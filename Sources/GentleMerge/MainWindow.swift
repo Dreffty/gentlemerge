@@ -56,7 +56,7 @@ struct MainWindow: View {
                             .fill(activity.state.tint)
                             .frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(activity.provider.displayName)
+                            Text(activity.displayName)
                             Text("\(activity.projectName) · \(activity.stateLabel)")
                                 .font(.subheadline)
                                 .foregroundStyle(.secondary)
@@ -277,7 +277,7 @@ private struct ProjectPane: View {
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(alignment: .firstTextBaseline, spacing: 7) {
-                            Text(activity.provider.displayName)
+                            Text(activity.displayName)
                                 .font(.headline)
                             StateBadge(state: activity.state, label: activity.stateLabel)
                             Spacer(minLength: 8)
