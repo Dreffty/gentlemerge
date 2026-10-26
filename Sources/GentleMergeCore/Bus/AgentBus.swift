@@ -395,8 +395,13 @@ public struct AgentBus: Sendable {
         // only ever says "working". But the app is not always running, and that
         // was the whole failure: `who` said nobody was working while five
         // sessions were mid-turn.
+        //
+        // The id filter below never matched anything a hook writes — a mark's
+        // id is not a session id — so the app's record never actually won, and
+        // every session it knew was listed a second time by its own mark. The
+        // join is by session id, inside `Presence.live` (2026-10-26).
         let known = Set(stored.filter(\.isLive).map(\.id))
-        return Presence.live(paths: paths).filter { !known.contains($0.id) }
+        return Presence.live(paths: paths, describedBy: stored).filter { !known.contains($0.id) }
     }
 
     public func save(_ activities: [AgentActivity]) {

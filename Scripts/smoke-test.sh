@@ -16,6 +16,12 @@ SANDBOX=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/gentlemerge-smoke.XXXXXX")" && pwd -P
 export GENTLEMERGE_HOME="$SANDBOX/home"
 export GENTLEMERGE_CLAUDE_SETTINGS="$SANDBOX/settings.json"
 export GENTLEMERGE_CODEX_CONFIG="$SANDBOX/config.toml"
+# The agents in here are simulated, and the one running the script is not one
+# of them. Every agent session carries its own identity (`GENTLEMERGE_LABEL`,
+# and Claude's session id); inherited, it overrode the identities this script
+# sets up — "this worktree is 'claude'; refusing to speak as 'you'" — so the
+# smoke test failed whenever an agent ran it, and passed in CI.
+unset GENTLEMERGE_LABEL GENTLEMERGE_NAME CLAUDE_CODE_SESSION_ID
 
 BIN="${BIN:-${GENTLEMERGE_BIN:-$ROOT/.build/debug/gentlemerge}}"
 [ -x "$BIN" ] || { echo "build first: swift build" >&2; exit 1; }

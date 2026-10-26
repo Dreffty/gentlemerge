@@ -193,4 +193,83 @@ final class PhantomAgentTests: XCTestCase {
         XCTAssertEqual(Presence.prune(paths: paths), 1)
         XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.path))
     }
+
+    // MARK: 5 — one session, listed once per thing that described it (2026-10-26)
+
+    /// A mark as a hook writes it: the session id it came from, no pid.
+    private func sessionMark(_ session: String, project: String, task: String? = nil,
+                             at date: Date = Date()) -> Presence.Mark {
+        Presence.Mark(label: "claude", projectPath: project, branch: "main", updatedAt: date,
+                      pid: nil, task: task, sessionID: session)
+    }
+
+    /// The case on the user's machine: the app's row (with the prompt) and the
+    /// session's own mark ("on main"). The merge dropped marks the app already
+    /// knew by comparing ids — and a mark's id is never a session id, so it
+    /// dropped nothing and every session the app knew came out twice.
+    func testASessionTheAppKnowsIsListedOnce() throws {
+        bus.save([AgentActivity(id: "sess-1", provider: .claudeCode, projectPath: project,
+                                currentTask: "arregla el fantasma")])
+        try writeMark(sessionMark("sess-1", project: project, task: "on main"))
+
+        let listed = bus.others(excluding: nil)
+        XCTAssertEqual(listed.count, 1, "one session, listed \(listed.count) times: \(listed.map(\.id))")
+        XCTAssertEqual(listed.first?.currentTask, "arregla el fantasma",
+                       "the app's row wins: it is the one that knows what the session is doing")
+    }
+
+    /// And it is what every other agent's briefing reads.
+    func testAnotherAgentsBriefingCountsThatSessionOnce() throws {
+        bus.save([AgentActivity(id: "sess-1", provider: .claudeCode, projectPath: project,
+                                currentTask: "arregla el fantasma")])
+        try writeMark(sessionMark("sess-1", project: project))
+
+        let (here, _) = bus.peers(excluding: "reader", project: project, me: "codex",
+                                  selfSessionID: "reader")
+        XCTAssertEqual(here.map(\.id), ["sess-1"])
+    }
+
+    /// A session that moved from one folder to another left a mark in each,
+    /// and with no app to say otherwise it was listed once per folder.
+    func testASessionThatMovedFoldersIsListedOnceWhereItIsNow() throws {
+        try writeMark(sessionMark("sess-1", project: "/tmp/side-projects", at: Date().addingTimeInterval(-120)))
+        try writeMark(sessionMark("sess-1", project: "/tmp/agentinbox"))
+
+        let listed = bus.others(excluding: nil)
+        XCTAssertEqual(listed.map(\.projectPath), ["/tmp/agentinbox"])
+    }
+
+    /// The app saw the session end; its mark only ever says "working", and used
+    /// to go on saying it for its whole TTL.
+    func testAnEndedSessionIsNotStillWorkingThroughItsMark() throws {
+        let marked = Date().addingTimeInterval(-60)
+        try writeMark(sessionMark("sess-1", project: project, at: marked))
+        bus.save([AgentActivity(id: "sess-1", provider: .claudeCode, projectPath: project,
+                                updatedAt: Date(), state: .ended)])
+
+        XCTAssertTrue(bus.others(excluding: nil).isEmpty)
+    }
+
+    /// The join is the session id and nothing looser. One process can host
+    /// several sessions — the desktop app does — so a session that merely
+    /// shares a pid with a row the app knows is still somebody.
+    func testADifferentSessionSharingAPidIsStillListed() throws {
+        let shared = Int(getpid())
+        bus.save([AgentActivity(id: "codex-1", provider: .codex, projectPath: project, pid: shared)])
+        try writeMark(Presence.Mark(label: "claude", projectPath: project, branch: "main",
+                                    updatedAt: Date(), pid: shared, task: nil, sessionID: "claude-1"))
+
+        XCTAssertEqual(Set(bus.others(excluding: nil).map(\.pid)), [shared])
+        XCTAssertEqual(bus.others(excluding: nil).count, 2)
+    }
+
+    /// A mark nobody can tie to a session is left alone: there is nothing to
+    /// join it on, and hiding it would hide an agent.
+    func testAMarkWithNoSessionIsNotFoldedIntoAnything() throws {
+        bus.save([AgentActivity(id: "sess-1", provider: .claudeCode, projectPath: project)])
+        try writeMark(Presence.Mark(label: "hermes", projectPath: project, branch: nil,
+                                    updatedAt: Date(), pid: nil, task: nil))
+
+        XCTAssertEqual(bus.others(excluding: nil).count, 2)
+    }
 }
