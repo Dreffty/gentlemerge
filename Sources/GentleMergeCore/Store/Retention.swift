@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Deep clean for a home the app has not opened in months: finished requests,
 /// lapsed watches, stale presence, old dispatch logs, the processed spool,
@@ -18,6 +23,7 @@ public enum Retention {
         public var dispatch: Int
         public var processed: Int
         public var messages: Int
+        public var locks: Int = 0
 
         public var lines: [String] {
             [
@@ -27,6 +33,7 @@ public enum Retention {
                 "dispatch logs >retention: \(dispatch)",
                 "processed spool files: \(processed)",
                 "messages older than 7d / over 500: \(messages)",
+                "idle lock files: \(locks)",
             ]
         }
     }
@@ -48,6 +55,34 @@ public enum Retention {
         return removed
     }
 
+    /// The empty `*.lock` sidecars that `flock` needs. Nothing ever removed them: one
+    /// `handoff-<hash>.lock` per project path ever touched, and one per delivery
+    /// marker — 866 files in a home a few weeks old. They are recreated on demand, so
+    /// an idle one is only clutter; one that somebody holds right now is left alone
+    /// (the non-blocking lock below fails), and so is one touched in the last day.
+    @discardableResult
+    public static func pruneLocks(paths: Paths, olderThan interval: TimeInterval = 86_400, now: Date = Date()) -> Int {
+        let cutoff = now.addingTimeInterval(-interval)
+        var removed = 0
+        for directory in [paths.home, paths.delivered] {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { continue }
+            for name in names where name.hasSuffix(".lock") {
+                let url = directory.appendingPathComponent(name)
+                guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                      (attributes[.size] as? UInt64 ?? 1) == 0,
+                      let modified = attributes[.modificationDate] as? Date, modified < cutoff
+                else { continue }
+                let descriptor = open(url.path, O_RDONLY)
+                guard descriptor >= 0 else { continue }
+                defer { close(descriptor) }
+                guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else { continue }   // held right now
+                if (try? FileManager.default.removeItem(at: url)) != nil { removed += 1 }
+                flock(descriptor, LOCK_UN)
+            }
+        }
+        return removed
+    }
+
     public static func compact(paths: Paths, config: AppConfig = AppConfig(), now: Date = Date()) -> Report {
         let requests = Requests(paths: paths)
         let requestsBefore = requests.all().count
@@ -64,7 +99,8 @@ public enum Retention {
             presence: Presence.prune(paths: paths, now: now),
             dispatch: pruneDispatch(paths: paths, olderThanDays: config.retentionDays, now: now),
             processed: max(processedBefore - processedAfter, 0),
-            messages: AgentBus(paths: paths).pruneMessages(now: now)
+            messages: AgentBus(paths: paths).pruneMessages(now: now),
+            locks: pruneLocks(paths: paths, now: now)
         )
     }
 }

@@ -55,9 +55,17 @@ ifeq ($(UNAME_S),Darwin)
 app bundle:
 	@sh Scripts/bundle.sh
 
+## Stops the running copy only when the new one can be opened. `open` needs a
+## graphical session: from a context without one (an agent's shell, ssh) it fails
+## with -600, and the old rule — kill first, open after, never check — left the
+## person with no menu-bar app at all.
 run: app
+	@if [ "$$(launchctl managername 2>/dev/null)" != "Aqua" ]; then \
+	  echo "make run: no graphical session here, so the app cannot be opened (the running copy was left alone). Run it from a Terminal on the Mac." >&2; exit 1; \
+	fi
 	@pkill -f 'GentleMerge.app/Contents/MacOS/gentlemerge' 2>/dev/null || true
-	@open build/GentleMerge.app
+	@sleep 1
+	@open build/GentleMerge.app || { echo "make run: open failed; start it by hand: open build/GentleMerge.app" >&2; exit 1; }
 	@echo "GentleMerge is in the menu bar."
 else
 app bundle run:

@@ -101,6 +101,9 @@ agent its label through its environment instead: `GENTLEMERGE_LABEL=claude` in
 Claude Code's settings (`"env"`), `codex` in Codex's, and so on. The gate takes
 that, or a worktree label, and never a guess.
 
+Give each worktree its own dev-server ports (a hundred per label) with
+`gentlemerge env --write` inside it, then `source .gentlemerge/env.sh` before starting a
+server — `project init` does not write the file for you.
 Declare zones in `.gentlemerge/HANDOFF.md`:
 ```markdown
 ## Ownership

@@ -41,6 +41,8 @@ public enum Shell {
         "GENTLEMERGE_LABEL", "GENTLEMERGE_NAME", "GENTLEMERGE_PID", "GENTLEMERGE_SKIP",
         "CLAUDECODE", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID",
         "CLAUDE_CODE_MESSAGING_SOCKET", "CODEX_SANDBOX", "CODEX_HOME",
+        // And "I am a test": a child is the real program, not the suite's scratch home.
+        "XCTestConfigurationFilePath", "XCTestBundlePath", "XCTestSessionIdentifier",
     ]
 
     public static func run(
