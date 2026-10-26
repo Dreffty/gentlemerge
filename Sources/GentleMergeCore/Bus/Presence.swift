@@ -263,25 +263,61 @@ public enum Presence {
 
     /// The marks still worth believing, as activities so every existing reader
     /// — `who`, the peer list, the briefing — gets them for free.
-    public static func live(paths: Paths, now: Date = Date()) -> [AgentActivity] {
+    ///
+    /// One session, one row. Two ways it used to come out as several:
+    ///
+    /// - **The app already describes it.** `stored` is the app's own rows, and
+    ///   a row's id is the session id. A mark's id is
+    ///   `presence:<label>@<project>#<branch>` — so the caller's "drop the marks
+    ///   the app already knows" compared ids that can never be equal, and
+    ///   dropped nothing. Every session with the app running was listed twice:
+    ///   once by the app with its prompt, once by its own mark, in every `who`
+    ///   and in every other agent's briefing, paying tokens for it each turn
+    ///   (2026-10-26). The link was on disk the whole time — the mark carries
+    ///   the session id it was written by — and was never compared. A mark is
+    ///   dropped when the app has a live row for its session, or a row saying
+    ///   that session ended no earlier than the mark was written; an ended
+    ///   session's mark otherwise kept saying "working" for its whole TTL.
+    /// - **It worked in two places.** A session that moved from one folder to
+    ///   another left a mark in each, and was listed once per folder. Marks
+    ///   from the same session collapse to the newest — where it is now.
+    ///
+    /// Only the session id joins them, never the pid: one process can host
+    /// several sessions (the desktop app does, and the smoke test hands two
+    /// agents one stand-in pid), so a shared pid would bury a real peer.
+    public static func live(paths: Paths, now: Date = Date(),
+                            describedBy stored: [AgentActivity] = []) -> [AgentActivity] {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: paths.presence,
             includingPropertiesForKeys: nil
         ) else { return [] }
 
-        return files.compactMap { url -> AgentActivity? in
+        let rows = Dictionary(stored.map { ($0.id, $0) }) { a, b in a.updatedAt >= b.updatedAt ? a : b }
+        var loose: [Mark] = []
+        var newestBySession: [String: Mark] = [:]
+        for url in files {
             guard url.pathExtension == "json",
                   let data = try? Data(contentsOf: url),
                   let mark = try? JSONCoding.decoder().decode(Mark.self, from: data)
-            else { return nil }
+            else { continue }
 
-            guard !mark.isExpired(now: now), !isNoProject(mark.projectPath) else { return nil }
+            guard !mark.isExpired(now: now), !isNoProject(mark.projectPath) else { continue }
             // Only when somebody recorded a pid worth checking. `!= false` on
             // purpose: nil is "we cannot tell", which is not a reason to bury
             // somebody.
-            guard Liveness.isProcessAlive(mark.pid) != false else { return nil }
+            guard Liveness.isProcessAlive(mark.pid) != false else { continue }
 
-            return AgentActivity(
+            guard let session = mark.sessionID else { loose.append(mark); continue }
+            if let row = rows[session],
+               row.isLive || (row.state == .ended && row.updatedAt >= mark.updatedAt) {
+                continue
+            }
+            if let kept = newestBySession[session], kept.updatedAt >= mark.updatedAt { continue }
+            newestBySession[session] = mark
+        }
+
+        return (loose + newestBySession.values).map { mark -> AgentActivity in
+            AgentActivity(
                 id: identity(of: mark),
                 provider: provider(for: mark.label),
                 projectPath: mark.projectPath,

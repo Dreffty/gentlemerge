@@ -49,8 +49,13 @@ final class MultiWorktreeCoordinationTests: XCTestCase {
         return out.stdout
     }
 
+    /// The worktree's own label must be the only identity in play, so the
+    /// runner's is blanked: `Shell.run` merges the inherited environment, and
+    /// since every agent session carries `GENTLEMERGE_LABEL` (and Claude's its
+    /// session id), a suite run from inside one signed alice's note as that
+    /// agent and failed there while passing in CI. Empty reads as unset.
     private func run(_ args: [String], in directory: URL, label: String? = nil) -> Shell.Output {
-        var env = ["GENTLEMERGE_HOME": home.path]
+        var env = ["GENTLEMERGE_HOME": home.path, "GENTLEMERGE_LABEL": "", "CLAUDE_CODE_SESSION_ID": ""]
         if let label { env["GENTLEMERGE_LABEL"] = label }
         return Shell.run(binary, args + ["--project", directory.path], in: directory,
                          environment: env, timeout: 60)

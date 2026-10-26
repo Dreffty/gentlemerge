@@ -145,16 +145,27 @@ final class PresenceTests: XCTestCase {
 
     /// The reason this is keyed on the branch: since every worktree of a
     /// repository became one project, the branch is what tells two agents apart.
+    ///
+    /// Each agent has its own session, explicitly and with nothing inherited:
+    /// these two used to take `CLAUDE_CODE_SESSION_ID` from whatever ran the
+    /// suite, so run from inside a Claude session both marks carried the same
+    /// session id — something two different agents never do — and once marks
+    /// of one session started collapsing to one row, they failed there and
+    /// passed in CI.
     func testTwoWorktreesOfOneProjectAreTwoAgents() {
-        Presence.record(label: "claude", project: "/tmp/gameapp", branch: "main", paths: paths)
-        Presence.record(label: "claude", project: "/tmp/gameapp", branch: "feature/x", paths: paths)
+        Presence.record(label: "claude", project: "/tmp/gameapp", branch: "main",
+                        sessionID: "session-main", paths: paths, environment: [:])
+        Presence.record(label: "claude", project: "/tmp/gameapp", branch: "feature/x",
+                        sessionID: "session-feature", paths: paths, environment: [:])
 
         XCTAssertEqual(Presence.live(paths: paths).count, 2)
     }
 
     func testTwoModelsInOneProjectAreTwoAgents() {
-        Presence.record(label: "claude", project: "/tmp/gameapp", branch: "main", paths: paths)
-        Presence.record(label: "codex", project: "/tmp/gameapp", branch: "main", paths: paths)
+        Presence.record(label: "claude", project: "/tmp/gameapp", branch: "main",
+                        sessionID: "session-claude", paths: paths, environment: [:])
+        Presence.record(label: "codex", project: "/tmp/gameapp", branch: "main",
+                        sessionID: "session-codex", paths: paths, environment: [:])
 
         XCTAssertEqual(Presence.live(paths: paths).count, 2)
     }
