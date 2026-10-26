@@ -284,6 +284,8 @@ public enum HandoffMarkdown {
     static let mapHeading = "Project map"
     static let tasksHeading = "Open tasks"
     static let notesHeading = "Notes"
+    /// What an empty Notes section says. Matched exactly when reading it back.
+    static let notesPlaceholder = "_Nothing yet._"
 
     /// Peer text enters the file as data, never as structure. Only flush-left
     /// `#` lines split sections on the way back in, so only those are
@@ -292,9 +294,14 @@ public enum HandoffMarkdown {
     /// as a zone grant. `unescape` restores the text on parse, so the round
     /// trip is lossless. (A peer that hand-edits the file outside these
     /// fields is the human's own editor, not this channel.)
+    ///
+    /// Only `##` and deeper. A single `#` is not a section here (the parser takes
+    /// one only as the file's own title, before the first `##`), so it needs no
+    /// protection — and escaping it rewrote ordinary text: a `# install deps`
+    /// comment in a shell block in the notes came back as `\# install deps`.
     public static func escape(_ text: String) -> String {
         text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
-            line.hasPrefix("#") ? "\\" + line : String(line)
+            line.hasPrefix("##") ? "\\" + line : String(line)
         }.joined(separator: "\n")
     }
 
@@ -362,7 +369,7 @@ public enum HandoffMarkdown {
         }
 
         lines += ["", "## \(notesHeading)", ""]
-        lines.append(handoff.notes.isEmpty ? "_Nothing yet._" : escape(handoff.notes))
+        lines.append(handoff.notes.isEmpty ? notesPlaceholder : escape(handoff.notes))
 
         for section in handoff.extraSections {
             lines += ["", "## \(section.heading)", "", section.body]
@@ -405,6 +412,12 @@ public enum HandoffMarkdown {
         var currentHeading: String?
         var buffer: [String] = []
         var extras: [(String, String)] = []
+        // The `# title` line is the file's first line, before any `##` section. A `# `
+        // line further down is somebody's text — a shell comment in a code block in the
+        // notes, a heading in a pasted document. It used to be taken for a second title:
+        // it cut the section off (everything after it was dropped on the next save) and
+        // renamed the project after it.
+        var seenSection = false
 
         func flush() {
             let body = buffer.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -426,7 +439,10 @@ public enum HandoffMarkdown {
             case notesHeading:
                 let (tasks, remainder) = extractTasks(from: body)
                 handoff.tasks += tasks
-                handoff.notes = remainder.hasPrefix("_") && remainder.hasSuffix("_") ? "" : unescape(remainder)
+                // Exactly the placeholder we write. "Starts and ends with an underscore" also
+                // matched a real note in italics (`_Never deploy on Fridays._`), which was
+                // erased on the next save.
+                handoff.notes = remainder == notesPlaceholder ? "" : unescape(remainder)
             default:
                 // An agent told to "add a task" will append a checkbox wherever
                 // its cursor happens to be. Collect those rather than lose them,
@@ -438,7 +454,7 @@ public enum HandoffMarkdown {
         }
 
         for line in text.components(separatedBy: "\n") {
-            if line.hasPrefix("# ") {
+            if line.hasPrefix("# "), !seenSection {
                 flush()
                 currentHeading = nil
                 let title = String(line.dropFirst(2))
@@ -448,6 +464,7 @@ public enum HandoffMarkdown {
                 continue
             }
             if line.hasPrefix("## ") {
+                seenSection = true
                 flush()
                 currentHeading = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
                 continue
@@ -697,7 +714,9 @@ public enum HandoffMarkdown {
             let suffix = String(text[range.upperBound...]).trimmingCharacters(in: .whitespaces)
             if suffix.hasPrefix("added "), let date = dayFormatter.date(from: String(suffix.dropFirst(6))) {
                 addedAt = date
-            } else if suffix.hasPrefix("by ") {
+            } else if suffix.hasPrefix("by "), isLabel(String(suffix.dropFirst(3))) {
+                // An author is a label: one word. "fix the parser · by design is wrong"
+                // is a task with words in it, not a task by "design is wrong".
                 addedBy = String(suffix.dropFirst(3))
             } else if isProgress(suffix) {
                 // Dropped, not read: the boxes underneath are the truth, and a
@@ -718,6 +737,11 @@ public enum HandoffMarkdown {
             addedAt: addedAt,
             addedBy: addedBy
         )
+    }
+
+    /// Whether `text` could be the label of an agent: what `Identity.safe` lets through.
+    static func isLabel(_ text: String) -> Bool {
+        !text.isEmpty && Identity.safe(text) == text
     }
 
     /// `6/10` and nothing else — a task actually called "Fix 3/4 of the specs"
