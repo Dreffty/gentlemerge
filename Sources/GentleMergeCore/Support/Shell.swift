@@ -35,6 +35,14 @@ public enum Shell {
         }
     }
 
+    /// Who-am-I variables that must not leak into a child started with an
+    /// explicit environment. See `run`.
+    static let callerIdentityVariables = [
+        "GENTLEMERGE_LABEL", "GENTLEMERGE_NAME", "GENTLEMERGE_PID", "GENTLEMERGE_SKIP",
+        "CLAUDECODE", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_MESSAGING_SOCKET", "CODEX_SANDBOX", "CODEX_HOME",
+    ]
+
     public static func run(
         _ executable: String,
         _ arguments: [String] = [],
@@ -49,7 +57,16 @@ public enum Shell {
         process.arguments = arguments
         if let directory { process.currentDirectoryURL = directory }
         if let environment {
-            process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new }
+            // A child we start with an environment of its own does not inherit the
+            // *caller's* agent identity. These variables say "I am claude / hermes /
+            // this session" and were passed down by accident: a suite run from
+            // inside an agent session (which exports GENTLEMERGE_LABEL) had its own
+            // children sign every note as that agent, and a dispatched headless
+            // agent would have started out believing it was its launcher. Whoever
+            // wants one of them says so in `environment`.
+            var inherited = ProcessInfo.processInfo.environment
+            for key in Self.callerIdentityVariables { inherited.removeValue(forKey: key) }
+            process.environment = inherited.merging(environment) { _, new in new }
         }
 
         let outPipe = Pipe()

@@ -239,10 +239,13 @@ enum CLI {
         }
 
         let original = try String(contentsOf: configURL, encoding: .utf8)
-        let (contents, previous) = installer.codexConfigContents(
+        let (contents, found) = installer.codexConfigContents(
             original: original,
             scriptPath: paths.codexNotifyScript.path
         )
+        // What the user had before us, even when this is the second install and
+        // the file already points at our own bridge.
+        let previous = installer.codexPreviousNotify(found: found)
         let script = installer.codexNotifyScript(chaining: previous)
 
         print("\nCodex (\(configURL.path)):")
@@ -259,6 +262,11 @@ enum CLI {
         }
 
         try installer.writeScripts()
+        // Remembered so `uninstall` can put it back and a repeat install does
+        // not take our own bridge for somebody else's program.
+        if found.first?.contains(HookInstaller.codexMarker) != true {
+            try installer.saveCodexPrevious(found)
+        }
         try AtomicFile.write(Data(script.utf8), to: paths.codexNotifyScript)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
@@ -278,7 +286,9 @@ enum CLI {
             for note in result.notes { print("  • \(note)") }
             if let backup = result.backup { print("  backup: \(backup.path)") }
             print(result.changed ? "Claude Code hooks removed." : "Nothing to remove.")
-            print("Codex: if you installed it, reset `notify` in ~/.codex/config.toml by hand.")
+            let codex = try installer.uninstallCodex()
+            for note in codex.notes { print("  • \(note)") }
+            if let backup = codex.backup { print("  backup: \(backup.path)") }
             return 0
         } catch {
             FileHandle.standardError.write(Data("uninstall failed: \(error.localizedDescription)\n".utf8))
@@ -365,16 +375,24 @@ enum CLI {
     /// a footgun, and every knob here is documented in `config --help`.
     private static func config(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        var config = AppConfig.load(from: paths.config)
+        let (loaded, problem) = AppConfig.loadChecked(from: paths.config)
+        var config = loaded
+        // Said once, on stderr: a typo in the file used to read as a perfectly
+        // healthy default config, so a `claimsPolicy` of "deny" showed up as
+        // "warn" with nothing to explain why.
+        if let problem {
+            FileHandle.standardError.write(Data("warning: \(problem) — these are the defaults, not what the file says\n".utf8))
+        }
         func show(_ key: String) -> Int32 {
             switch key {
+            case "allowDispatch": print(config.allowDispatch)
             case "dispatchMode": print(config.dispatchMode)
             case "dispatchDailyBudgetMinutes": print(config.dispatchDailyBudgetMinutes)
             case "claimsPolicy": print(config.claimsPolicy)
             case "retentionDays": print(config.retentionDays)
             case "autoLand": print(config.autoLand)
             default:
-                FileHandle.standardError.write(Data("unknown key \"\(key)\" — want dispatchMode, dispatchDailyBudgetMinutes, claimsPolicy, retentionDays, autoLand\n".utf8))
+                FileHandle.standardError.write(Data("unknown key \"\(key)\" — want allowDispatch, dispatchMode, dispatchDailyBudgetMinutes, claimsPolicy, retentionDays, autoLand\n".utf8))
                 return 64
             }
             return 0
@@ -390,6 +408,15 @@ enum CLI {
         }
         let key = arguments[1], value = arguments[2]
         switch key {
+        case "allowDispatch":
+            // The master switch. `dispatchMode` only says how dispatch behaves
+            // once this is on, so setting the mode alone (as the README shows)
+            // changed nothing — and there was no way to turn this on from here.
+            guard ["true", "false"].contains(value) else {
+                FileHandle.standardError.write(Data("allowDispatch wants true or false\n".utf8))
+                return 64
+            }
+            config.allowDispatch = value == "true"
         case "dispatchMode":
             guard ["off", "delegated", "strict"].contains(value) else {
                 FileHandle.standardError.write(Data("dispatchMode wants off, delegated or strict\n".utf8))
@@ -429,6 +456,12 @@ enum CLI {
         default:
             FileHandle.standardError.write(Data("unknown key \"\(key)\"\n".utf8))
             return 64
+        }
+        // Never write defaults over a file we could not read: its other keys
+        // (the `agents` list above all) are the user's own work.
+        if let problem {
+            FileHandle.standardError.write(Data("refusing to change \(key): \(problem). Fix the file or move it away, then try again.\n".utf8))
+            return 1
         }
         // Report the failure instead of printing the new value and exiting 0. A read-only
         // or full home used to make `config set` claim success while persisting
@@ -522,7 +555,9 @@ enum CLI {
         formatter.dateFormat = "MMM d HH:mm:ss"
         for entry in entries.reversed() {
             var line = "\(formatter.string(from: entry.at))  \(entry.kind.rawValue.padding(toLength: 9, withPad: " ", startingAt: 0))"
-            line += "  \(URL(fileURLWithPath: entry.project ?? "").lastPathComponent)"
+            // `URL(fileURLWithPath: "")` is the *current directory*, so an entry with
+            // no project used to show whatever folder you happened to be standing in.
+            line += "  \(entry.project.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—")"
             if let title = entry.title { line += "  \(title)" }
             if let waited = entry.waitedSeconds { line += "  (waited \(Int(waited))s)" }
             print(line)
@@ -983,6 +1018,11 @@ enum CLI {
                 let paths = Paths.fromEnvironment()
                 if let label = value(after: "--label", in: arguments) {
                     print(try WorktreeLabel.write(label: label, in: URL(fileURLWithPath: directory)))
+                } else if arguments.contains("--label") {
+                    // `--label --git-hooks` (or nothing at all) used to be skipped without a
+                    // word, leaving a worktree with no identity and a success exit.
+                    FileHandle.standardError.write(Data("--label needs a name, e.g. --label claude\n".utf8))
+                    return 64
                 }
                 if arguments.contains("--git-hooks") {
                     print(try GitHookInstaller(paths: paths).install(repo: URL(fileURLWithPath: directory)))
@@ -1272,7 +1312,12 @@ enum CLI {
         let baseline = value(after: "--since", in: arguments)
             ?? sessionBaseline(for: directory, paths: paths, arguments: arguments)
         let report = PrecommitCheck.run(in: directory, baseline: baseline)
-        if report.isRepository {
+        // Only with a real baseline. Without one the report is "the last few
+        // commits", which includes the committer's own: every ordinary commit in a
+        // one-agent repository printed "⚠️ 1 file of yours already got committed
+        // to", a warning with nothing behind it that trains everyone to skim the
+        // gate's output. `gentlemerge precommit` still prints it, with its caveat.
+        if report.isRepository, !report.checkedRecentInstead {
             if report.overlaps.isEmpty {
                 print("Nobody has committed to any of the \(count(report.changed.count, "file")) staged/changed. You are clear so far.")
             } else {
@@ -1332,8 +1377,7 @@ enum CLI {
             // skip is published instead of silent: the variable is documented
             // for humans (hook comment, README) and never printed where a
             // model reads, and the bus hears about every use.
-            let skip = ProcessInfo.processInfo.environment["GENTLEMERGE_SKIP"]
-            if skip != nil && !skip!.isEmpty {
+            if EscapeHatch.isActive() {
                 let who = label ?? "you"
                 let summary = "\(who) skipped \(violations.count) blocking violation(s) on \(files.count) file(s)"
                 AgentBus(paths: paths).post(AgentMessage(
@@ -1936,7 +1980,7 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         // The human escape hatch covers the edit-time advice too: skipped
         // means silent, the same as every other path in the bridge.
-        guard ProcessInfo.processInfo.environment["GENTLEMERGE_SKIP"] == nil else { return 0 }
+        guard !EscapeHatch.isActive() else { return 0 }
         let projectDirectory_ = projectDirectory(arguments, allowPositional: false)
         let checkout = checkoutDirectory(arguments, allowPositional: false)
         if let claimed = value(after: "--from", in: arguments) ?? value(after: "--as", in: arguments) {
@@ -2114,13 +2158,23 @@ enum CLI {
 
         let project = ProjectRegistry.canonicalPath(for: directory)
         let intent = value(after: "--intent", in: arguments)
-        // `value(after:)` only rejects `--`-prefixed values, so `--ttl -5` parsed fine and
-        // recorded a claim that was **born expired** (`-5 * 60 = -300`), printing
-        // "0m left" while protecting nothing. Clamp rather than reject: a zero or
-        // negative ask is a mistake, but writing a claim that claims nothing is
-        // worse than writing one that expires (audit Tier 5 #26).
-        let ttl = (value(after: "--ttl", in: arguments) ?? "")
-            .flatMap { Double($0) }.map { max($0, 0) * 60 } ?? PathClaims.explicitTTL
+        // A claim that is born expired protects nothing and says it worked: `--ttl 0`
+        // and `--ttl -5` both printed "Claimed … 0m left" and exited 0 while
+        // `claims` listed nothing, and `--ttl abc` quietly became thirty minutes.
+        // A ttl that is not a positive number of minutes is a mistake to report
+        // (audit Tier 5 #26 clamped it, which only made the lie quieter).
+        let ttl: TimeInterval
+        if arguments.contains("--ttl") {
+            guard let raw = value(after: "--ttl", in: arguments),
+                  let minutes = Double(raw), minutes.isFinite, minutes > 0, minutes <= 24 * 60 else {
+                FileHandle.standardError.write(
+                    Data("--ttl wants a number of minutes between 0 and 1440, e.g. --ttl 30\n".utf8))
+                return 64
+            }
+            ttl = minutes * 60
+        } else {
+            ttl = PathClaims.explicitTTL
+        }
 
         do {
             for pattern in patterns {
@@ -2774,7 +2828,8 @@ enum CLI {
           gentlemerge install [options]     install the hook bridge
           gentlemerge uninstall             remove our hooks (yours stay)
           gentlemerge status                what is installed and running
-          gentlemerge config get|set k [v]  knobs without the app: dispatchMode,
+          gentlemerge config get|set k [v]  knobs without the app: allowDispatch,
+                                              dispatchMode,
                                               dispatchDailyBudgetMinutes,
                                               claimsPolicy, retentionDays,
                                               autoLand
