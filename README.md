@@ -131,7 +131,7 @@ uses (XCTest's `@MainActor` isolation is applied more strictly there), so the
 workflow skips the steps that would need it rather than failing on them. A
 skipped step is not a passing one, which is the point of this section. So:
 
-- **macOS is verified**: 750 tests and the smoke test pass on every commit.
+- **macOS is verified**: 754 tests and the smoke test pass on every commit.
 - **Linux is only shown to build.** No test and no smoke test has ever run
   there, so nothing about it is *verified* behaviour — it is behaviour that
   compiles. If you rely on the Linux path, treat this as the gap it is.

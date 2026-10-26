@@ -88,7 +88,11 @@ public enum Redactor {
         // post as you. Before the key rule so the URL is reported as what it
         // is rather than as a key found inside it.
         (.credentialsInURL, #"https://hooks\.slack\.com/services/[A-Za-z0-9/_+-]{15,}|https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/\d+/[A-Za-z0-9_-]{15,}"#),
-        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,})"#),
+        // Google's OAuth trio: the refresh token (`1//`) was caught, but not the
+        // client secret (`GOCSPX-`) or the access token (`ya29.`) that come
+        // with it in every token file — only the JSON form was, because the
+        // `client_secret` name gives it away (audit 2026-10-26).
+        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,})"#),
         // An AWS secret access key: 40 characters of base64 with no prefix to
         // recognise it by. What tells it from everything else that shares the
         // alphabet:

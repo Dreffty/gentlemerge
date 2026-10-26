@@ -192,6 +192,10 @@ final class RedactorTests: XCTestCase {
             ("aws secret TESTFAKE00/0000000000/00000000000000FAKE here", "[redacted key]"),
             ("npm_TEST0000000000000000000000000000000000", "[redacted key]"),
             ("refresh 1//0gTEST000000000000000000000000", "[redacted key]"),
+            // The other two thirds of Google OAuth: only their JSON form was
+            // caught, by the `client_secret` name, never the bare value.
+            ("mi client_secret es GOCSPX-TESTfakeFAKEtest0000FAKEte fin", "[redacted key]"),
+            ("access ya29.a0TESTfakeFAKE_test0000FAKEtestFAKE0000 fin", "[redacted key]"),
             (
                 "post to https://hooks.slack.com/services/T00000000/B00000000/TEST0000000000000000000",
                 "[redacted credentials]"

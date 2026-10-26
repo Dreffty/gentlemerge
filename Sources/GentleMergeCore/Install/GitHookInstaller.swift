@@ -19,7 +19,11 @@ import Foundation
 public struct GitHookInstaller: Sendable {
     /// Bump when `script`/`postCommitScript` change: a reinstall replaces an
     /// outdated gate instead of leaving silent old behavior behind.
-    public static let gateRevision = 2
+    ///
+    /// 3: the default gate path is expanded at run time (see `gateShellWord`).
+    /// Revision 2 hooks installed with the standard home checked nothing, so
+    /// they must be replaced, not merely left behind as "current".
+    public static let gateRevision = 3
     public static let marker = "# gentlemerge pre-commit (gate \(gateRevision))"
     public static let hookNames = ["pre-commit", "pre-merge-commit"]
     public static let postCommitMarker = "# gentlemerge post-commit (gate \(gateRevision))"
@@ -49,6 +53,37 @@ public struct GitHookInstaller: Sendable {
     /// Assigning it through single quotes first removes the expansion entirely.
     static func shellQuoted(_ value: String) -> String { Shell.quoted(value) }
 
+    /// The gate path as a shell word, ready to follow `AI_DEFAULT=`.
+    ///
+    /// Two shapes reach here and they need opposite treatment, which is why
+    /// `shellQuoted` alone was wrong for one of them.
+    ///
+    /// - **An absolute path** (a custom `GENTLEMERGE_HOME`) is baked in at
+    ///   install time from whatever the filesystem says, so it is untrusted
+    ///   text: single quotes, nothing expands. That is the 2026-10-07 hardening
+    ///   above, and it stays.
+    /// - **`$HOME/.gentlemerge/bin/gentlemerge`** — what `gateDefault(paths:)`
+    ///   returns for the standard home, i.e. for every real install — is not a
+    ///   path at all: it is an instruction to the shell to look in the
+    ///   committer's home, and it only works if `$HOME` is expanded when the
+    ///   hook runs. Single-quoting it made the hook look for a directory
+    ///   literally named `$HOME`, say "gate binary not found … this commit is
+    ///   NOT checked", and exit 0. Every commit in every repository installed
+    ///   with the default home went through unchecked (audit 2026-10-26). Every
+    ///   hook test set `GENTLEMERGE_BIN`, so `AI_DEFAULT` was never consulted
+    ///   and nothing noticed.
+    ///
+    /// So the variable is double-quoted and the rest single-quoted:
+    /// `"$HOME"'/.gentlemerge/bin/gentlemerge'`. A parameter expansion's
+    /// result is not scanned again for command substitution, so a home that
+    /// contains `$(…)` is still only text. Only our own constant starts with
+    /// `$HOME/`; anything else is an absolute path and takes the first branch.
+    static func gateShellWord(_ gateDefault: String) -> String {
+        let home = "$HOME/"
+        guard gateDefault.hasPrefix(home) else { return shellQuoted(gateDefault) }
+        return "\"$HOME\"" + shellQuoted("/" + gateDefault.dropFirst(home.count))
+    }
+
     public static func script(gateDefault: String = "$HOME/.gentlemerge/bin/gentlemerge") -> String {
         """
         #!/bin/sh
@@ -56,7 +91,7 @@ public struct GitHookInstaller: Sendable {
         # Enforces PathClaims / Ownership / request.mayTouch on staged files. Deterministic, zero tokens.
         # Escape hatch for humans: GENTLEMERGE_SKIP=1 git commit ...
         # (handled inside the binary so the skip is published on the bus, never silent)
-        AI_DEFAULT=\(shellQuoted(gateDefault))
+        AI_DEFAULT=\(gateShellWord(gateDefault))
         AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
         if [ -x "$AI" ]; then
           "$AI" precommit --enforce --staged --project "$(git rev-parse --show-toplevel)" || exit 1
@@ -72,12 +107,12 @@ public struct GitHookInstaller: Sendable {
 
     public static func postCommitScript(gateDefault: String = "$HOME/.gentlemerge/bin/gentlemerge") -> String {
         """
-        #!/bin/sh
-        \(postCommitMarker)
+    #!/bin/sh
+    \(postCommitMarker)
     # Releases my claims on what just landed. Never blocks, never fails: git
     # ignores a post-commit exit code, and this exits 0 regardless.
     [ -n "$GENTLEMERGE_SKIP" ] && exit 0
-    AI_DEFAULT=\(shellQuoted(gateDefault))
+    AI_DEFAULT=\(gateShellWord(gateDefault))
     AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
     if [ -x "$AI" ]; then
       "$AI" postcommit --project "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true
