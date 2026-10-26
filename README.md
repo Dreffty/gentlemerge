@@ -75,7 +75,7 @@ The optional macOS menu-bar app shows the board, approvals and reviews. Everythi
 ```sh
 git clone https://github.com/Dreffty/gentlemerge && cd gentlemerge
 make install            # → ~/.local/bin/gentlemerge · elsewhere with PREFIX=<dir>
-gentlemerge install     # hooks for Claude Code / Codex if present (idempotent, backed up, reversible)
+gentlemerge install     # hooks for Claude Code (idempotent, backed up, reversible); add --codex to bridge Codex's notify too
 ```
 `~/.local/bin` needs no sudo and is the default on both platforms; `make install`
 says so if it is not on your `PATH`, or if an older copy earlier in `PATH` is
@@ -89,7 +89,7 @@ git worktree add ../wt-claude -b agent/claude && (cd ../wt-claude && gentlemerge
 git worktree add ../wt-hermes -b agent/hermes && (cd ../wt-hermes && gentlemerge project init --label hermes)
 ```
 Every worktree gets its own label: that is what `say --to <label>` routes by and
-what the gate judges "mine" from. Labels are ASCII (`[A-Za-z0-9#-_.]`, 24 chars)
+what the gate judges "mine" from. Labels are ASCII (letters, digits and `#` `-` `_` `.`, 24 chars)
 — anything else is stripped, and the same stripping is applied when git hands the
 label back, so `--label "🚀rocket"` and `--label rocket` are one agent rather
 than two.
@@ -153,12 +153,12 @@ Native Windows blockers: `flock`, Unix domain sockets, POSIX permissions. PRs we
 
 ## Safety
 
-Only if you opt in, GentleMerge can deliver a fixed one-line notice to another agent's session, or start a headless agent to handle a delegated request. Dispatch has three modes (`config set dispatchMode off|delegated|strict`, also in the app under HEADLESS WORK): off by default, delegated lets agents trigger within tiers and a daily minute-budget, strict only runs human-created requests. Every decision is gated by pure and exhaustively tested decision functions, and every decision is logged. Secrets are scrubbed before anything reaches another agent, the ledger or the bus — raw hook payloads rest briefly in the local spool (owner-only files, pruned within days). See [SECURITY.md](SECURITY.md).
+Only if you opt in, GentleMerge can deliver a fixed one-line notice to another agent's session, or start a headless agent to handle a delegated request. Dispatch is off until you switch it on (`gentlemerge config set allowDispatch true`, or the toggle in the app under HEADLESS WORK); only the app ever starts an agent, never a one-shot command, and a request is started at most once. Once on it has three modes (`config set dispatchMode off|delegated|strict`): delegated, the default, lets agents trigger within tiers and a daily minute-budget; strict only runs human-created requests; off starts nothing. Every decision is gated by pure and exhaustively tested decision functions, and every decision is logged. Secrets are scrubbed before anything reaches another agent, the ledger or the bus — raw hook payloads rest briefly in the local spool (owner-only files, pruned within days). See [SECURITY.md](SECURITY.md).
 
 Guarantees come in three rungs, depending on the client — declared, not implied:
 - **Enforced** (git gate): `pre-commit`/`pre-merge-commit` block. No client option can skip it except the human escape hatch, and every skip is published to the bus. A hostile local process still can (`--no-verify`, editing the hook): the gate coordinates cooperative agents. A missing gate binary warns on every commit instead of passing silently.
   Ownership zones are enforced from `HANDOFF.md`, with one deliberate blind spot: a commit that *rewrites the zones themselves* is not judged by them (that is the agent being its own judge), and only the pinned store rules apply in that case. Recording a task in `HANDOFF.md` — which the agent protocol tells every agent to do — does **not** switch the zones off; only changing them does.
-- **Advised** (hooks): PreToolUse warns before the edit lands. A client without hooks never hears it.
+- **Advised** (hooks): PreToolUse warns before the edit lands. A client without hooks never hears it. (Installs made before 2026-10-26 never got this hook — `install` reported it and then dropped it; run `gentlemerge install` again and `gentlemerge status` should list `PreToolUse`.)
 - **Convention** (MCP): `claim_check` answers honestly, but nothing stops the edit. MCP clients coordinate by discipline plus the enforced gate at commit time.
 
 ## Design notes

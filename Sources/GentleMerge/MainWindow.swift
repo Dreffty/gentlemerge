@@ -236,7 +236,7 @@ private struct ProjectPane: View {
 
     private func readOpenRequests() -> [AgentRequest] {
         Requests(paths: model.paths).all()
-            .filter { $0.projectPath == projectPath && $0.state != .acked }
+            .filter { $0.projectPath == projectPath && $0.isOpenInTheWindow }
     }
 
     /// What the Review button will review, said out loud in its tooltip: the

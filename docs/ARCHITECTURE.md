@@ -112,6 +112,11 @@ docs/  # AGENT_PROTOCOL.md (the ~200-token agent contract),
 - **Nothing ever blocks an agent**: hooks time out, writes are atomic
   (temp file + rename, `O_APPEND` under lock), the pre-commit hook has a
   human escape hatch (`GENTLEMERGE_SKIP=1`).
+- **Only the app starts agents, and only once per request.** One-shot drains (the
+  ones every CLI read and MCP call run first) never dispatch: the process exits at
+  once and could not record how the child ended. The app takes an exclusive
+  `dispatch/<id>.started` marker before it starts anything, so a restart or a
+  second process cannot start the same request again.
 - **Dangerous actions are pure decisions first**: `NudgeGate.decide`,
   `DispatchGate.decide`, `PrecommitGate.evaluate` are side-effect-free and
   matrix-tested; the app only executes what they allow, and ledgers why.

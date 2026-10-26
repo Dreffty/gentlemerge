@@ -162,6 +162,17 @@ public struct Review: Codable, Sendable, Equatable, Identifiable {
         return .unverified
     }
 
+    /// The icon for the list of earlier reviews. A review where nothing could be run
+    /// is not a pass: it used to get the same check mark as one that passed.
+    public var historySymbol: String {
+        switch verdict {
+        case .passed: return "checkmark.circle"
+        case .problems: return "xmark.circle.fill"
+        case .unverified: return "questionmark.circle"
+        case .running: return "clock"
+        }
+    }
+
     /// Deliberately never "all good": it says what ran, and what did not.
     public var headline: String {
         let ran = checks.filter { $0.status == .passed || $0.status == .failed || $0.status == .timedOut }

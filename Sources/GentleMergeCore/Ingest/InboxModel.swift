@@ -63,6 +63,10 @@ public final class InboxModel {
     public private(set) var approvedRequestIDs: Set<String> = []
     public private(set) var lastDispatched: [String: Date] = [:]
     public var onDispatchApproval: ((AgentRequest, AgentTarget, String) -> Void)?
+    /// A request that was waiting for approval is not any more (approved, denied, or
+    /// gone), so the app can take its banner out of Notification Center. Without it
+    /// the "Approve dispatch?" notice outlived the decision it asked for.
+    public var onDispatchResolved: ((String) -> Void)?
     @ObservationIgnored var runDispatch: (AgentRequest, AgentTarget) throws -> Task<Void, Never>
     private var dispatchedRequestIDs: Set<String> = []
     /// Whether this process may start headless agents. On for the app (and for
@@ -838,6 +842,7 @@ public final class InboxModel {
         do {
             try updateApprovals { $0.insert(id) }
             pendingApprovals.removeValue(forKey: id)
+            onDispatchResolved?(id)
             lastMessage = "Approved \(id); the next drain will check the dispatch gate."
         } catch { lastMessage = "Could not save approval: \(error)" }
     }
@@ -865,6 +870,7 @@ public final class InboxModel {
             _ = try RequestActions.perform(action: "reject", id: id, by: assignee,
                                            result: "denied by human", paths: paths)
             pendingApprovals.removeValue(forKey: id)
+            onDispatchResolved?(id)
             try updateApprovals { $0.remove(id) }
             lastMessage = "Denied \(id)."
         } catch { lastMessage = "Could not deny \(id): \(error)" }
@@ -882,7 +888,9 @@ public final class InboxModel {
         guard mayDispatch else { return }
         let assigned = Requests(paths: paths).all().filter { $0.state == .assigned }
         let ids = Set(assigned.map(\.id))
+        let gone = pendingApprovals.keys.filter { !ids.contains($0) }
         pendingApprovals = pendingApprovals.filter { ids.contains($0.key) }
+        gone.forEach { onDispatchResolved?($0) }
         approvalNotifiedIDs.formIntersection(ids)
         dispatchSkipReasons = dispatchSkipReasons.filter { ids.contains($0.key) }
         do {

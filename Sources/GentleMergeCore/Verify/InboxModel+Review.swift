@@ -10,7 +10,13 @@ extension InboxModel {
     ) {
         cancelReview()
 
-        let project = URL(fileURLWithPath: projectPath)
+        // The session's own checkout when it has one that still exists: the window
+        // names the project by its canonical root, which in the worktree layout is the
+        // main checkout — a diff and a build there say nothing about what an agent did
+        // in its worktree.
+        let working = sessionID.flatMap { sessions[$0]?.projectPath }
+            .flatMap { FileManager.default.fileExists(atPath: $0) ? $0 : nil } ?? projectPath
+        let project = URL(fileURLWithPath: working)
         let baseline = sessions.baseline(for: sessionID)
         let outside = outsidePaths(for: sessionID, project: projectPath)
         let planned = ProjectChecks.checks(for: project)
@@ -26,7 +32,7 @@ extension InboxModel {
             finishedAt: nil,
             work: WorkSummary(
                 projectPath: projectPath,
-                isRepository: GitSnapshot.isRepository(projectPath),
+                isRepository: GitSnapshot.isRepository(working),
                 baseline: baseline,
                 baselineIsHead: false,
                 changes: [],
@@ -62,7 +68,7 @@ extension InboxModel {
             // Reading the diff hits git, so keep it off the main actor too.
             let work = await Task.detached(priority: .userInitiated) {
                 WorkInspector.summarize(
-                    projectPath: projectPath,
+                    projectPath: working,
                     baseline: baseline,
                     outsidePaths: outside
                 )

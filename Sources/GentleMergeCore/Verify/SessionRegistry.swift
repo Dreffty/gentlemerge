@@ -23,6 +23,12 @@ public struct SessionRecord: Codable, Sendable, Identifiable, Equatable {
     /// none). What a `watch` names: a Claude session in the worktree labelled
     /// `hermes` is `hermes`, not "claude".
     public var label: String?
+    /// The repository this session works in, canonical (every worktree of a repo
+    /// shares one), where `projectPath` is the *checkout* the hook reported. The
+    /// window lists projects by the canonical path, so finding "the newest session
+    /// of this project" by the checkout path matched nothing for an agent in a
+    /// worktree — the Review button then fell back to HEAD of the main checkout.
+    public var project: String?
 
     public var isLive: Bool { endedAt == nil }
 }
@@ -51,7 +57,7 @@ public struct SessionRegistry: Sendable {
     /// hour still owns the diff since it started.
     func mostRecent(in projectPath: String) -> SessionRecord? {
         sessions.values
-            .filter { $0.projectPath == projectPath }
+            .filter { $0.projectPath == projectPath || $0.project == projectPath }
             .max { $0.startedAt < $1.startedAt }
     }
 
@@ -78,7 +84,8 @@ public struct SessionRegistry: Sendable {
             pid: pid,
             tty: tty,
             terminalProgram: terminalProgram,
-            label: label ?? sessions[id]?.label
+            label: label ?? sessions[id]?.label,
+            project: Self.canonical(projectPath)
         )
         prune()
         save()
@@ -107,7 +114,8 @@ public struct SessionRegistry: Sendable {
         } else {
             sessions[id] = SessionRecord(
                 id: id, provider: provider, projectPath: projectPath,
-                startedAt: date, lastSeenAt: date, baselineCommit: head, label: label
+                startedAt: date, lastSeenAt: date, baselineCommit: head, label: label,
+                project: Self.canonical(projectPath)
             )
             prune()
         }
@@ -135,6 +143,8 @@ public struct SessionRegistry: Sendable {
             existing.tty = existing.tty ?? tty
             existing.terminalProgram = existing.terminalProgram ?? terminalProgram
             existing.label = existing.label ?? label
+            // Once per record (it spawns git): records written before `project` existed.
+            if existing.project == nil { existing.project = Self.canonical(existing.projectPath) }
             sessions[id] = existing
         } else {
             sessions[id] = SessionRecord(
@@ -147,7 +157,8 @@ public struct SessionRegistry: Sendable {
                 pid: pid,
                 tty: tty,
                 terminalProgram: terminalProgram,
-                label: label
+                label: label,
+                project: Self.canonical(projectPath)
             )
             prune()
         }
@@ -165,6 +176,10 @@ public struct SessionRegistry: Sendable {
     public func baseline(for sessionID: String?) -> String? {
         guard let sessionID else { return nil }
         return sessions[sessionID]?.baselineCommit
+    }
+
+    static func canonical(_ projectPath: String?) -> String? {
+        projectPath.map { ProjectRegistry.canonicalPath(for: $0) }
     }
 
     static func head(of projectPath: String?) -> String? {

@@ -66,6 +66,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Shared.model.onDispatchApproval = { request, target, reason in
             Notifier.shared.postDispatchApproval(request, target: target, reason: reason)
         }
+        Shared.model.onDispatchResolved = { id in
+            Notifier.shared.withdraw("dispatch-\(id)")
+        }
         Shared.model.start()
 
         // An accessory app does not get a window handed to it. Bring the one
