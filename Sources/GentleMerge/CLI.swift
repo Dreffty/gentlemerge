@@ -2458,7 +2458,13 @@ enum CLI {
     /// worktree.
     private static func gitHooks(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        let action = arguments.first ?? "install"
+        // No default action: a bare `gentlemerge git-hooks` used to install, so
+        // somebody asking what the command does found hooks written into their
+        // repository. It says what it needs instead.
+        guard let action = arguments.first, action == "install" || action == "uninstall" else {
+            FileHandle.standardError.write(Data("usage: gentlemerge git-hooks install|uninstall [--project dir]\n".utf8))
+            return 64
+        }
         let directory = projectDirectory(Array(arguments.dropFirst()), allowPositional: false)
         let installer = GitHookInstaller(paths: paths)
 

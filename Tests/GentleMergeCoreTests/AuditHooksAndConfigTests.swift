@@ -266,6 +266,23 @@ final class AuditCLITests: XCTestCase {
         XCTAssertEqual(run(["project", "init", "--label", "--git-hooks"]).status, 64)
     }
 
+    /// A bare `git-hooks` used to install the gate: asking what it does wrote hooks.
+    func testGitHooksWithoutAnActionWritesNothing() throws {
+        let git = Shell.run("/usr/bin/env", ["git", "init", "-q"], in: root)
+        XCTAssertTrue(git.succeeded)
+        let hook = root.appendingPathComponent(".git/hooks/pre-commit").path
+
+        for arguments in [["git-hooks"], ["git-hooks", "--project", root.path], ["git-hooks", "instal"]] {
+            let out = run(arguments)
+            XCTAssertEqual(out.status, 64, "\(arguments): \(out.stdout + out.stderr)")
+            XCTAssertTrue(out.stderr.contains("usage: gentlemerge git-hooks install|uninstall"), out.stderr)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: hook))
+
+        XCTAssertEqual(run(["git-hooks", "install"]).status, 0)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: hook), "the explicit form still installs")
+    }
+
     // config.json that cannot be read
 
     func testAnUnreadableConfigIsReportedAndNeverOverwritten() throws {

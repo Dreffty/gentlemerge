@@ -663,9 +663,14 @@ public final class InboxModel {
             // What you just asked for is the truest description of what this
             // session is about to do — and it was written for one agent, not
             // three. Scrub before truncating: half a key is still a leak.
-            activity.currentTask = config.shareTaskText
-                ? Redactor.shared(envelope.payload.string("prompt")?.firstLine)?.truncated(to: 140)
-                : nil
+            let prompt = envelope.payload.string("prompt")
+            if !config.shareTaskText {
+                activity.currentTask = nil
+            } else if !PromptTask.isAutomated(prompt) {
+                // A wrapped message from the harness is not what the session
+                // was asked to do; it keeps the task it had.
+                activity.currentTask = Redactor.shared(PromptTask.personalText(prompt)?.firstLine)?.truncated(to: 140)
+            }
             activity.lastEvent = nil
             activity.state = .working
 
