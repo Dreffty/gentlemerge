@@ -3071,6 +3071,10 @@ enum CLI {
                                             stopped. Lapses after 2h, or when the
                                             session that took it ends
           gentlemerge project init [dir]    create the handoff and point CLAUDE.md at it
+          gentlemerge git-hooks install|uninstall [--project dir]
+                                            the commit gate on its own (project init
+                                            --git-hooks does this and more). Needs
+                                            the verb: bare `git-hooks` prints this
           gentlemerge project adopt-worktrees [dir]
                                             one-shot, for a repository worked in
                                             through git worktrees before they were

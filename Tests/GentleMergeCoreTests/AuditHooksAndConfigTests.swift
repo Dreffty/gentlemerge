@@ -281,6 +281,9 @@ final class AuditCLITests: XCTestCase {
 
         XCTAssertEqual(run(["git-hooks", "install"]).status, 0)
         XCTAssertTrue(FileManager.default.fileExists(atPath: hook), "the explicit form still installs")
+
+        // `doctor` tells people to run it, so `help` has to list it.
+        XCTAssertTrue(run(["help"]).stdout.contains("git-hooks install|uninstall"))
     }
 
     // config.json that cannot be read
