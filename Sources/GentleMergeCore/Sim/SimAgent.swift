@@ -80,11 +80,15 @@ enum SimEnvironment {
                 || $0.hasPrefix("GIT_CONFIG_VALUE_")
         }.sorted()
         guard overrides.isEmpty else {
-            throw SimError.expectationFailed(
-                "refusing inherited Git environment: " + overrides.joined(separator: ", ")
-                    + ". These change where git looks for the repository or which configuration it reads"
-                    + " (hooks included), so the demo could not be trusted to check anything. Run it without"
-                    + " them: env -u " + overrides.joined(separator: " -u ") + " gentlemerge demo")
+            // Built in pieces: one long `+` chain of literals and joined()
+            // calls is more than the type checker will take on CI.
+            let names: String = overrides.joined(separator: ", ")
+            let unsetFlags: String = overrides.joined(separator: " -u ")
+            var message = "refusing inherited Git environment: \(names). "
+            message += "These change where git looks for the repository or which configuration it reads "
+            message += "(hooks included), so the demo could not be trusted to check anything. "
+            message += "Run it without them: env -u \(unsetFlags) gentlemerge demo"
+            throw SimError.expectationFailed(message)
         }
         for (name, value) in neutralised { setenv(name, value, 1) }
     }
