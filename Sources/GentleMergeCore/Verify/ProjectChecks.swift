@@ -70,8 +70,9 @@ public enum ProjectChecks {
             let output = Shell.sh(check.command, in: project, timeout: check.timeout)
             // A test command that says it found nothing to run (an empty Tests
             // directory, say) did not find a bug; it found no tests.
+            let said = output.text.lowercased()
             let foundNoTests = check.kind == .test && !output.succeeded && !output.timedOut
-                && output.text.lowercased().contains("no tests found")
+                && noTestsPhrases.contains { said.contains($0) }
             let status: CheckResult.Status = foundNoTests
                 ? .skipped
                 : output.timedOut ? .timedOut : (output.succeeded ? .passed : .failed)
@@ -189,6 +190,10 @@ public enum ProjectChecks {
 
         return checks
     }
+
+    /// What the common runners print when they exit non-zero only because there was
+    /// nothing to run: SwiftPM and jest, pytest, vitest and mocha.
+    static let noTestsPhrases = ["no tests found", "no tests ran", "no test files found"]
 
     /// A Tests directory, or a manifest that declares a test target.
     static func hasSwiftTests(in project: URL) -> Bool {

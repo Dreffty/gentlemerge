@@ -100,6 +100,11 @@ final class ReviewTests: XCTestCase {
         XCTAssertEqual(result.status, .skipped)
         XCTAssertEqual(result.skipReason, "no tests found")
 
+        for phrase in ["no tests ran in 0.01s", "No test files found, exiting with code 1", "No tests found, exiting with code 1"] {
+            let runner = Check(name: "t", command: "echo '\(phrase)'; exit 1", kind: .test)
+            XCTAssertEqual(ProjectChecks.run([runner], in: project).first?.status, .skipped, phrase)
+        }
+
         let real = Check(name: "t", command: "echo 'assertion failed' >&2; exit 1", kind: .test)
         XCTAssertEqual(ProjectChecks.run([real], in: project).first?.status, .failed)
     }
