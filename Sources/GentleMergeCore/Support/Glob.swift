@@ -113,13 +113,31 @@ public enum Glob {
     /// protected nothing — the worst kind of failure, because it looks like
     /// protection (audit 2026-10-08). `.` means "this directory" wherever it
     /// appears, and a doubled `/` is a `.` you did not have to type.
+    ///
+    /// Two more spellings of the same file are folded here (audit 2026-11-01).
+    /// A name is compared in its precomposed form, because macOS hands out
+    /// `é` as one character or as `e` plus an accent depending on who made the
+    /// file, and a wildcard claim (`café/*.txt`, matched by a regex that sees
+    /// UTF-16 units) silently stopped matching the other spelling. And `a/../b`
+    /// is `b`: a claim written with a `..` in the middle named a path nobody
+    /// edits and protected nothing.
     static func normalize(_ s: String) -> String {
-        var t = s
+        var t = s.precomposedStringWithCanonicalMapping
         while t.hasPrefix("./") { t.removeFirst(2) }
         while t.hasSuffix("/") { t.removeLast() }
-        guard t.contains("/./") || t.contains("//") else { return t }
-        let kept = t.split(separator: "/", omittingEmptySubsequences: true)
-            .filter { $0 != "." }
+        guard t.contains("/./") || t.contains("//") || t.contains("/..") else { return t }
+        var kept: [Substring] = []
+        for part in t.split(separator: "/", omittingEmptySubsequences: true) {
+            if part == "." { continue }
+            // `..` cancels the directory before it, but only a named one: it
+            // cannot cancel a wildcard (`**/..` has no answer), and a leading
+            // `..` points outside the repository and stays where it is.
+            if part == "..", let last = kept.last, last != "..", !last.contains("*"), !last.contains("?") {
+                kept.removeLast()
+                continue
+            }
+            kept.append(part)
+        }
         return kept.joined(separator: "/")
     }
 
