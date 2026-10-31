@@ -551,7 +551,19 @@ enum CLI {
 
     private static func history(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        let limit = intValue(after: "-n", in: arguments) ?? 20
+        // `-n abc` and `-n 0` used to fall back to 20 without a word, which reads
+        // as "the last twenty are what you asked for".
+        var limit = 20
+        if let raw = value(after: "-n", in: arguments) {
+            guard let asked = Int(raw), asked > 0 else {
+                FileHandle.standardError.write(Data("history -n wants a positive number, not \"\(raw)\"\n".utf8))
+                return 64
+            }
+            limit = asked
+        } else if arguments.contains("-n") {
+            FileHandle.standardError.write(Data("history -n wants a number after it\n".utf8))
+            return 64
+        }
         let entries = Ledger(url: paths.ledger).recent(limit: limit)
         guard !entries.isEmpty else {
             print("No history yet.")
@@ -623,6 +635,10 @@ enum CLI {
         }
 
         guard let kind = messageKind(in: arguments) else {
+            if value(after: "--kind", in: arguments) == nil {
+                FileHandle.standardError.write(Data("say: --urgent and --fyi contradict each other — pick one\n".utf8))
+                return 64
+            }
             // A resolve carries the id of what it buries, which is not something
             // you can type — that is why it is not on this list.
             let complaint = "unknown kind \"\(value(after: "--kind", in: arguments) ?? "")\""
@@ -734,6 +750,9 @@ enum CLI {
             guard let kind = MessageKind(rawValue: raw), kind != .resolve else { return nil }
             return kind
         }
+        // Both at once has no right answer, and picking one silently sent a
+        // note as urgent that its author also called "for your information".
+        if arguments.contains("--urgent") && arguments.contains("--fyi") { return nil }
         if arguments.contains("--urgent") { return .urgent }
         if arguments.contains("--fyi") { return .fyi }
         return .update

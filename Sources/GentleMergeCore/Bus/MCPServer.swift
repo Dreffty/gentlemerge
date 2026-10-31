@@ -37,7 +37,14 @@ public struct MCPServer {
         }
         let request = parsed
         // A notification carries no id and gets no reply — that part was right.
-        guard let id = request["id"] else { return nil }
+        // But a notification is a *request* without an id; an object with
+        // neither an id nor a method (`{}`) is not one, and JSON-RPC §4.2 wants
+        // -32600 for it, with a null id because there is none to echo.
+        guard let id = request["id"] else {
+            guard request["method"]?.stringValue == nil else { return nil }
+            return encode(.object(["jsonrpc": .string("2.0"), "id": .null,
+                "error": .object(["code": .number(-32600), "message": .string("invalid request: no method")])]))
+        }
         let result: JSONValue
         switch request["method"]?.stringValue {
         case "initialize":
