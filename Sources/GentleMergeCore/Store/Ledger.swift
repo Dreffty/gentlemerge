@@ -200,11 +200,28 @@ enum Log {
     static func error(_ message: String) { write("ERROR", message) }
     static func info(_ message: String) { write("INFO", message) }
 
+    /// The file keeps about this much history. It was append-only with no ceiling:
+    /// the one error that repeats (a hook run outside a repository) wrote a
+    /// hundred lines a time into it forever.
+    static let maximumBytes = 512 * 1024
+
     private static func write(_ level: String, _ message: String) {
         let line = "\(ISO8601DateFormatter.gentleMerge.string(from: Date())) [\(level)] \(message)"
         FileHandle.standardError.write(Data((line + "\n").utf8))
         if let fileURL {
+            rotateIfNeeded(fileURL)
             try? AtomicFile.append(line, to: fileURL)
         }
+    }
+
+    /// One generation back (`gentlemerge.log.1`), replaced each time. Two
+    /// processes noticing at once at worst move the file twice, and the second
+    /// move finds nothing to move.
+    static func rotateIfNeeded(_ url: URL, limit: Int = maximumBytes) {
+        let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)??.intValue ?? 0
+        guard size > limit else { return }
+        let previous = url.appendingPathExtension("1")
+        try? FileManager.default.removeItem(at: previous)
+        try? FileManager.default.moveItem(at: url, to: previous)
     }
 }
