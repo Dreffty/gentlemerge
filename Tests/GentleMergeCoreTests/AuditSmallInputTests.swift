@@ -70,3 +70,39 @@ final class SmallInputCLITests: XCTestCase {
         XCTAssertEqual(run(["say", "hola", "--fyi", "--global"]).status, 0)
     }
 }
+
+/// Each agent gets its own ports, whichever way it says who it is.
+final class EnvPortsPerLabelTests: XCTestCase {
+    private var root: URL!
+    private var binary: String!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("env-ports-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        XCTAssertEqual(Shell.run("/usr/bin/env", ["git", "init", "-q", "-b", "main"], in: root).status, 0)
+        binary = URL(fileURLWithPath: ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"]
+            ?? ".build/debug/gentlemerge").standardizedFileURL.path
+    }
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: root) }
+
+    private func base(label: String?) -> String {
+        var environment = ["GENTLEMERGE_HOME": root.appendingPathComponent("home").path]
+        if let label { environment["GENTLEMERGE_LABEL"] = label }
+        let out = Shell.run(binary, ["env"], in: root, environment: environment, timeout: 60)
+        return out.stdout.split(separator: "\n").first { $0.hasPrefix("export PORT=") }.map(String.init) ?? out.stdout
+    }
+
+    func testTwoAgentsToldApartByTheEnvironmentGetDifferentPorts() {
+        let claude = base(label: "claude"), codex = base(label: "codex"), hermes = base(label: "hermes")
+        XCTAssertNotEqual(claude, codex)
+        XCTAssertNotEqual(claude, hermes)
+        XCTAssertNotEqual(codex, hermes)
+    }
+
+    func testTheLabelInTheFileIsTheOneAskedFor() {
+        let out = Shell.run(binary, ["env"], in: root,
+                            environment: ["GENTLEMERGE_HOME": root.appendingPathComponent("home").path,
+                                          "GENTLEMERGE_LABEL": "codex"], timeout: 60)
+        XCTAssertTrue(out.stdout.contains("export GENTLEMERGE_LABEL='codex'"), out.stdout)
+    }
+}

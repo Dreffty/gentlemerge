@@ -505,21 +505,21 @@ enum CLI {
                 print("source: \(authority.rawValue) (\(ownership.rules.count) rule(s))")
                 for rule in ownership.rules { print("- \(rule.pattern) → \(rule.owner)") }
             case "pin":
-                let rules = try Ownership.pin(project: project, paths: paths, by: defaultAuthor())
+                let rules = try Ownership.pin(project: project, paths: paths, by: ownershipAuthor(arguments))
                 print("pinned \(rules.count) rule(s) from HANDOFF.md")
             case "add":
                 guard positional.count == 3 else {
                     print("usage: gentlemerge ownership add <pattern> <owner> [--project dir]")
                     return 64
                 }
-                let rules = try Ownership.setRule(pattern: positional[1], owner: positional[2], project: project, paths: paths, by: defaultAuthor())
+                let rules = try Ownership.setRule(pattern: positional[1], owner: positional[2], project: project, paths: paths, by: ownershipAuthor(arguments))
                 print("now \(rules.count) rule(s) pinned")
             case "rm":
                 guard positional.count == 2 else {
                     print("usage: gentlemerge ownership rm <pattern> [--project dir]")
                     return 64
                 }
-                let rules = try Ownership.setRule(pattern: positional[1], owner: nil, project: project, paths: paths, by: defaultAuthor())
+                let rules = try Ownership.setRule(pattern: positional[1], owner: nil, project: project, paths: paths, by: ownershipAuthor(arguments))
                 print("now \(rules.count) rule(s) pinned")
             default:
                 print("usage: gentlemerge ownership [pin|add <pattern> <owner>|rm <pattern>] [--project dir]")
@@ -2205,7 +2205,12 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         let cwd = checkoutDirectory(arguments, allowPositional: false)
         let config = AppConfig.load(from: paths.config)
-        let label = WorktreeLabel.read(cwd: URL(fileURLWithPath: cwd)) ?? defaultAuthor()
+        // Who is asking, resolved the way every other command resolves it:
+        // `GENTLEMERGE_LABEL` first, then this worktree's label. Reading only the
+        // worktree label meant agents told apart by the environment variable —
+        // the documented way for several of them sharing one folder — were all
+        // "you" here, and all got the same hundred ports (audit 2026-11-01).
+        let label = (try? actingLabel(arguments, explicit: nil)) ?? defaultAuthor()
         let text = WorktreeEnv.render(WorktreeEnv.allocation(label: label, config: config))
         guard arguments.contains("--write") else {
             print(text)
@@ -2589,6 +2594,13 @@ enum CLI {
     /// see `AgentBus.label(in:)`.
     private static func defaultAuthor() -> String {
         AgentBus.label(in: ProcessInfo.processInfo.environment)
+    }
+
+    /// Who an ownership change is credited to: the acting label, as for `say`
+    /// and `task claim`. `defaultAuthor()` alone credited an agent known by its
+    /// `GENTLEMERGE_LABEL` as `you` (audit 2026-11-01).
+    private static func ownershipAuthor(_ arguments: [String]) -> String {
+        (try? actingLabel(arguments, explicit: nil)) ?? defaultAuthor()
     }
 
     /// Leaves this agent's mark before the command it was actually asked for.
