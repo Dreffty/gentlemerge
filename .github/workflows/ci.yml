@@ -62,4 +62,19 @@ jobs:
       - if: failure() && runner.os == 'macOS'
         run: |
           report=$(ls -t ~/Library/Logs/DiagnosticReports/gentlemerge* 2>/dev/null | head -1)
-          if [ -n "$report" ]; then head -c 6000 "$report"; else echo "no crash report"; fi
+          if [ -z "$report" ]; then echo "no crash report"; exit 0; fi
+          python3 - "$report" <<'PY'
+          import json, sys
+          text = open(sys.argv[1]).read()
+          body = json.loads(text[text.index("\n") + 1:])
+          print("exception:", body.get("exception"))
+          print("termination:", body.get("termination"))
+          for key in ("asi", "lastExceptionBacktrace"):
+              if key in body: print(key + ":", json.dumps(body[key])[:3000])
+          images = body.get("usedImages", [])
+          thread = body["threads"][body["faultingThread"]]
+          print("faulting thread", body["faultingThread"], thread.get("queue", ""), thread.get("name", ""))
+          for frame in thread["frames"][:40]:
+              image = images[frame["imageIndex"]].get("name", "?") if frame.get("imageIndex") is not None else "?"
+              print("  ", image, frame.get("symbol", hex(frame.get("imageOffset", 0))), frame.get("sourceFile", ""), frame.get("sourceLine", ""))
+          PY
