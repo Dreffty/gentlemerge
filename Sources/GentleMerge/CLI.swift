@@ -2597,22 +2597,9 @@ enum CLI {
     /// Agents run these commands themselves; the label is who to credit.
     /// `GENTLEMERGE_NAME` first, so a subagent can sign with its own name —
     /// see `AgentBus.label(in:)`.
-    /// The app recorded in `app.pid`, if that process is alive and is a
-    /// gentlemerge. A stale file whose number now belongs to another program
-    /// is "not running", not a reason to refuse to start.
+    /// The running app, if there is one (see `SpoolStore.runningAppPID`).
     static func runningAppPID(paths: Paths = .fromEnvironment()) -> Int32? {
-        guard let raw = try? String(contentsOf: paths.appPID, encoding: .utf8)
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              let pid = Int32(raw), pid > 0, kill(pid, 0) == 0 || errno == EPERM
-        else { return nil }
-        #if os(macOS)
-        var buffer = [CChar](repeating: 0, count: 4096)
-        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
-        let path = String(cString: buffer)
-        return URL(fileURLWithPath: path).lastPathComponent == "gentlemerge" ? pid : nil
-        #else
-        return pid
-        #endif
+        SpoolStore(paths: paths).runningAppPID()
     }
 
     private static func defaultAuthor() -> String {

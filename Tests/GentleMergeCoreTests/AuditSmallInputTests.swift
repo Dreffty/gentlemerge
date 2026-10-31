@@ -180,3 +180,14 @@ final class SingleAppInstanceTests: XCTestCase {
         XCTAssertTrue(second.stderr.contains("already running"), second.stderr)
     }
 }
+
+final class DoctorStalePidTests: XCTestCase {
+    func testDoctorDoesNotCallAnotherProgramTheApp() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("doctor-pid-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = try Paths(home: root).createDirectories()
+        // This test runner is alive and is not a gentlemerge.
+        try Data(String(ProcessInfo.processInfo.processIdentifier).utf8).write(to: paths.appPID)
+        XCTAssertTrue(Doctor.app(paths: paths).detail.hasPrefix("not running"), Doctor.app(paths: paths).detail)
+    }
+}
