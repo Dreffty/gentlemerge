@@ -54,13 +54,19 @@ public enum HookScript {
     # The three modes: --mode notify reports, --mode context also injects the
     # briefing, --mode advise answers a PreToolUse on the editing tools.
 
-    INBOX_HOME="${GENTLEMERGE_HOME:-$HOME/.gentlemerge}"
+    # `$HOME` is read as `${HOME:-}`: under `set -u` a missing one aborted the
+    # script with status 1 (2 under dash, i.e. Linux's /bin/sh) and a message on
+    # stderr — and a hook that exits 2 blocks the tool call it was only meant to
+    # observe. With nowhere to write there is nothing to do, so it exits 0.
+    INBOX_HOME="${GENTLEMERGE_HOME:-}"
+    if [ -z "$INBOX_HOME" ] && [ -n "${HOME:-}" ]; then INBOX_HOME="$HOME/.gentlemerge"; fi
     # Match Paths: Linux XDG state only when absolute and no explicit override.
     if [ -z "${GENTLEMERGE_HOME:-}" ] && [ "$(uname -s)" = "Linux" ]; then
       case "${XDG_STATE_HOME:-}" in
         /*) INBOX_HOME="$XDG_STATE_HOME/gentlemerge" ;;
       esac
     fi
+    [ -n "$INBOX_HOME" ] || exit 0
     SPOOL="$INBOX_HOME/spool"
     mkdir -p "$SPOOL" 2>/dev/null || exit 0
 

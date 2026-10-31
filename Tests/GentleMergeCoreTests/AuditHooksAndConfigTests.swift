@@ -402,3 +402,29 @@ final class AuditGitHookTests: XCTestCase {
         XCTAssertNil(earlyExit, "a skip must not exit before the user's chained hook")
     }
 }
+
+/// The previous Codex notify program is called from a double-quoted word, where
+/// the shell still expands `$`, backticks and backslashes.
+final class CodexChainedPathQuotingTests: XCTestCase {
+    func testAChainedProgramPathIsTakenLiterally() throws {
+        let installer = HookInstaller(paths: Paths(home: FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-quote-\(UUID())")))
+        let tricky = "/opt/it's $HOME/`id`/back\\slash \"q\"/notify"
+        let script = installer.codexNotifyScript(chaining: [tricky, "turn-ended"])
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("codex-quote-run-\(UUID())")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        // Run only the chained line: swap the real program for `printf` so what the
+        // shell passes as argv[0] is observable, and drop the hook invocation.
+        let line = try XCTUnwrap(script.components(separatedBy: "\n").first { $0.contains("turn-ended") })
+        let probe = "#!/bin/sh\nset -u\nprintf '%s' " + line.replacingOccurrences(of: " >/dev/null 2>&1 || :", with: "")
+            .replacingOccurrences(of: "\"$@\"", with: "") + "\n"
+        let file = dir.appendingPathComponent("probe.sh")
+        try probe.write(to: file, atomically: true, encoding: .utf8)
+        let out = Shell.run("/bin/sh", [file.path], timeout: 10)
+        XCTAssertEqual(out.status, 0, out.stderr)
+        // printf '%s' "<path>" "turn-ended" prints both words back to back.
+        XCTAssertEqual(out.stdout, tricky + "turn-ended")
+    }
+}

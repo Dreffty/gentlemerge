@@ -291,7 +291,7 @@ public struct HookInstaller: Sendable {
         if let existing = previous.first, !existing.isEmpty,
            !existing.contains(Self.marker), !existing.contains(Self.codexMarker) {
             let passthrough = ([existing] + previous.dropFirst())
-                .map { "\"\($0.replacingOccurrences(of: "\"", with: "\\\""))\"" }
+                .map { "\"\(Self.escapedForDoubleQuotes($0))\"" }
                 .joined(separator: " ")
             lines.append("# Whatever was configured before us still runs, first and unchanged.")
             lines.append("\(passthrough) \"$@\" >/dev/null 2>&1 || :")
@@ -302,6 +302,18 @@ public struct HookInstaller: Sendable {
         lines.append("printf '%s' \"${last:-}\" | \(quoted(paths.hookScript.path)) --provider codex --mode notify")
         lines.append("exit 0")
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Inside double quotes the shell still expands `$`, a backtick and `\`, so a
+    /// program path holding one ran something else — or nothing — on every Codex
+    /// event. Only `"` used to be escaped.
+    static func escapedForDoubleQuotes(_ text: String) -> String {
+        var out = ""
+        for character in text {
+            if "\\\"$`".contains(character) { out.append("\\") }
+            out.append(character)
+        }
+        return out
     }
 
     /// Rewrites the `notify = [...]` line in Codex's config.toml, preserving the

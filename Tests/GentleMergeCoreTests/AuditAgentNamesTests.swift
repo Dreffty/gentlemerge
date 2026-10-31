@@ -34,3 +34,21 @@ final class AgentNameInListsTests: XCTestCase {
         XCTAssertEqual(activity.displayName, "Codex")
     }
 }
+
+/// `project init --label 日本語` said "label `agent` set": two agents named in
+/// non-ASCII would both become `agent`, and neither was told.
+final class LabelCleaningNoteTests: XCTestCase {
+    func testAnUnchangedLabelAddsNothing() {
+        XCTAssertEqual(WorktreeLabel.cleaningNote(asked: "claude#2", stored: "claude#2"), "")
+    }
+
+    func testACleanedLabelSaysWhatItWasCleanedFrom() {
+        let note = WorktreeLabel.cleaningNote(asked: "ñandú pro", stored: Identity.safe("ñandú pro"))
+        XCTAssertTrue(note.contains("cleaned from `ñandú pro`"), note)
+    }
+
+    func testALabelWithNothingUsableSaysItFellBack() {
+        let note = WorktreeLabel.cleaningNote(asked: "日本語", stored: Identity.safe("日本語"))
+        XCTAssertTrue(note.contains("generic `agent`"), note)
+    }
+}
