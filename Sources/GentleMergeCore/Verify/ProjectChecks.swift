@@ -68,9 +68,13 @@ public enum ProjectChecks {
     public static func run(_ checks: [Check], in project: URL, skipOptional: Bool = true) -> [CheckResult] {
         checks.filter { !skipOptional || !$0.optional }.map { check in
             let output = Shell.sh(check.command, in: project, timeout: check.timeout)
-            let status: CheckResult.Status = output.timedOut
-                ? .timedOut
-                : (output.succeeded ? .passed : .failed)
+            // A test command that says it found nothing to run (an empty Tests
+            // directory, say) did not find a bug; it found no tests.
+            let foundNoTests = check.kind == .test && !output.succeeded && !output.timedOut
+                && output.text.lowercased().contains("no tests found")
+            let status: CheckResult.Status = foundNoTests
+                ? .skipped
+                : output.timedOut ? .timedOut : (output.succeeded ? .passed : .failed)
             return CheckResult(
                 name: check.name,
                 command: check.command,
@@ -78,7 +82,8 @@ public enum ProjectChecks {
                 status: status,
                 exitCode: output.status,
                 duration: output.duration,
-                output: output.succeeded ? "" : String(output.text.suffix(2_000))
+                output: output.succeeded || foundNoTests ? "" : String(output.text.suffix(2_000)),
+                skipReason: foundNoTests ? "no tests found" : nil
             )
         }
     }
@@ -92,7 +97,12 @@ public enum ProjectChecks {
 
         if exists("Package.swift") {
             checks.append(Check(name: "swift build", command: "swift build", kind: .build))
-            checks.append(Check(name: "swift test", command: "swift test", kind: .test, timeout: 600))
+            // `swift test` on a package with no test target exits 1 ("no tests
+            // found"), which a review reported as a failing check and `land`
+            // treated as a reason to stop — the same trap as npm's placeholder.
+            if hasSwiftTests(in: project) {
+                checks.append(Check(name: "swift test", command: "swift test", kind: .test, timeout: 600))
+            }
         }
 
         if exists("package.json") {
@@ -178,6 +188,15 @@ public enum ProjectChecks {
         }
 
         return checks
+    }
+
+    /// A Tests directory, or a manifest that declares a test target.
+    static func hasSwiftTests(in project: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: project.appendingPathComponent("Tests").path, isDirectory: &isDirectory),
+           isDirectory.boolValue { return true }
+        let manifest = try? String(contentsOf: project.appendingPathComponent("Package.swift"), encoding: .utf8)
+        return manifest?.contains("testTarget") ?? false
     }
 
     /// The script `npm init` / `yarn init` leave behind.
