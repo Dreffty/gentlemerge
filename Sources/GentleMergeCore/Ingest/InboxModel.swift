@@ -177,6 +177,16 @@ public final class InboxModel {
         // A rule nobody's event ever matched stops counting the moment somebody
         // reads it; this is only about the file not growing forever.
         try? Watches(paths: paths).compact(now: now)
+        // The rest of what `gentlemerge compact` sweeps, on the same clock. It
+        // was reachable only by typing that command, so a home that was never
+        // compacted kept every idle `handoff-<hash>.lock` ever made — 949 of
+        // them in three weeks on the author's own machine — plus finished
+        // requests, dispatch logs and presence marks past their TTL (audit
+        // 2026-11-01). All of it is files nobody reads again.
+        Retention.pruneLocks(paths: paths, now: now)
+        _ = Presence.prune(paths: paths, now: now)
+        Requests(paths: paths).prune()
+        Retention.pruneDispatch(paths: paths, olderThanDays: config.retentionDays, now: now)
         // The hot ledger stays bounded; totals survive because stats reads the
         // archive alongside it.
         Ledger(url: paths.ledger).archive(paths: paths, now: now)
