@@ -231,7 +231,15 @@ else
     # agents are long-lived, so hand the hook the app's own pid to stand in.
     (cd "$REPO" && printf '{"session_id":"codex-1","type":"agent-turn-complete","last-assistant-message":"he migrado el schema de misiones"}' |
         GENTLEMERGE_PID=$TEST_APP_PID sh "$HOOK" --provider codex --mode notify) >/dev/null
-    wait_for "codex-1" || fail "the app never picked up the codex session"
+    if ! wait_for "codex-1"; then
+        fail "the app never picked up the codex session"
+        # Six failures below follow from this one; say why it happened. An app
+        # that died at launch left nothing but "never picked up" before.
+        if ! kill -0 "$TEST_APP_PID" 2>/dev/null; then
+            printf "  the app exited early; the last of its log:\n"
+            tail -40 "$SANDBOX/app.log" | sed 's/^/    /'
+        fi
+    fi
 
     # Claude starts a turn in the same project and is told about it.
     OUT=$(cd "$REPO" && printf '{"session_id":"claude-1","hook_event_name":"UserPromptSubmit","prompt":"arregla el generador"}' |

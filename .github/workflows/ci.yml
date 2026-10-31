@@ -57,3 +57,9 @@ jobs:
         run: make app
       - if: runner.os == 'macOS'
         run: GENTLEMERGE_BIN="$PWD/.build/release/gentlemerge" bash Scripts/smoke-test.sh
+      # A crash in the app shows up above only as checks that waited in vain.
+      # macOS writes the reason to a crash report; print the newest one.
+      - if: failure() && runner.os == 'macOS'
+        run: |
+          report=$(ls -t ~/Library/Logs/DiagnosticReports/gentlemerge* 2>/dev/null | head -1)
+          if [ -n "$report" ]; then head -c 6000 "$report"; else echo "no crash report"; fi
