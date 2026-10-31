@@ -94,6 +94,9 @@ public final class InboxModel {
     @ObservationIgnored private var configStamp: Date?
     /// Set while a reload assigns `config`, so the assignment is not saved back.
     @ObservationIgnored private var reloadingConfig = false
+    /// How long a drain waits for another process's drain before giving up.
+    /// nil — the app — waits as long as it takes; a one-shot command sets it.
+    @ObservationIgnored var drainLockPatience: TimeInterval?
 
     /// When we last typed into each session, keyed by session id. In memory
     /// because the rate limit is about a person watching a terminal, and a
@@ -146,6 +149,7 @@ public final class InboxModel {
             // must not start one: the child outlived its parent with nobody to record
             // how it ended. Starting agents is the app's job (like nudges).
             model.mayDispatch = false
+            model.drainLockPatience = 5
             model.loadState()
             model.drainNow()
             model.saveState()
@@ -268,15 +272,25 @@ public final class InboxModel {
         // two drains interleave (load, load, save, save) and the last save
         // erases what the other just ingested. The slow half — nudges,
         // dispatch children, radar git — stays outside the lock.
+        func drainLocked() {
+            for envelope in spool.drain() {
+                ingest(envelope)
+            }
+            // After the events, so a session that reported and then died in the same
+            // three seconds is buried with its last words already recorded.
+            sweepDeadSessions()
+            saveState()
+        }
+        let drainLock = paths.home.appendingPathComponent("drain.lock")
         do {
-            try LockedFile.withExclusiveLock(paths.home.appendingPathComponent("drain.lock")) {
-                for envelope in spool.drain() {
-                    ingest(envelope)
+            if let patience = drainLockPatience {
+                // A one-shot command: answer from what is already ingested rather
+                // than wait behind a drain that may be stuck on a dialog.
+                if try LockedFile.withExclusiveLock(drainLock, waitingAtMost: patience, { drainLocked() }) == nil {
+                    Log.info("drain skipped: another process held the drain lock for \(Int(patience))s")
                 }
-                // After the events, so a session that reported and then died in the same
-                // three seconds is buried with its last words already recorded.
-                sweepDeadSessions()
-                saveState()
+            } else {
+                try LockedFile.withExclusiveLock(drainLock) { drainLocked() }
             }
         } catch {
             // A lock that cannot be taken must not eat events: drain

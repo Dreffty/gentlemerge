@@ -58,3 +58,37 @@ final class LockSweepRaceTests: XCTestCase {
         XCTAssertFalse(try LockedFile.tryExclusiveLock(url) { XCTFail("ran while somebody else held it") })
     }
 }
+
+/// A one-shot command must not wait forever behind the app's drain (audit 2026-11-01).
+final class HeadlessDrainPatienceTests: XCTestCase {
+    func testAHeadlessDrainGivesUpWhileAnotherProcessHoldsTheDrainLock() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("drain-patience-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = try Paths(home: root).createDirectories()
+        try SpoolStore(paths: paths).enqueue(SpoolEnvelope(provider: .claudeCode, cwd: root.path,
+            payload: .object(["session_id": .string("s1"), "hook_event_name": .string("Stop")])))
+
+        // Stand in for an app whose drain is stuck behind a macOS permission prompt.
+        let lock = paths.home.appendingPathComponent("drain.lock.lock")
+        let held = open(lock.path, O_WRONLY | O_CREAT, 0o644)
+        XCTAssertGreaterThanOrEqual(held, 0)
+        defer { close(held) }
+        XCTAssertEqual(flock(held, LOCK_EX), 0)
+
+        let start = Date()
+        InboxModel.drainHeadless(paths: paths)
+        let waited = Date().timeIntervalSince(start)
+
+        XCTAssertLessThan(waited, 15, "waited \(waited)s behind a drain that never ends")
+        let queued = try FileManager.default.contentsOfDirectory(atPath: paths.spool.path).filter { $0.hasSuffix(".json") }
+        XCTAssertEqual(queued.count, 1, "the envelope is left for the drain that holds the lock")
+    }
+
+    func testTheBoundedLockStillRunsWhenNobodyHoldsIt() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("drain-free-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let ran = try LockedFile.withExclusiveLock(root.appendingPathComponent("x"), waitingAtMost: 1) { 42 }
+        XCTAssertEqual(ran, 42)
+    }
+}

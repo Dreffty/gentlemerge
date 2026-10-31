@@ -64,6 +64,31 @@ public enum LockedFile {
         return try body()
     }
 
+    /// `withExclusiveLock`, but giving up after `patience` seconds: nil means
+    /// somebody else held the lock the whole time and `body` did not run.
+    ///
+    /// For the short-lived commands that drain the spool before they answer.
+    /// The app holds the drain lock while it ingests, and an ingest can stall
+    /// for as long as macOS keeps a file-access prompt on screen — a freshly
+    /// signed app reading a handoff in ~/Downloads does exactly that. Waiting
+    /// without a limit hung `who`, `brief`, the MCP server and the git
+    /// pre-commit gate behind a dialog nobody had seen (audit 2026-11-01).
+    public static func withExclusiveLock<T>(_ url: URL, waitingAtMost patience: TimeInterval,
+                                            _ body: () throws -> T) throws -> T? {
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let lock = directory.appendingPathComponent("\(url.lastPathComponent).lock")
+        let deadline = Date().addingTimeInterval(patience)
+        while true {
+            if let descriptor = try lockedDescriptor(lock, blocking: false) {
+                defer { flock(descriptor, LOCK_UN); close(descriptor) }
+                return try body()
+            }
+            guard Date() < deadline else { return nil }
+            usleep(50_000)
+        }
+    }
+
     /// Called between opening the sidecar and locking it. Tests only: it is
     /// how a test stands in for the sweep that deletes a sidecar mid-open.
     nonisolated(unsafe) static var afterOpenForTesting: (() -> Void)?
