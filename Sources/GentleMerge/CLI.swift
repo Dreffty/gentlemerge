@@ -2776,6 +2776,7 @@ enum CLI {
                 print("Restored “\(reference.label)”: \(report.summary).")
                 for path in report.restored.prefix(20) { print("  ← \(path)") }
                 for path in report.created.prefix(20) { print("  left in place: \(path)") }
+                for path in report.skipped.prefix(20) { print("  skipped (submodule): \(path)") }
                 print("Undo this restore with: gentlemerge snapshot restore \(report.safety.id)")
                 return 0
             } catch {
