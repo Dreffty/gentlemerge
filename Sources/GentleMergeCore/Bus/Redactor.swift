@@ -120,8 +120,17 @@ public enum Redactor {
         // - **It has a digit and a capital**, which a random key nearly always
         //   does and a stretch of English or of a directory name rarely does.
         (.apiKey, #"(?<![A-Za-z0-9+/._~-])(?!/)(?=[A-Za-z0-9+/]{0,39}[+/])(?=[A-Za-z0-9+/]{0,39}[0-9])(?=[A-Za-z0-9+/]{0,39}[A-Z])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/_~-])(?!\.[A-Za-z0-9])"#),
-        (.credentialsInURL, #"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@"#),
-        (.email, #"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#),
+        // Every run in these two is bounded (audit 2026-11-01). Unbounded, each
+        // word boundary in `a-a-a-…` or `a.a.a.…` started a scan to the end of
+        // the text before failing, so the cost grew with the square of the
+        // length: 40 KB took a second or two, and a 2 MB attachment never
+        // finished. No scheme is longer than 30 characters and no mailbox name
+        // than 64, so the bounds cost nothing that was ever a match. Both also
+        // start only where a run of their characters starts, not at every `\b`
+        // inside one: bounded but starting everywhere, the email rule still took
+        // four seconds over 400 KB of `a.a.a.`.
+        (.credentialsInURL, #"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,30}://[^\s/@:]{1,256}:[^\s/@]{1,256}@"#),
+        (.email, #"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,24}\b"#),
         // IBAN before card: "ES91 2100 0418 4502 0005 1332" is an account, not
         // four card groups, and shredding it as a card leaves the country
         // prefix plus the check digits behind.
@@ -165,8 +174,12 @@ public enum Redactor {
     ///   `[redacted]` followed by its last 400 characters, signature
     ///   included. The ceiling is gone for a bare value and raised for a
     ///   quoted one (which still stops at its closing quote or the line end).
+    /// - **The name, on the other hand, is bounded**: at most six segments of
+    ///   forty characters before the keyword. Unbounded, every boundary in a
+    ///   long run of `a-a-a-…` re-scanned the rest of the run, and 40 KB of
+    ///   kebab-case took 25 seconds; a 2 MB attachment hung `say`.
     private static let assignment =
-        #"(?i)\b((?:[A-Za-z0-9]+[_-])*(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key|pgpassword|(?<=[_-])pwd)(?:[_-](?:key|base|value|string|phrase))*)(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s,;)\]}]{3,})"#
+        #"(?i)\b((?:[A-Za-z0-9]{1,40}[_-]){0,6}(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key|pgpassword|(?<=[_-])pwd)(?:[_-](?:key|base|value|string|phrase)){0,3})(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s,;)\]}]{3,})"#
 
     /// A secret handed to a program on its command line. The name gives it
     /// away here too, but the separator is a space, which `assignment` does
@@ -180,7 +193,7 @@ public enum Redactor {
     /// alone.
     private static let commandLineSecrets: [String] = [
         #"(?i)(?<![A-Za-z0-9-])(--(?:password|passwd|pass|passphrase|token|secret|client-secret|api-?key|access-?key|auth-?token|private-?key))[ =]\s*(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|(?![-<$])[^\s,;)\]}]{3,})"#,
-        #"(\b(?:curl|wget|http|https|xh)\b[^\n]*?\s(?:-u|--user)[ =][A-Za-z][A-Za-z0-9._-]*):[^\s]{3,}"#,
+        #"(\b(?:curl|wget|http|https|xh)\b[^\n]{0,300}?\s(?:-u|--user)[ =][A-Za-z][A-Za-z0-9._-]{0,64}):[^\s]{3,}"#,
     ]
 
     /// Every pattern, so a test can prove they all compile. A rule that does
