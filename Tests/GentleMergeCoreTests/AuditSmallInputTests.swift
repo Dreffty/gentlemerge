@@ -106,3 +106,30 @@ final class EnvPortsPerLabelTests: XCTestCase {
         XCTAssertTrue(out.stdout.contains("export GENTLEMERGE_LABEL='codex'"), out.stdout)
     }
 }
+
+/// `who` without the app: the answer must come from the events already spooled.
+final class WhoWithoutTheAppTests: XCTestCase {
+    func testWhoSeesAnAgentWhoseEventsAreStillInTheSpool() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("who-spool-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = root.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        XCTAssertEqual(Shell.run("/usr/bin/env", ["git", "init", "-q", "-b", "main"], in: repo).status, 0)
+        let paths = try Paths(home: root.appendingPathComponent("home")).createDirectories()
+
+        let payload: JSONValue = .object([
+            "session_id": .string("cl-1"), "cwd": .string(repo.path),
+            "hook_event_name": .string("UserPromptSubmit"), "prompt": .string("escribiendo los tests del radar"),
+        ])
+        let envelope = SpoolEnvelope(
+            id: UUID().uuidString, provider: .claudeCode, receivedAt: Date(), cwd: repo.path,
+            pid: Int(ProcessInfo.processInfo.processIdentifier), payload: payload)
+        try SpoolStore(paths: paths).enqueue(envelope)
+
+        let binary = URL(fileURLWithPath: ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"]
+            ?? ".build/debug/gentlemerge").standardizedFileURL.path
+        let out = Shell.run(binary, ["who", "--all"], in: repo,
+                            environment: ["GENTLEMERGE_HOME": paths.home.path, "GENTLEMERGE_LABEL": "hermes"], timeout: 60)
+        XCTAssertTrue(out.stdout.contains("escribiendo los tests del radar"), out.stdout)
+    }
+}

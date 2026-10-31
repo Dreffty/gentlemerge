@@ -828,7 +828,13 @@ enum CLI {
 
     /// Who is working on what, right now.
     private static func who(_ arguments: [String]) -> Int32 {
-        let bus = AgentBus(paths: Paths.fromEnvironment())
+        let paths = Paths.fromEnvironment()
+        // Drain first, like `brief`, `claims` and `precommit`: the activities
+        // this prints are made from hook events, and without the app running
+        // nothing else turns the spool into them. `who` answered "No agent
+        // sessions running" with two agents mid-turn (audit 2026-11-01).
+        InboxModel.drainHeadless(paths: paths)
+        let bus = AgentBus(paths: paths)
         // Everything, still: unlike the briefing, this is you asking, and the
         // whole point of asking is usually to find the session you lost. `--all`
         // is that default said out loud, so the briefing can name a command that
