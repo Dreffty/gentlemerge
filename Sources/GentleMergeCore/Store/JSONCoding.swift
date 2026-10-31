@@ -56,17 +56,55 @@ public enum LockedFile {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let lock = directory.appendingPathComponent("\(url.lastPathComponent).lock")
 
-        let descriptor = open(lock.path, O_WRONLY | O_CREAT, 0o644)
-        guard descriptor >= 0 else { throw Error(path: lock.path, code: errno) }
-        defer { close(descriptor) }
-
-        while flock(descriptor, LOCK_EX) != 0 {
-            // A signal landing mid-wait is not a failure to lock.
-            guard errno == EINTR else { throw Error(path: lock.path, code: errno) }
+        guard let descriptor = try lockedDescriptor(lock, blocking: true) else {
+            throw Error(path: lock.path, code: EWOULDBLOCK)   // a blocking lock never comes back empty
         }
-        defer { flock(descriptor, LOCK_UN) }
+        defer { flock(descriptor, LOCK_UN); close(descriptor) }
 
         return try body()
+    }
+
+    /// Called between opening the sidecar and locking it. Tests only: it is
+    /// how a test stands in for the sweep that deletes a sidecar mid-open.
+    nonisolated(unsafe) static var afterOpenForTesting: (() -> Void)?
+
+    /// Open the sidecar and lock it — and make sure what got locked is still
+    /// the file at that path.
+    ///
+    /// Idle sidecars are swept (`Retention.pruneLocks`), and since 2026-11-01
+    /// the app does it on its own every six hours. A sweep that unlinks a
+    /// sidecar between another process's `open` and its `flock` leaves that
+    /// process holding a lock on a file nobody else can reach: the next
+    /// process creates a fresh sidecar, locks that, and both are inside the
+    /// critical section at once — two writers on the claims or the task list.
+    /// So after locking, the descriptor and the path are compared, and on a
+    /// mismatch it lets go and starts over with whatever is there now.
+    static func lockedDescriptor(_ lock: URL, blocking: Bool) throws -> Int32? {
+        let operation = blocking ? LOCK_EX : (LOCK_EX | LOCK_NB)
+        while true {
+            let descriptor = open(lock.path, O_WRONLY | O_CREAT, 0o644)
+            guard descriptor >= 0 else { throw Error(path: lock.path, code: errno) }
+            afterOpenForTesting?()
+
+            var result = flock(descriptor, operation)
+            // A signal landing mid-wait is not a failure to lock.
+            while result != 0 && errno == EINTR { result = flock(descriptor, operation) }
+            if result != 0 {
+                let code = errno
+                close(descriptor)
+                if !blocking && (code == EWOULDBLOCK || code == EAGAIN) { return nil }
+                throw Error(path: lock.path, code: code)
+            }
+
+            var held = stat()
+            var current = stat()
+            if fstat(descriptor, &held) == 0, stat(lock.path, &current) == 0,
+               held.st_dev == current.st_dev, held.st_ino == current.st_ino {
+                return descriptor
+            }
+            flock(descriptor, LOCK_UN)
+            close(descriptor)
+        }
     }
 
     /// Try once, never wait: runs the body and returns true, or returns false
@@ -79,15 +117,8 @@ public enum LockedFile {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let lock = directory.appendingPathComponent("\(url.lastPathComponent).lock")
 
-        let descriptor = open(lock.path, O_WRONLY | O_CREAT, 0o644)
-        guard descriptor >= 0 else { throw Error(path: lock.path, code: errno) }
-        defer { close(descriptor) }
-
-        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
-            if errno == EWOULDBLOCK || errno == EAGAIN { return false }
-            throw Error(path: lock.path, code: errno)
-        }
-        defer { flock(descriptor, LOCK_UN) }
+        guard let descriptor = try lockedDescriptor(lock, blocking: false) else { return false }
+        defer { flock(descriptor, LOCK_UN); close(descriptor) }
 
         _ = try body()
         return true
