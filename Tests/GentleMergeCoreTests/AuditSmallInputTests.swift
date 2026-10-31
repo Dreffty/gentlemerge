@@ -133,3 +133,50 @@ final class WhoWithoutTheAppTests: XCTestCase {
         XCTAssertTrue(out.stdout.contains("escribiendo los tests del radar"), out.stdout)
     }
 }
+
+/// One app per home, and a stale pid file is not a running app (audit 2026-11-01).
+final class SingleAppInstanceTests: XCTestCase {
+    private var root: URL!
+    private var paths: Paths!
+    private var binary: String!
+
+    override func setUpWithError() throws {
+        root = FileManager.default.temporaryDirectory.appendingPathComponent("one-app-\(UUID())")
+        paths = try Paths(home: root.appendingPathComponent("home")).createDirectories()
+        binary = URL(fileURLWithPath: ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"]
+            ?? ".build/debug/gentlemerge").standardizedFileURL.path
+    }
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: root) }
+
+    private func status() -> String {
+        Shell.run(binary, ["status"], in: root, environment: ["GENTLEMERGE_HOME": paths.home.path,
+            "GENTLEMERGE_CLAUDE_SETTINGS": root.appendingPathComponent("cs.json").path,
+            "GENTLEMERGE_CODEX_CONFIG": root.appendingPathComponent("cc.toml").path], timeout: 30).stdout
+    }
+
+    func testAPidThatBelongsToAnotherProgramIsNotARunningApp() throws {
+        try Data(String(ProcessInfo.processInfo.processIdentifier).utf8).write(to: paths.appPID)
+        XCTAssertTrue(status().contains("app:             not running"), status())
+    }
+
+    func testALiveGentlemergeIsTheRunningAppAndASecondOneDoesNotStart() throws {
+        // A gentlemerge process that stays up: the MCP server waits on stdin.
+        let stand = Process()
+        stand.executableURL = URL(fileURLWithPath: binary)
+        stand.arguments = ["mcp"]
+        stand.environment = ["GENTLEMERGE_HOME": paths.home.path, "PATH": "/usr/bin:/bin"]
+        let input = Pipe()
+        stand.standardInput = input
+        stand.standardOutput = FileHandle.nullDevice
+        try stand.run()
+        defer { stand.terminate(); stand.waitUntilExit() }
+        try Data(String(stand.processIdentifier).utf8).write(to: paths.appPID)
+
+        XCTAssertTrue(status().contains("running (pid \(stand.processIdentifier))"), status())
+
+        let second = Shell.run(binary, [], in: root, environment: ["GENTLEMERGE_HOME": paths.home.path], timeout: 15)
+        XCTAssertFalse(second.timedOut, "a second app started instead of stepping aside")
+        XCTAssertEqual(second.status, 0)
+        XCTAssertTrue(second.stderr.contains("already running"), second.stderr)
+    }
+}
