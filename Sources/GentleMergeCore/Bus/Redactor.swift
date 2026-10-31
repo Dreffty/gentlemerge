@@ -82,7 +82,9 @@ public enum Redactor {
         // base64 run of 20+ characters is required, so naming the header in
         // prose ("I found a -----BEGIN RSA PRIVATE KEY----- in config") is not
         // a key and is not redacted: there is nothing there to leak.
-        (.privateKey, #"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\s*[A-Za-z0-9+/=]{20,})+"#),
+        // `PRIVATE KEY BLOCK` is how PGP writes it; the header without the word
+        // BLOCK is everything else, and left a PGP key standing in full.
+        (.privateKey, #"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:\s*[A-Za-z0-9+/=]{20,})+"#),
         (.jwt, #"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}"#),
         // An incoming webhook URL *is* the credential: anyone holding it can
         // post as you. Before the key rule so the URL is reported as what it
@@ -92,7 +94,11 @@ public enum Redactor {
         // client secret (`GOCSPX-`) or the access token (`ya29.`) that come
         // with it in every token file — only the JSON form was, because the
         // `client_secret` name gives it away (audit 2026-10-26).
-        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,})"#),
+        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,}|whsec_[A-Za-z0-9]{20,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|sbp_[A-Za-z0-9]{30,}|nfp_[A-Za-z0-9]{16,}|shp(?:at|ca|pa|ss)_[A-Fa-f0-9]{32}|gsk_[A-Za-z0-9]{20,}|figd_[A-Za-z0-9_-]{20,}|dop_v1_[a-f0-9]{40,}|lin_api_[A-Za-z0-9]{20,})"#),
+        // A Telegram bot token is `<bot id>:<secret>`. The id is eight to ten
+        // digits, so the long-number rule took the id and left the half that is
+        // the actual secret sitting in the note: `[redacted number]:AAH…`.
+        (.apiKey, #"\b\d{8,10}:[A-Za-z0-9_-]{30,45}(?![A-Za-z0-9_-])"#),
         // An AWS secret access key: 40 characters of base64 with no prefix to
         // recognise it by. What tells it from everything else that shares the
         // alphabet:
@@ -120,7 +126,7 @@ public enum Redactor {
         // four card groups, and shredding it as a card leaves the country
         // prefix plus the check digits behind.
         (.iban, #"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){3,7}\b"#),
-        (.card, #"\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{2,4}\b"#),
+        (.card, #"\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{2,4}\b|\b\d{4}[ -]\d{6}[ -]\d{4,5}\b"#),
         // Short numbers are line numbers, ports and versions. Long runs are
         // phone numbers, document ids and account numbers.
         (.longNumber, #"\b\d{7,}\b"#),
@@ -145,12 +151,43 @@ public enum Redactor {
     ///   now snake_case/kebab segments (`DB_PASSWORD`, `api-key` still match),
     ///   and a letter or digit may not sit immediately before or after the
     ///   keyword.
+    ///
+    /// Audit 2026-11-01, three more:
+    ///
+    /// - **The name may go on after the keyword** — but only with the tails
+    ///   that still name a secret (`_KEY`, `_BASE`, `_VALUE`…). `SECRET_KEY`
+    ///   (Django), `SECRET_KEY_BASE` (Rails) and `JWT_SECRET_KEY` all have the
+    ///   keyword in the middle and were not matched; `secret_name` and
+    ///   `token_count` still are not. `PGPASSWORD` and `MYSQL_PWD` are the
+    ///   database clients' own spellings.
+    /// - **The value had a ceiling of 200 characters**, and what lay past it
+    ///   was left in the note: a 600-character bearer token came back as
+    ///   `[redacted]` followed by its last 400 characters, signature
+    ///   included. The ceiling is gone for a bare value and raised for a
+    ///   quoted one (which still stops at its closing quote or the line end).
     private static let assignment =
-        #"(?i)\b((?:[A-Za-z0-9]+[_-])*(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key))(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?:"[^"\n]{1,200}"|'[^'\n]{1,200}'|[^\s,;)\]}]{3,200})"#
+        #"(?i)\b((?:[A-Za-z0-9]+[_-])*(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key|pgpassword|(?<=[_-])pwd)(?:[_-](?:key|base|value|string|phrase))*)(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s,;)\]}]{3,})"#
+
+    /// A secret handed to a program on its command line. The name gives it
+    /// away here too, but the separator is a space, which `assignment` does
+    /// not read: `mysql --password hunter2` and `curl -u admin:s3cret` went to
+    /// the other agents as typed. `-u` means a user only on a command that
+    /// takes `user:password` (curl, wget, httpie) and only with a colon after
+    /// a name that starts with a letter: the first version of this rule ate
+    /// `date -u +%H:%M:%S` and `${RANDOM:-0}` out of this repository's own
+    /// shell script, and would eat docker's `-u 1000:1000`. `mysql -pSECRET`,
+    /// with no space and a flag that `mkdir -p` shares, is deliberately left
+    /// alone.
+    private static let commandLineSecrets: [String] = [
+        #"(?i)(?<![A-Za-z0-9-])(--(?:password|passwd|pass|passphrase|token|secret|client-secret|api-?key|access-?key|auth-?token|private-?key))[ =]\s*(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|(?![-<$])[^\s,;)\]}]{3,})"#,
+        #"(\b(?:curl|wget|http|https|xh)\b[^\n]*?\s(?:-u|--user)[ =][A-Za-z][A-Za-z0-9._-]*):[^\s]{3,}"#,
+    ]
 
     /// Every pattern, so a test can prove they all compile. A rule that does
     /// not compile is skipped at runtime, and skipping is invisible.
-    static var allPatterns: [(Kind, String)] { [(.assignedSecret, assignment)] + rules }
+    static var allPatterns: [(Kind, String)] {
+        [(.assignedSecret, assignment)] + commandLineSecrets.map { (.assignedSecret, $0) } + rules
+    }
 
     // MARK: - Compiled once
 
@@ -166,6 +203,14 @@ public enum Redactor {
         }
         return regex
     }()
+
+    private static let compiledCommandLine: [NSRegularExpression] = commandLineSecrets.compactMap { pattern in
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            Log.error("redaction rule for command-line secrets does not compile — it is NOT filtering")
+            return nil
+        }
+        return regex
+    }
 
     private static let compiledRules: [(Kind, NSRegularExpression)] = {
         var compiled: [(Kind, NSRegularExpression)] = []
@@ -279,6 +324,7 @@ public enum Redactor {
         }
 
         apply(.assignedSecret, compiledAssignment, keepingPrefix: true)
+        for regex in compiledCommandLine { apply(.assignedSecret, regex, keepingPrefix: true) }
         for (kind, regex) in compiledRules {
             if kind == .longNumber {
                 apply(kind, regex, where: { text, range in Self.isWorthRedactingAsANumber(in: text, at: range) })
