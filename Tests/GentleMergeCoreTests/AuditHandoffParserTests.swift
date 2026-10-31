@@ -87,3 +87,79 @@ final class HandoffParserRoundTripTests: XCTestCase {
         XCTAssertEqual(tasks[1].addedBy, "claude")
     }
 }
+
+/// Text a person puts outside the generated sections, and code blocks inside
+/// them: both were rewritten or dropped on the next save.
+final class HandoffPreambleAndFenceTests: XCTestCase {
+    private func parse(_ text: String) -> ProjectHandoff {
+        HandoffMarkdown.parse(text, projectPath: "/tmp/proj")
+    }
+
+    private func roundTrip(_ text: String) -> String {
+        HandoffMarkdown.render(parse(text))
+    }
+
+    func testTextUnderTheTitleSurvivesASave() {
+        let text = "# Proj\n\nWhy this project exists: read docs/WHY.md first.\nSecond line.\n\n## Notes\n\n- a note\n"
+        let handoff = parse(text)
+        XCTAssertEqual(handoff.preamble, "Why this project exists: read docs/WHY.md first.\nSecond line.")
+        let saved = HandoffMarkdown.render(handoff)
+        XCTAssertTrue(saved.contains("Why this project exists: read docs/WHY.md first.\nSecond line."), saved)
+        XCTAssertEqual(roundTrip(saved), saved, "saving twice must change nothing")
+    }
+
+    func testTheGeneratedIntroductionIsNotKeptAsThePreamble() {
+        let once = HandoffMarkdown.render(ProjectHandoff(projectPath: "/tmp/proj"))
+        XCTAssertEqual(parse(once).preamble, "")
+        XCTAssertEqual(roundTrip(once), once)
+        XCTAssertTrue(once.contains(HandoffMarkdown.introductionPrefix), "the prefix the parser strips must be the one render writes")
+    }
+
+    func testACheckboxWrittenUnderTheTitleBecomesATask() {
+        let handoff = parse("# Proj\n\n- [ ] top-level task\n\n## Notes\n\n_Nothing yet._\n")
+        XCTAssertEqual(handoff.tasks.map(\.text), ["top-level task"])
+        XCTAssertEqual(handoff.preamble, "")
+    }
+
+    func testASecondH1BeforeTheFirstSectionIsTextNotAnotherTitle() {
+        let handoff = parse("# Real name\n\n# A heading the human pasted\nbody\n\n## Notes\n\n_Nothing yet._\n")
+        XCTAssertEqual(handoff.projectName, "Real name")
+        XCTAssertTrue(handoff.preamble.contains("# A heading the human pasted"))
+    }
+
+    func testACodeBlockInNotesIsLeftAlone() {
+        let notes = "To reset:\n```bash\n## Setup\n- [ ] not a task\nrm -rf build\n```\nafter"
+        let text = "# P\n\n## Notes\n\n\(notes)\n"
+        let handoff = parse(text)
+        XCTAssertEqual(handoff.notes, notes)
+        XCTAssertTrue(handoff.tasks.isEmpty, "a checkbox in a code block is an example")
+        XCTAssertTrue(handoff.extraSections.isEmpty, "a `##` in a code block is not a section")
+        let saved = HandoffMarkdown.render(handoff)
+        XCTAssertTrue(saved.contains(notes), "the snippet must come back byte for byte:\n\(saved)")
+        XCTAssertFalse(saved.contains("\\## Setup"))
+        XCTAssertEqual(roundTrip(saved), saved)
+    }
+
+    func testAFenceThatNeverClosesCannotSwallowTheSectionsAfterIt() {
+        // One stray fence in the notes, then a real zone declaration.
+        let text = "# P\n\n## Notes\n\nlook:\n```\nno closing fence\n\n## Ownership\n\n- lib/** → claude\n"
+        let handoff = parse(text)
+        XCTAssertEqual(handoff.extraSections.map(\.heading), ["Ownership"],
+                       "an unclosed fence hid the next section")
+        XCTAssertEqual(Ownership.from(handoff: handoff).rules.count, 1)
+    }
+
+    func testADanglingFenceInNotesIsClosedWhenSaved() {
+        var handoff = ProjectHandoff(projectPath: "/tmp/proj")
+        handoff.notes = "see:\n```\nsome code"
+        handoff.extraSections = [("Ownership", "- lib/** → claude"), ("Other", "```\nx\n```")]
+        let reread = parse(HandoffMarkdown.render(handoff))
+        XCTAssertEqual(reread.extraSections.map(\.heading), ["Ownership", "Other"],
+                       "the notes' open fence paired with the next section's")
+    }
+
+    func testAFencedZoneExampleIsNotAZoneGrant() {
+        let text = "# P\n\n## Notes\n\nExample:\n```\n## Ownership\n- ** → mallory\n```\n"
+        XCTAssertTrue(Ownership.from(handoff: parse(text)).rules.isEmpty)
+    }
+}
