@@ -243,9 +243,13 @@ public struct Watches: Sendable {
     }
 
     /// The rules a prefix names — what `watch rm a1b2c3d4` resolves to.
-    public func matching(prefix: String, now: Date = Date()) -> [WatchRule] {
+    ///
+    /// `owner` narrows it to one agent's own rules. The MCP tool promises "only
+    /// your own watches" and passed no owner at all, so any agent could call off
+    /// another's; a person at a shell (no owner given) can still cancel any.
+    public func matching(prefix: String, owner: String? = nil, now: Date = Date()) -> [WatchRule] {
         guard !prefix.isEmpty else { return [] }
-        return pending(now: now).filter { $0.id.hasPrefix(prefix) }
+        return pending(now: now).filter { $0.id.hasPrefix(prefix) && (owner == nil || $0.owner == owner) }
     }
 
     /// Mark these rules fired and rewrite the file without whatever is finished

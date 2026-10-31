@@ -203,6 +203,10 @@ public struct ProjectHandoff: Codable, Sendable, Equatable {
     public var map: ProjectMap?
     public var tasks: [TaskItem]
     public var notes: String
+    /// What a person wrote between the title and the first `##` section. Kept
+    /// verbatim, after the generated introduction: it used to be dropped on the
+    /// next save, together with any `- [ ]` written there.
+    public var preamble: String
     /// Sections someone else added, kept verbatim so we never eat their work.
     public var extraSections: [(heading: String, body: String)]
     public var updatedAt: Date
@@ -214,6 +218,7 @@ public struct ProjectHandoff: Codable, Sendable, Equatable {
         map: ProjectMap? = nil,
         tasks: [TaskItem] = [],
         notes: String = "",
+        preamble: String = "",
         extraSections: [(heading: String, body: String)] = [],
         updatedAt: Date = Date()
     ) {
@@ -223,6 +228,7 @@ public struct ProjectHandoff: Codable, Sendable, Equatable {
         self.map = map
         self.tasks = tasks
         self.notes = notes
+        self.preamble = preamble
         self.extraSections = extraSections
         self.updatedAt = updatedAt
     }
@@ -238,7 +244,7 @@ public struct ProjectHandoff: Codable, Sendable, Equatable {
 
     // Codable ignores the tuple array; it is only meaningful in the file itself.
     enum CodingKeys: String, CodingKey {
-        case projectPath, projectName, commits, map, tasks, notes, updatedAt
+        case projectPath, projectName, commits, map, tasks, notes, preamble, updatedAt
     }
 
     public init(from decoder: Decoder) throws {
@@ -249,6 +255,7 @@ public struct ProjectHandoff: Codable, Sendable, Equatable {
         map = try? container.decode(ProjectMap.self, forKey: .map)
         tasks = (try? container.decode([TaskItem].self, forKey: .tasks)) ?? []
         notes = (try? container.decode(String.self, forKey: .notes)) ?? ""
+        preamble = (try? container.decodeIfPresent(String.self, forKey: .preamble)) ?? ""
         updatedAt = (try? container.decode(Date.self, forKey: .updatedAt)) ?? Date()
         extraSections = []
     }
@@ -261,6 +268,7 @@ public struct ProjectHandoff: Codable, Sendable, Equatable {
         try container.encodeIfPresent(map, forKey: .map)
         try container.encode(tasks, forKey: .tasks)
         try container.encode(notes, forKey: .notes)
+        try container.encode(preamble, forKey: .preamble)
         try container.encode(updatedAt, forKey: .updatedAt)
     }
 
@@ -270,6 +278,7 @@ public struct ProjectHandoff: Codable, Sendable, Equatable {
             && lhs.map == rhs.map
             && lhs.tasks == rhs.tasks
             && lhs.notes == rhs.notes
+            && lhs.preamble == rhs.preamble
             && lhs.extraSections.map(\.heading) == rhs.extraSections.map(\.heading)
             && lhs.extraSections.map(\.body) == rhs.extraSections.map(\.body)
     }
@@ -284,6 +293,8 @@ public enum HandoffMarkdown {
     static let mapHeading = "Project map"
     static let tasksHeading = "Open tasks"
     static let notesHeading = "Notes"
+    /// What an empty Notes section says. Matched exactly when reading it back.
+    static let notesPlaceholder = "_Nothing yet._"
 
     /// Peer text enters the file as data, never as structure. Only flush-left
     /// `#` lines split sections on the way back in, so only those are
@@ -292,20 +303,85 @@ public enum HandoffMarkdown {
     /// as a zone grant. `unescape` restores the text on parse, so the round
     /// trip is lossless. (A peer that hand-edits the file outside these
     /// fields is the human's own editor, not this channel.)
+    ///
+    /// Only `##` and deeper. A single `#` is not a section here (the parser takes
+    /// one only as the file's own title, before the first `##`), so it needs no
+    /// protection — and escaping it rewrote ordinary text: a `# install deps`
+    /// comment in a shell block in the notes came back as `\# install deps`.
     public static func escape(_ text: String) -> String {
-        text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
-            line.hasPrefix("#") ? "\\" + line : String(line)
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let fenced = fencedLines(lines)
+        return lines.enumerated().map { index, line -> String in
+            // Inside a code block a `##` is code, not structure: the parser does
+            // not read headings there, and a bash comment must not come back
+            // from a save with a backslash in it.
+            !fenced[index] && line.hasPrefix("##") ? "\\" + line : line
         }.joined(separator: "\n")
     }
 
     public static func unescape(_ text: String) -> String {
-        text.split(separator: "\n", omittingEmptySubsequences: false).map { line -> String in
-            line.hasPrefix("\\#") ? String(line.dropFirst()) : String(line)
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let fenced = fencedLines(lines)
+        return lines.enumerated().map { index, line -> String in
+            !fenced[index] && line.hasPrefix("\\#") ? String(line.dropFirst()) : line
         }.joined(separator: "\n")
             // Also undoes `protectMetadata`: rendered task text carries its
             // literal " · " as " ·<nbsp>", which the metadata strip never
             // matches. Restoring here keeps every unescape path symmetric.
             .replacingOccurrences(of: " ·\u{00A0}", with: " · ")
+    }
+
+    /// Which lines are part of a fenced code block (the fence lines included).
+    ///
+    /// A fence that never closes marks nothing. CommonMark would let it run to the
+    /// end of the file, which here would swallow every section after it — the
+    /// Ownership zones among them — because of one stray backtick fence.
+    static func fencedLines(_ lines: [String]) -> [Bool] {
+        var mask = [Bool](repeating: false, count: lines.count)
+        var open: (index: Int, marker: Character, length: Int)?
+        for (index, line) in lines.enumerated() {
+            guard let fence = fenceMarker(line) else { continue }
+            if let started = open {
+                if fence.marker == started.marker, fence.length >= started.length, fence.rest.isEmpty {
+                    for covered in started.index...index { mask[covered] = true }
+                    open = nil
+                }
+            } else {
+                open = (index, fence.marker, fence.length)
+            }
+        }
+        return mask
+    }
+
+    /// A line that opens or closes a fence: up to three spaces, then three or
+    /// more backticks or tildes. `rest` is what follows the run, trimmed.
+    private static func fenceMarker(_ line: String) -> (marker: Character, length: Int, rest: String)? {
+        let trimmed = line.drop { $0 == " " }
+        guard line.count - trimmed.count <= 3, let marker = trimmed.first, marker == "`" || marker == "~" else {
+            return nil
+        }
+        let run = trimmed.prefix { $0 == marker }
+        guard run.count >= 3 else { return nil }
+        let rest = String(trimmed.dropFirst(run.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        if marker == "`", rest.contains("`") { return nil }
+        return (marker, run.count, rest)
+    }
+
+    /// The fence line that closes a block left open at the end of `text`, or
+    /// nil. Notes are followed by other sections in the file, so a dangling
+    /// fence would pair with the next one down and swallow the headings between.
+    static func closingFence(for text: String) -> String? {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var open: (marker: Character, length: Int)?
+        for line in lines {
+            guard let fence = fenceMarker(line) else { continue }
+            if let started = open {
+                if fence.marker == started.marker, fence.length >= started.length, fence.rest.isEmpty { open = nil }
+            } else {
+                open = (fence.marker, fence.length)
+            }
+        }
+        return open.map { String(repeating: $0.marker, count: $0.length) }
     }
 
     /// Task and step text is one line. The grammar is line-based, so an
@@ -337,6 +413,7 @@ public enum HandoffMarkdown {
                 + " regenerated by GentleMerge; anything else here is yours._",
             "",
         ]
+        if !handoff.preamble.isEmpty { lines += [escape(handoff.preamble), ""] }
 
         if let map = handoff.map, !map.isEmpty {
             lines += ["## \(mapHeading)", "", seal(for: map)] + mapLines(map) + [""]
@@ -362,7 +439,12 @@ public enum HandoffMarkdown {
         }
 
         lines += ["", "## \(notesHeading)", ""]
-        lines.append(handoff.notes.isEmpty ? "_Nothing yet._" : escape(handoff.notes))
+        if handoff.notes.isEmpty {
+            lines.append(notesPlaceholder)
+        } else {
+            lines.append(escape(handoff.notes))
+            if let closing = closingFence(for: handoff.notes) { lines.append(closing) }
+        }
 
         for section in handoff.extraSections {
             lines += ["", "## \(section.heading)", "", section.body]
@@ -405,11 +487,26 @@ public enum HandoffMarkdown {
         var currentHeading: String?
         var buffer: [String] = []
         var extras: [(String, String)] = []
+        // The `# title` line is the file's first line, before any `##` section. A `# `
+        // line further down is somebody's text — a shell comment in a code block in the
+        // notes, a heading in a pasted document. It used to be taken for a second title:
+        // it cut the section off (everything after it was dropped on the next save) and
+        // renamed the project after it.
+        var seenSection = false
+        var seenTitle = false
 
         func flush() {
             let body = buffer.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
             defer { buffer.removeAll() }
-            guard let heading = currentHeading else { return }
+            guard let heading = currentHeading else {
+                // Before the first section: what a person wrote under the title
+                // (or above it). It used to be dropped here, and a `- [ ]` among
+                // it with it.
+                let (tasks, remainder) = extractTasks(from: body)
+                handoff.tasks += tasks
+                handoff.preamble = withoutIntroduction(remainder)
+                return
+            }
 
             switch heading {
             case commitsHeading:
@@ -426,7 +523,10 @@ public enum HandoffMarkdown {
             case notesHeading:
                 let (tasks, remainder) = extractTasks(from: body)
                 handoff.tasks += tasks
-                handoff.notes = remainder.hasPrefix("_") && remainder.hasSuffix("_") ? "" : unescape(remainder)
+                // Exactly the placeholder we write. "Starts and ends with an underscore" also
+                // matched a real note in italics (`_Never deploy on Fridays._`), which was
+                // erased on the next save.
+                handoff.notes = remainder == notesPlaceholder ? "" : unescape(remainder)
             default:
                 // An agent told to "add a task" will append a checkbox wherever
                 // its cursor happens to be. Collect those rather than lose them,
@@ -437,20 +537,27 @@ public enum HandoffMarkdown {
             }
         }
 
-        for line in text.components(separatedBy: "\n") {
-            if line.hasPrefix("# ") {
-                flush()
-                currentHeading = nil
-                let title = String(line.dropFirst(2))
-                if let name = title.components(separatedBy: " — ").first, !name.isEmpty {
-                    handoff.projectName = name
+        let lines = text.components(separatedBy: "\n")
+        let fenced = fencedLines(lines)
+        for (index, line) in lines.enumerated() {
+            // A `#` or `##` inside a code block is code, not a title or a section.
+            if !fenced[index] {
+                if line.hasPrefix("# "), !seenSection, !seenTitle {
+                    // Only the first one is the title; a later `# ` before the
+                    // first section is somebody's text and stays in the preamble.
+                    seenTitle = true
+                    let title = String(line.dropFirst(2))
+                    if let name = title.components(separatedBy: " — ").first, !name.isEmpty {
+                        handoff.projectName = name
+                    }
+                    continue
                 }
-                continue
-            }
-            if line.hasPrefix("## ") {
-                flush()
-                currentHeading = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
-                continue
+                if line.hasPrefix("## ") {
+                    seenSection = true
+                    flush()
+                    currentHeading = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                    continue
+                }
             }
             buffer.append(line)
         }
@@ -460,12 +567,26 @@ public enum HandoffMarkdown {
         return handoff
     }
 
+    /// The introduction `render` writes under the title, taken back out so only
+    /// what a person added is kept as the preamble.
+    static func withoutIntroduction(_ text: String) -> String {
+        text.components(separatedBy: "\n")
+            .filter { !$0.hasPrefix(introductionPrefix) }
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static let introductionPrefix = "_Shared state for every agent working on this project."
+
     static func extractTasks(from body: String) -> (tasks: [TaskItem], remainder: String) {
         var tasks: [TaskItem] = []
         var kept: [String] = []
 
-        for line in body.components(separatedBy: "\n") {
-            guard let checkbox = parseCheckbox(line) else {
+        let lines = body.components(separatedBy: "\n")
+        let fenced = fencedLines(lines)
+        for (index, line) in lines.enumerated() {
+            // A checkbox inside a code block is an example being shown, not a task.
+            guard !fenced[index], let checkbox = parseCheckbox(line) else {
                 kept.append(line)
                 continue
             }
@@ -697,7 +818,9 @@ public enum HandoffMarkdown {
             let suffix = String(text[range.upperBound...]).trimmingCharacters(in: .whitespaces)
             if suffix.hasPrefix("added "), let date = dayFormatter.date(from: String(suffix.dropFirst(6))) {
                 addedAt = date
-            } else if suffix.hasPrefix("by ") {
+            } else if suffix.hasPrefix("by "), isLabel(String(suffix.dropFirst(3))) {
+                // An author is a label: one word. "fix the parser · by design is wrong"
+                // is a task with words in it, not a task by "design is wrong".
                 addedBy = String(suffix.dropFirst(3))
             } else if isProgress(suffix) {
                 // Dropped, not read: the boxes underneath are the truth, and a
@@ -718,6 +841,11 @@ public enum HandoffMarkdown {
             addedAt: addedAt,
             addedBy: addedBy
         )
+    }
+
+    /// Whether `text` could be the label of an agent: what `Identity.safe` lets through.
+    static func isLabel(_ text: String) -> Bool {
+        !text.isEmpty && Identity.safe(text) == text
     }
 
     /// `6/10` and nothing else — a task actually called "Fix 3/4 of the specs"

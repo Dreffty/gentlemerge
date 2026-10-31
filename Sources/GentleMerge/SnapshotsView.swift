@@ -23,7 +23,7 @@ struct SnapshotsView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     if snapshots.isEmpty {
                         Text(GitSnapshot.isRepository(projectPath)
-                            ? "No restore points yet. One is taken whenever a change is waiting for your approval."
+                            ? "No restore points yet. Take one before a risky change: the button above, or `gentlemerge snapshot create`."
                             : "This project is not a git repository, so there is nothing to snapshot.")
                             .font(.callout)
                             .foregroundStyle(.secondary)

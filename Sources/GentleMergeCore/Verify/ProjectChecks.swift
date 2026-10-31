@@ -68,9 +68,14 @@ public enum ProjectChecks {
     public static func run(_ checks: [Check], in project: URL, skipOptional: Bool = true) -> [CheckResult] {
         checks.filter { !skipOptional || !$0.optional }.map { check in
             let output = Shell.sh(check.command, in: project, timeout: check.timeout)
-            let status: CheckResult.Status = output.timedOut
-                ? .timedOut
-                : (output.succeeded ? .passed : .failed)
+            // A test command that says it found nothing to run (an empty Tests
+            // directory, say) did not find a bug; it found no tests.
+            let said = output.text.lowercased()
+            let foundNoTests = check.kind == .test && !output.succeeded && !output.timedOut
+                && noTestsPhrases.contains { said.contains($0) }
+            let status: CheckResult.Status = foundNoTests
+                ? .skipped
+                : output.timedOut ? .timedOut : (output.succeeded ? .passed : .failed)
             return CheckResult(
                 name: check.name,
                 command: check.command,
@@ -78,7 +83,8 @@ public enum ProjectChecks {
                 status: status,
                 exitCode: output.status,
                 duration: output.duration,
-                output: output.succeeded ? "" : String(output.text.suffix(2_000))
+                output: output.succeeded || foundNoTests ? "" : String(output.text.suffix(2_000)),
+                skipReason: foundNoTests ? "no tests found" : nil
             )
         }
     }
@@ -92,7 +98,12 @@ public enum ProjectChecks {
 
         if exists("Package.swift") {
             checks.append(Check(name: "swift build", command: "swift build", kind: .build))
-            checks.append(Check(name: "swift test", command: "swift test", kind: .test, timeout: 600))
+            // `swift test` on a package with no test target exits 1 ("no tests
+            // found"), which a review reported as a failing check and `land`
+            // treated as a reason to stop — the same trap as npm's placeholder.
+            if hasSwiftTests(in: project) {
+                checks.append(Check(name: "swift test", command: "swift test", kind: .test, timeout: 600))
+            }
         }
 
         if exists("package.json") {
@@ -158,6 +169,11 @@ public enum ProjectChecks {
 
         for (name, kind) in [("build", Check.Kind.build), ("test", .test), ("typecheck", .typecheck), ("lint", .lint)]
         where scripts[name] != nil {
+            // `npm init` writes `echo "Error: no test specified" && exit 1` as the test
+            // script. It is a placeholder, not a test suite: running it as a check made
+            // every `land` in such a project fail (and the dry run announce it as a check
+            // that would pass), until someone typed --skip-checks.
+            if name == "test", let script = scripts[name] as? String, isPlaceholderTestScript(script) { continue }
             // Name it exactly as it runs, so the report and your terminal agree.
             let command = name == "test" ? "\(runner) test" : "\(runner) run \(name)"
             checks.append(Check(name: command, command: command, kind: kind, timeout: 600))
@@ -173,6 +189,24 @@ public enum ProjectChecks {
         }
 
         return checks
+    }
+
+    /// What the common runners print when they exit non-zero only because there was
+    /// nothing to run: SwiftPM and jest, pytest, vitest and mocha.
+    static let noTestsPhrases = ["no tests found", "no tests ran", "no test files found"]
+
+    /// A Tests directory, or a manifest that declares a test target.
+    static func hasSwiftTests(in project: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        if FileManager.default.fileExists(atPath: project.appendingPathComponent("Tests").path, isDirectory: &isDirectory),
+           isDirectory.boolValue { return true }
+        let manifest = try? String(contentsOf: project.appendingPathComponent("Package.swift"), encoding: .utf8)
+        return manifest?.contains("testTarget") ?? false
+    }
+
+    /// The script `npm init` / `yarn init` leave behind.
+    static func isPlaceholderTestScript(_ script: String) -> Bool {
+        script.lowercased().contains("no test specified")
     }
 
     /// The lockfile is the honest answer to "which package manager is this".

@@ -188,9 +188,13 @@ public struct HookInstaller: Sendable {
                 for hook in group["hooks"] as? [[String: Any]] ?? [] {
                     guard let command = hook["command"] as? String,
                           command.contains(Self.marker) else { continue }
-                    status[event] = command.contains("--mode context")
-                        ? "shares context with this session"
-                        : "reports it"
+                    if command.contains("--mode context") {
+                        status[event] = "shares context with this session"
+                    } else if command.contains("--mode advise") {
+                        status[event] = "warns before an edit lands on a claimed path"
+                    } else {
+                        status[event] = "reports it"
+                    }
                 }
             }
         }
@@ -198,6 +202,74 @@ public struct HookInstaller: Sendable {
     }
 
     // MARK: - Codex
+
+    /// The file name of the bridge we install into Codex's `notify`.
+    public static let codexMarker = "gentlemerge-codex-notify.sh"
+
+    /// Where the notify program that was there before us is remembered, so that
+    /// a second install does not mistake our own bridge for it and `uninstall`
+    /// can give the user's setting back.
+    public var codexPreviousURL: URL { paths.home.appendingPathComponent("codex-previous-notify.json") }
+
+    public func loadCodexPrevious() -> [String] {
+        guard let data = try? Data(contentsOf: codexPreviousURL),
+              let list = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return list
+    }
+
+    public func saveCodexPrevious(_ previous: [String]) throws {
+        try paths.createDirectories()
+        try AtomicFile.write(try JSONEncoder().encode(previous), to: codexPreviousURL)
+    }
+
+    /// The user's own notify program given what `codexConfigContents` found in
+    /// the file: the same thing on a first install, the remembered one when the
+    /// file already points at our bridge.
+    public func codexPreviousNotify(found: [String]) -> [String] {
+        if let first = found.first, first.contains(Self.codexMarker) { return loadCodexPrevious() }
+        return found
+    }
+
+    /// The config with our bridge taken out and `previous` put back. nil when
+    /// the top-level `notify` is not ours, so nothing is rewritten.
+    public func codexConfigRemovingBridge(original: String, previous: [String]) -> String? {
+        var lines = original.components(separatedBy: "\n")
+        for (index, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") { break }
+            guard trimmed.hasPrefix("notify"),
+                  let equals = trimmed.firstIndex(of: "="),
+                  trimmed[trimmed.startIndex..<equals].trimmingCharacters(in: .whitespaces) == "notify"
+            else { continue }
+            let current = parseTOMLStringArray(String(trimmed[trimmed.index(after: equals)...]))
+            guard current.first?.contains(Self.codexMarker) == true else { return nil }
+            if previous.isEmpty {
+                lines.remove(at: index)
+            } else {
+                let list = previous.map { "\"\(Self.tomlBasicString($0))\"" }.joined(separator: ", ")
+                lines[index] = "notify = [\(list)]"
+            }
+            return lines.joined(separator: "\n")
+        }
+        return nil
+    }
+
+    /// Undo `install --codex`: the user's own `notify` comes back, our script
+    /// and the note of what was there go away. Backed up first, like install.
+    @discardableResult
+    public func uninstallCodex() throws -> Result {
+        guard let original = try? String(contentsOf: paths.codexConfig, encoding: .utf8) else {
+            return Result(changed: false, backup: nil, notes: ["Codex: no config at \(paths.codexConfig.path)"])
+        }
+        guard let updated = codexConfigRemovingBridge(original: original, previous: loadCodexPrevious()) else {
+            return Result(changed: false, backup: nil, notes: ["Codex: nothing of ours in `notify`"])
+        }
+        let backup = try backupIfPresent(paths.codexConfig)
+        try AtomicFile.write(Data(updated.utf8), to: paths.codexConfig)
+        try? FileManager.default.removeItem(at: paths.codexNotifyScript)
+        try? FileManager.default.removeItem(at: codexPreviousURL)
+        return Result(changed: true, backup: backup, notes: ["Codex: `notify` restored"])
+    }
 
     /// Codex calls one external program per event and passes the payload as the
     /// last argument. If something is already installed there, we call it too
@@ -211,9 +283,15 @@ public struct HookInstaller: Sendable {
             "",
         ]
 
-        if let existing = previous.first, !existing.isEmpty, !existing.contains(Self.marker) {
+        // Never chain to ourselves. Installing twice found *our own* bridge in
+        // `notify` (its name does not contain the Claude hook's marker), took
+        // it for somebody else's program, and wrote a script that called itself
+        // first on every Codex event — an endless recursion, with the user's
+        // real notify program already forgotten.
+        if let existing = previous.first, !existing.isEmpty,
+           !existing.contains(Self.marker), !existing.contains(Self.codexMarker) {
             let passthrough = ([existing] + previous.dropFirst())
-                .map { "\"\($0.replacingOccurrences(of: "\"", with: "\\\""))\"" }
+                .map { "\"\(Self.escapedForDoubleQuotes($0))\"" }
                 .joined(separator: " ")
             lines.append("# Whatever was configured before us still runs, first and unchanged.")
             lines.append("\(passthrough) \"$@\" >/dev/null 2>&1 || :")
@@ -224,6 +302,18 @@ public struct HookInstaller: Sendable {
         lines.append("printf '%s' \"${last:-}\" | \(quoted(paths.hookScript.path)) --provider codex --mode notify")
         lines.append("exit 0")
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// Inside double quotes the shell still expands `$`, a backtick and `\`, so a
+    /// program path holding one ran something else — or nothing — on every Codex
+    /// event. Only `"` used to be escaped.
+    static func escapedForDoubleQuotes(_ text: String) -> String {
+        var out = ""
+        for character in text {
+            if "\\\"$`".contains(character) { out.append("\\") }
+            out.append(character)
+        }
+        return out
     }
 
     /// Rewrites the `notify = [...]` line in Codex's config.toml, preserving the
@@ -363,12 +453,20 @@ func parseTOMLStringArray(_ text: String) -> [String] {
 
         for group in groups {
             let hooks = group["hooks"] as? [[String: Any]] ?? []
+            // The matcher belongs to the *group* (`hookEntry` puts it beside
+            // `hooks`, which is also where Claude Code reads it), never to the
+            // hook inside. This used to ask the inner hook, which has no such
+            // key, so the advise entry written a few lines up was classed as
+            // matcher-less and removed again: `install` printed "PreToolUse →
+            // advises on claimed paths" and wrote nothing, and the whole
+            // "Advised" tier of the README never existed on any machine.
+            let groupHasMatcher = group["matcher"] != nil
             let survivors = hooks.filter { hook in
                 guard let command = hook["command"] as? String, command.contains(Self.marker) else {
                     return true
                 }
-                // Ours: keep it only when it carries a matcher.
-                return hook["matcher"] != nil
+                // Ours: keep it only when its group carries a matcher.
+                return groupHasMatcher
             }
             if survivors.isEmpty, !hooks.isEmpty { continue }
             var copy = group
@@ -385,8 +483,8 @@ func parseTOMLStringArray(_ text: String) -> [String] {
     private func planAddsPreToolUse(_ hooks: [String: Any]) -> Bool {
         let groups = hooks["PreToolUse"] as? [[String: Any]] ?? []
         return groups.contains { group in
-            ((group["hooks"] as? [[String: Any]]) ?? []).contains { hook in
-                (hook["command"] as? String)?.contains(Self.marker) == true && hook["matcher"] != nil
+            group["matcher"] != nil && ((group["hooks"] as? [[String: Any]]) ?? []).contains { hook in
+                (hook["command"] as? String)?.contains(Self.marker) == true
             }
         }
     }

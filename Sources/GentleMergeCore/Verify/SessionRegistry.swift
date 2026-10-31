@@ -19,6 +19,16 @@ public struct SessionRecord: Codable, Sendable, Identifiable, Equatable {
     public var pid: Int?
     public var tty: String?
     public var terminalProgram: String?
+    /// The worktree label the hook resolved (nil for a session whose worktree has
+    /// none). What a `watch` names: a Claude session in the worktree labelled
+    /// `hermes` is `hermes`, not "claude".
+    public var label: String?
+    /// The repository this session works in, canonical (every worktree of a repo
+    /// shares one), where `projectPath` is the *checkout* the hook reported. The
+    /// window lists projects by the canonical path, so finding "the newest session
+    /// of this project" by the checkout path matched nothing for an agent in a
+    /// worktree — the Review button then fell back to HEAD of the main checkout.
+    public var project: String?
 
     public var isLive: Bool { endedAt == nil }
 }
@@ -47,7 +57,7 @@ public struct SessionRegistry: Sendable {
     /// hour still owns the diff since it started.
     func mostRecent(in projectPath: String) -> SessionRecord? {
         sessions.values
-            .filter { $0.projectPath == projectPath }
+            .filter { $0.projectPath == projectPath || $0.project == projectPath }
             .max { $0.startedAt < $1.startedAt }
     }
 
@@ -58,7 +68,8 @@ public struct SessionRegistry: Sendable {
         at date: Date,
         pid: Int? = nil,
         tty: String? = nil,
-        terminalProgram: String? = nil
+        terminalProgram: String? = nil,
+        label: String? = nil
     ) {
         sessions[id] = SessionRecord(
             id: id,
@@ -66,12 +77,48 @@ public struct SessionRegistry: Sendable {
             projectPath: projectPath,
             startedAt: date,
             lastSeenAt: date,
-            baselineCommit: Self.head(of: projectPath),
+            // A baseline taken earlier wins (see `recordBaseline`): HEAD *now* is where
+            // the project stands when this event is finally drained, which with the app
+            // closed can be long after the session began and after others committed.
+            baselineCommit: sessions[id]?.baselineCommit ?? Self.head(of: projectPath),
             pid: pid,
             tty: tty,
-            terminalProgram: terminalProgram
+            terminalProgram: terminalProgram,
+            label: label ?? sessions[id]?.label,
+            project: Self.canonical(projectPath)
         )
         prune()
+        save()
+    }
+
+    /// Writes down where the project stood at the moment a session began.
+    ///
+    /// Called from the SessionStart hook itself, which is the one moment that is
+    /// true. `started` runs when the spooled event is drained — three seconds later
+    /// with the app up, but whenever the next `brief` / `precommit` happens to run
+    /// without it — and it took HEAD at that time, so every commit that landed in
+    /// between fell outside "what landed since your session started". Does nothing
+    /// when a baseline is already there.
+    public mutating func recordBaseline(
+        id: String,
+        provider: AgentProvider,
+        projectPath: String?,
+        at date: Date,
+        label: String? = nil
+    ) {
+        guard sessions[id]?.baselineCommit == nil, let head = Self.head(of: projectPath) else { return }
+        if var existing = sessions[id] {
+            existing.baselineCommit = head
+            existing.label = existing.label ?? label
+            sessions[id] = existing
+        } else {
+            sessions[id] = SessionRecord(
+                id: id, provider: provider, projectPath: projectPath,
+                startedAt: date, lastSeenAt: date, baselineCommit: head, label: label,
+                project: Self.canonical(projectPath)
+            )
+            prune()
+        }
         save()
     }
 
@@ -84,7 +131,8 @@ public struct SessionRegistry: Sendable {
         at date: Date,
         pid: Int? = nil,
         tty: String? = nil,
-        terminalProgram: String? = nil
+        terminalProgram: String? = nil,
+        label: String? = nil
     ) {
         if var existing = sessions[id] {
             existing.lastSeenAt = date
@@ -94,6 +142,9 @@ public struct SessionRegistry: Sendable {
             existing.pid = existing.pid ?? pid
             existing.tty = existing.tty ?? tty
             existing.terminalProgram = existing.terminalProgram ?? terminalProgram
+            existing.label = existing.label ?? label
+            // Once per record (it spawns git): records written before `project` existed.
+            if existing.project == nil { existing.project = Self.canonical(existing.projectPath) }
             sessions[id] = existing
         } else {
             sessions[id] = SessionRecord(
@@ -105,7 +156,9 @@ public struct SessionRegistry: Sendable {
                 baselineCommit: nil,
                 pid: pid,
                 tty: tty,
-                terminalProgram: terminalProgram
+                terminalProgram: terminalProgram,
+                label: label,
+                project: Self.canonical(projectPath)
             )
             prune()
         }
@@ -123,6 +176,10 @@ public struct SessionRegistry: Sendable {
     public func baseline(for sessionID: String?) -> String? {
         guard let sessionID else { return nil }
         return sessions[sessionID]?.baselineCommit
+    }
+
+    static func canonical(_ projectPath: String?) -> String? {
+        projectPath.map { ProjectRegistry.canonicalPath(for: $0) }
     }
 
     static func head(of projectPath: String?) -> String? {

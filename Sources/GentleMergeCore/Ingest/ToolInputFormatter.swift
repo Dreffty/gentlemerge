@@ -139,6 +139,43 @@ public enum ToolInputFormatter {
         return name.isEmpty ? path : name
     }
 
+    /// The path of `file` inside `checkout`, with symlinks resolved on both
+    /// sides, or nil when it lies elsewhere.
+    ///
+    /// `relativePath` below only strips a textual prefix, so a project reached
+    /// as `/tmp/app` and an edit reported as `/private/tmp/app/lib/a.swift` —
+    /// one directory, two spellings, and `/tmp`, `/var` and every symlinked
+    /// project folder do exactly this — came back as an absolute path that no
+    /// claim could match, and the pre-edit warning stayed silent. The recorder
+    /// of implicit claims already resolved both sides; the advisor now agrees
+    /// with it (audit 2026-11-01).
+    public static func relativeToCheckout(_ file: String, checkout: String) -> String? {
+        guard !file.isEmpty, !checkout.isEmpty else { return nil }
+        let root = resolvingExistingPrefix(URL(fileURLWithPath: checkout)).path
+        let target = resolvingExistingPrefix(file.hasPrefix("/") ? URL(fileURLWithPath: file)
+            : URL(fileURLWithPath: checkout).appendingPathComponent(file)).path
+        guard target.hasPrefix(root + "/") else { return nil }
+        let relative = String(target.dropFirst(root.count + 1))
+        return relative.isEmpty ? nil : relative
+    }
+
+    /// Symlinks resolved in the part of the path that exists, the rest appended
+    /// as written. `resolvingSymlinksInPath` gives up on a path that does not
+    /// exist yet, and the advice runs *before* a Write creates its file — so a
+    /// new file named through the symlinked spelling of the project was the one
+    /// case still left unmatched.
+    static func resolvingExistingPrefix(_ url: URL) -> URL {
+        var existing = url.standardizedFileURL
+        var missing: [String] = []
+        while existing.path != "/", !FileManager.default.fileExists(atPath: existing.path) {
+            missing.insert(existing.lastPathComponent, at: 0)
+            existing.deleteLastPathComponent()
+        }
+        var resolved = existing.resolvingSymlinksInPath()
+        for component in missing { resolved.appendPathComponent(component) }
+        return resolved.standardizedFileURL
+    }
+
     /// Paths read better as `Sources/App/Foo.swift` than as 90 characters of home directory.
     public static func relativePath(_ path: String, cwd: String?) -> String {
         guard !path.isEmpty else { return "" }

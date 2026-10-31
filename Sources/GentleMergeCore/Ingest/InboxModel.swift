@@ -16,7 +16,8 @@ public final class InboxModel {
     public private(set) var items: [InboxItem] = []
     public var config: AppConfig {
         didSet {
-            guard config != oldValue else { return }
+            guard config != oldValue, !reloadingConfig else { return }
+            defer { configStamp = Self.modificationDate(of: paths.config) }
             // Best effort here — this is a property observer on a model the user
             // is looking at, and there is nowhere useful to surface a throw. The
             // CLI's own `config set` path does report its failure instead, which
@@ -63,8 +64,16 @@ public final class InboxModel {
     public private(set) var approvedRequestIDs: Set<String> = []
     public private(set) var lastDispatched: [String: Date] = [:]
     public var onDispatchApproval: ((AgentRequest, AgentTarget, String) -> Void)?
+    /// A request that was waiting for approval is not any more (approved, denied, or
+    /// gone), so the app can take its banner out of Notification Center. Without it
+    /// the "Approve dispatch?" notice outlived the decision it asked for.
+    public var onDispatchResolved: ((String) -> Void)?
     @ObservationIgnored var runDispatch: (AgentRequest, AgentTarget) throws -> Task<Void, Never>
     private var dispatchedRequestIDs: Set<String> = []
+    /// Whether this process may start headless agents. On for the app (and for
+    /// tests that drive a model directly); off for the one-shot drains the CLI and
+    /// the MCP server run before every read.
+    var mayDispatch = true
     private var approvalNotifiedIDs: Set<String> = []
     private var dispatchSkipReasons: [String: Set<String>] = [:]
 
@@ -80,6 +89,14 @@ public final class InboxModel {
     /// The app is the only process that runs long enough to be trusted with
     /// housekeeping; the hooks are gone in milliseconds.
     private var lastPruneAt: Date?
+    /// When `config.json` was last read or written by this model, so the tick
+    /// can tell a change made somewhere else.
+    @ObservationIgnored private var configStamp: Date?
+    /// Set while a reload assigns `config`, so the assignment is not saved back.
+    @ObservationIgnored private var reloadingConfig = false
+    /// How long a drain waits for another process's drain before giving up.
+    /// nil — the app — waits as long as it takes; a one-shot command sets it.
+    @ObservationIgnored var drainLockPatience: TimeInterval?
 
     /// When we last typed into each session, keyed by session id. In memory
     /// because the rate limit is about a person watching a terminal, and a
@@ -97,6 +114,7 @@ public final class InboxModel {
         self.spool = SpoolStore(paths: paths)
         self.ledger = Ledger(url: paths.ledger)
         self.config = AppConfig.load(from: paths.config)
+        self.configStamp = Self.modificationDate(of: paths.config)
         self.sessions = SessionRegistry(url: paths.sessions)
         let registry = ProjectRegistry(url: paths.projects)
         self.projectRegistry = registry
@@ -127,6 +145,11 @@ public final class InboxModel {
     nonisolated public static func drainHeadless(paths: Paths) {
         MainActor.assumeIsolated {
             let model = InboxModel(paths: paths)
+            // A short-lived process cannot wait for a headless agent to finish, so it
+            // must not start one: the child outlived its parent with nobody to record
+            // how it ended. Starting agents is the app's job (like nudges).
+            model.mayDispatch = false
+            model.drainLockPatience = 5
             model.loadState()
             model.drainNow()
             model.saveState()
@@ -146,12 +169,39 @@ public final class InboxModel {
         startWatching()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                self?.reloadConfigIfChanged()
                 self?.drainNow()
                 self?.pruneIfDue()
             }
         }
         spool.prune()
         pruneIfDue()
+    }
+
+    /// Pick up a `config.json` that changed under the app.
+    ///
+    /// The app read it once, at launch. `gentlemerge config set allowDispatch
+    /// true` — one of the two ways the README gives to turn dispatch on, and
+    /// the app is the only process that dispatches — did nothing until a
+    /// restart, and the next setting changed in the app saved its stale copy
+    /// over the file, quietly undoing what was set from the terminal (audit
+    /// 2026-11-01). On the 3 s tick it costs one `stat`. A file that is there
+    /// but unreadable is left for `doctor` to report: replacing a working
+    /// configuration with the defaults is the failure `loadChecked` exists to
+    /// prevent.
+    func reloadConfigIfChanged() {
+        let stamp = Self.modificationDate(of: paths.config)
+        guard stamp != configStamp else { return }
+        configStamp = stamp
+        let (loaded, problem) = AppConfig.loadChecked(from: paths.config)
+        guard problem == nil, loaded != config else { return }
+        reloadingConfig = true
+        config = loaded
+        reloadingConfig = false
+    }
+
+    static func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
     /// Sweep the bus: stale delivery markers, and messages nobody will ever be
@@ -165,6 +215,16 @@ public final class InboxModel {
         // A rule nobody's event ever matched stops counting the moment somebody
         // reads it; this is only about the file not growing forever.
         try? Watches(paths: paths).compact(now: now)
+        // The rest of what `gentlemerge compact` sweeps, on the same clock. It
+        // was reachable only by typing that command, so a home that was never
+        // compacted kept every idle `handoff-<hash>.lock` ever made — 949 of
+        // them in three weeks on the author's own machine — plus finished
+        // requests, dispatch logs and presence marks past their TTL (audit
+        // 2026-11-01). All of it is files nobody reads again.
+        Retention.pruneLocks(paths: paths, now: now)
+        _ = Presence.prune(paths: paths, now: now)
+        Requests(paths: paths).prune()
+        Retention.pruneDispatch(paths: paths, olderThanDays: config.retentionDays, now: now)
         // The hot ledger stays bounded; totals survive because stats reads the
         // archive alongside it.
         Ledger(url: paths.ledger).archive(paths: paths, now: now)
@@ -212,15 +272,25 @@ public final class InboxModel {
         // two drains interleave (load, load, save, save) and the last save
         // erases what the other just ingested. The slow half — nudges,
         // dispatch children, radar git — stays outside the lock.
+        func drainLocked() {
+            for envelope in spool.drain() {
+                ingest(envelope)
+            }
+            // After the events, so a session that reported and then died in the same
+            // three seconds is buried with its last words already recorded.
+            sweepDeadSessions()
+            saveState()
+        }
+        let drainLock = paths.home.appendingPathComponent("drain.lock")
         do {
-            try LockedFile.withExclusiveLock(paths.home.appendingPathComponent("drain.lock")) {
-                for envelope in spool.drain() {
-                    ingest(envelope)
+            if let patience = drainLockPatience {
+                // A one-shot command: answer from what is already ingested rather
+                // than wait behind a drain that may be stuck on a dialog.
+                if try LockedFile.withExclusiveLock(drainLock, waitingAtMost: patience, { drainLocked() }) == nil {
+                    Log.info("drain skipped: another process held the drain lock for \(Int(patience))s")
                 }
-                // After the events, so a session that reported and then died in the same
-                // three seconds is buried with its last words already recorded.
-                sweepDeadSessions()
-                saveState()
+            } else {
+                try LockedFile.withExclusiveLock(drainLock) { drainLocked() }
             }
         } catch {
             // A lock that cannot be taken must not eat events: drain
@@ -259,7 +329,8 @@ public final class InboxModel {
                 at: envelope.receivedAt,
                 pid: envelope.pid,
                 tty: envelope.tty,
-                terminalProgram: envelope.terminalProgram
+                terminalProgram: envelope.terminalProgram,
+                label: envelope.sessionLabel
             )
         }
 
@@ -284,7 +355,8 @@ public final class InboxModel {
                 at: date,
                 pid: envelope.pid,
                 tty: envelope.tty,
-                terminalProgram: envelope.terminalProgram
+                terminalProgram: envelope.terminalProgram,
+                label: envelope.sessionLabel
             )
 
         case .resolveSession(let sessionID, let status):
@@ -337,7 +409,12 @@ public final class InboxModel {
 
         settleWatches(
             sessionID: envelope.sessionID,
-            label: AgentBus.label(for: envelope.provider),
+            // The session's own label, as the hook resolved it. The provider's
+            // default ("claude") is only the fallback: a rule `watch idle hermes`
+            // used to be matched against "claude" for the Claude session in the
+            // worktree labelled hermes, so it never fired — and the rule for
+            // `claude` fired in its place, announcing the wrong agent.
+            label: envelope.sessionLabel ?? AgentBus.label(for: envelope.provider),
             project: envelope.workingDirectory,
             ended: ended,
             now: now
@@ -513,7 +590,7 @@ public final class InboxModel {
             // project is still a session somebody was waiting on.
             settleWatches(
                 sessionID: activity.id,
-                label: AgentBus.label(for: activity.provider),
+                label: record?.label ?? AgentBus.label(for: activity.provider),
                 project: project,
                 ended: true,
                 now: now
@@ -625,6 +702,7 @@ public final class InboxModel {
             )
 
         activity.provider = envelope.provider
+        activity.label = envelope.sessionLabel ?? activity.label
         activity.projectPath = envelope.workingDirectory.map(ProjectRegistry.canonicalPath(for:)) ?? activity.projectPath
         activity.updatedAt = envelope.receivedAt
         // Where the session runs. The pid is the whole point: without it the
@@ -643,9 +721,14 @@ public final class InboxModel {
             // What you just asked for is the truest description of what this
             // session is about to do — and it was written for one agent, not
             // three. Scrub before truncating: half a key is still a leak.
-            activity.currentTask = config.shareTaskText
-                ? Redactor.shared(envelope.payload.string("prompt")?.firstLine)?.truncated(to: 140)
-                : nil
+            let prompt = envelope.payload.string("prompt")
+            if !config.shareTaskText {
+                activity.currentTask = nil
+            } else if !PromptTask.isAutomated(prompt) {
+                // A wrapped message from the harness is not what the session
+                // was asked to do; it keeps the task it had.
+                activity.currentTask = Redactor.shared(PromptTask.personalText(prompt)?.firstLine)?.truncated(to: 140)
+            }
             activity.lastEvent = nil
             activity.state = .working
 
@@ -767,9 +850,17 @@ public final class InboxModel {
     ///
     /// The project list and `paths` are captured before the hop — `self` is not
     /// Sendable and the sweep needs neither, exactly as `maybeAutoLand` does.
+    ///
+    /// `@Sendable` is spelled out on both hops (audit 2026-11-01). Left to
+    /// inference, the closure handed to `async` from this main-actor method was
+    /// main-actor isolated wherever the SDK's Dispatch overlay did not already
+    /// mark it `@Sendable` — Xcode 16's did not — and the Swift 6 runtime on
+    /// macOS 15 traps (EXC_BREAKPOINT) the moment such a closure runs on the
+    /// radar's queue. The app died on its first drain, a third of a second
+    /// after launch, built with Xcode 16; Xcode 26's overlay hid it.
     private func sweepConflictRadar() {
         let (paths, projects) = (self.paths, self.projects)
-        RadarQueue.queue.async {
+        RadarQueue.queue.async { @Sendable in
             for summary in projects {
                 _ = ConflictRadar.sweep(project: summary.path, paths: paths)
             }
@@ -787,7 +878,7 @@ public final class InboxModel {
         guard event == "Stop" || event.contains("turn-complete") || event.contains("turn-ended") else { return }
         guard let cwd = envelope.workingDirectory else { return }
         let (paths, provider) = (self.paths, envelope.provider)
-        AutoLandQueue.queue.async {
+        AutoLandQueue.queue.async { @Sendable in
             _ = Landing.autoLand(cwd: cwd, provider: provider, paths: paths)
         }
     }
@@ -823,6 +914,7 @@ public final class InboxModel {
         do {
             try updateApprovals { $0.insert(id) }
             pendingApprovals.removeValue(forKey: id)
+            onDispatchResolved?(id)
             lastMessage = "Approved \(id); the next drain will check the dispatch gate."
         } catch { lastMessage = "Could not save approval: \(error)" }
     }
@@ -850,6 +942,7 @@ public final class InboxModel {
             _ = try RequestActions.perform(action: "reject", id: id, by: assignee,
                                            result: "denied by human", paths: paths)
             pendingApprovals.removeValue(forKey: id)
+            onDispatchResolved?(id)
             try updateApprovals { $0.remove(id) }
             lastMessage = "Denied \(id)."
         } catch { lastMessage = "Could not deny \(id): \(error)" }
@@ -864,9 +957,12 @@ public final class InboxModel {
     }
 
     private func refreshDispatch(now: Date = Date()) {
+        guard mayDispatch else { return }
         let assigned = Requests(paths: paths).all().filter { $0.state == .assigned }
         let ids = Set(assigned.map(\.id))
+        let gone = pendingApprovals.keys.filter { !ids.contains($0) }
         pendingApprovals = pendingApprovals.filter { ids.contains($0.key) }
+        gone.forEach { onDispatchResolved?($0) }
         approvalNotifiedIDs.formIntersection(ids)
         dispatchSkipReasons = dispatchSkipReasons.filter { ids.contains($0.key) }
         do {
@@ -894,6 +990,15 @@ public final class InboxModel {
                 // Mark before starting: a slow child may stay assigned past the
                 // quiet period. Neither another tick nor a start failure retries it.
                 dispatchedRequestIDs.insert(request.id)
+                // And on disk, once, for every process: see `Dispatcher.claimStart`.
+                guard Dispatcher(paths: paths).claimStart(of: request.id) else {
+                    if dispatchSkipReasons[request.id, default: []].insert("already started").inserted {
+                        ledger.append(LedgerEntry(kind: .note, itemID: request.id,
+                            project: request.projectPath, title: "dispatch.skipped",
+                            reason: "already started by another process"))
+                    }
+                    continue
+                }
                 lastDispatched[target.label] = now
                 pendingApprovals.removeValue(forKey: request.id)
                 do {
@@ -1220,7 +1325,7 @@ public final class InboxModel {
                 provider: activity?.provider ?? .unknown,
                 project: message.projectPath,
                 title: "nudge \(message.from) → \(message.to ?? "everyone")",
-                summary: activity.map { "\($0.provider.displayName) · \($0.projectName) · \($0.stateLabel)" },
+                summary: activity.map { "\($0.displayName) · \($0.projectName) · \($0.stateLabel)" },
                 reason: reason
             )
         )

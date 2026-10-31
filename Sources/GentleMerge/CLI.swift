@@ -28,6 +28,11 @@ enum CLI {
         let command = arguments.dropFirst().first
         let rest = Array(arguments.dropFirst(2))
 
+        if let problem = invalidDirectoryArgument(command: command, rest: rest) {
+            FileHandle.standardError.write(Data("gentlemerge: \(problem)\n".utf8))
+            return 64
+        }
+
         if let command, commandsOfAWorkingAgent.contains(command) {
             noteThatWeAreHere(rest)
         }
@@ -181,7 +186,8 @@ enum CLI {
             // stays so for as long as the server lives.
             Presence.record(label: label, project: ProjectRegistry.canonicalPath(for: directory),
                 branch: nil, task: nil, pid: Int(getppid()), paths: paths)
-            var server = MCPServer(paths: paths, cwd: directory, identity: label)
+            var server = MCPServer(paths: paths, cwd: directory, identity: label,
+                                   identityVerified: identity.verified)
             server.version = AppInfo.version
             server.serve()
             return 0
@@ -239,10 +245,13 @@ enum CLI {
         }
 
         let original = try String(contentsOf: configURL, encoding: .utf8)
-        let (contents, previous) = installer.codexConfigContents(
+        let (contents, found) = installer.codexConfigContents(
             original: original,
             scriptPath: paths.codexNotifyScript.path
         )
+        // What the user had before us, even when this is the second install and
+        // the file already points at our own bridge.
+        let previous = installer.codexPreviousNotify(found: found)
         let script = installer.codexNotifyScript(chaining: previous)
 
         print("\nCodex (\(configURL.path)):")
@@ -259,6 +268,11 @@ enum CLI {
         }
 
         try installer.writeScripts()
+        // Remembered so `uninstall` can put it back and a repeat install does
+        // not take our own bridge for somebody else's program.
+        if found.first?.contains(HookInstaller.codexMarker) != true {
+            try installer.saveCodexPrevious(found)
+        }
         try AtomicFile.write(Data(script.utf8), to: paths.codexNotifyScript)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
@@ -278,7 +292,9 @@ enum CLI {
             for note in result.notes { print("  • \(note)") }
             if let backup = result.backup { print("  backup: \(backup.path)") }
             print(result.changed ? "Claude Code hooks removed." : "Nothing to remove.")
-            print("Codex: if you installed it, reset `notify` in ~/.codex/config.toml by hand.")
+            let codex = try installer.uninstallCodex()
+            for note in codex.notes { print("  • \(note)") }
+            if let backup = codex.backup { print("  backup: \(backup.path)") }
             return 0
         } catch {
             FileHandle.standardError.write(Data("uninstall failed: \(error.localizedDescription)\n".utf8))
@@ -310,15 +326,14 @@ enum CLI {
             .contains(paths.codexNotifyScript.path) ?? false
         print("codex:           \(codexInstalled ? "notify bridge installed" : "not installed")")
 
-        if let pid = try? String(contentsOf: paths.appPID, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-           let value = Int32(pid), value > 0, kill(value, 0) == 0 {
+        if let value = runningAppPID(paths: paths) {
             print("app:             running (pid \(value))")
         } else {
             print("app:             not running")
         }
 
         let live = AgentBus(paths: paths).activities().filter(\.isLive)
-        print("agents running:  \(live.isEmpty ? "none" : live.map { "\($0.provider.displayName)/\($0.projectName)" }.joined(separator: ", "))")
+        print("agents running:  \(live.isEmpty ? "none" : live.map { "\($0.displayName)/\($0.projectName)" }.joined(separator: ", "))")
 
         let queued = (try? FileManager.default.contentsOfDirectory(atPath: paths.spool.path))?
             .filter { $0.hasSuffix(".json") }.count ?? 0
@@ -365,16 +380,24 @@ enum CLI {
     /// a footgun, and every knob here is documented in `config --help`.
     private static func config(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        var config = AppConfig.load(from: paths.config)
+        let (loaded, problem) = AppConfig.loadChecked(from: paths.config)
+        var config = loaded
+        // Said once, on stderr: a typo in the file used to read as a perfectly
+        // healthy default config, so a `claimsPolicy` of "deny" showed up as
+        // "warn" with nothing to explain why.
+        if let problem {
+            FileHandle.standardError.write(Data("warning: \(problem) — these are the defaults, not what the file says\n".utf8))
+        }
         func show(_ key: String) -> Int32 {
             switch key {
+            case "allowDispatch": print(config.allowDispatch)
             case "dispatchMode": print(config.dispatchMode)
             case "dispatchDailyBudgetMinutes": print(config.dispatchDailyBudgetMinutes)
             case "claimsPolicy": print(config.claimsPolicy)
             case "retentionDays": print(config.retentionDays)
             case "autoLand": print(config.autoLand)
             default:
-                FileHandle.standardError.write(Data("unknown key \"\(key)\" — want dispatchMode, dispatchDailyBudgetMinutes, claimsPolicy, retentionDays, autoLand\n".utf8))
+                FileHandle.standardError.write(Data("unknown key \"\(key)\" — want allowDispatch, dispatchMode, dispatchDailyBudgetMinutes, claimsPolicy, retentionDays, autoLand\n".utf8))
                 return 64
             }
             return 0
@@ -390,6 +413,15 @@ enum CLI {
         }
         let key = arguments[1], value = arguments[2]
         switch key {
+        case "allowDispatch":
+            // The master switch. `dispatchMode` only says how dispatch behaves
+            // once this is on, so setting the mode alone (as the README shows)
+            // changed nothing — and there was no way to turn this on from here.
+            guard ["true", "false"].contains(value) else {
+                FileHandle.standardError.write(Data("allowDispatch wants true or false\n".utf8))
+                return 64
+            }
+            config.allowDispatch = value == "true"
         case "dispatchMode":
             guard ["off", "delegated", "strict"].contains(value) else {
                 FileHandle.standardError.write(Data("dispatchMode wants off, delegated or strict\n".utf8))
@@ -430,6 +462,12 @@ enum CLI {
             FileHandle.standardError.write(Data("unknown key \"\(key)\"\n".utf8))
             return 64
         }
+        // Never write defaults over a file we could not read: its other keys
+        // (the `agents` list above all) are the user's own work.
+        if let problem {
+            FileHandle.standardError.write(Data("refusing to change \(key): \(problem). Fix the file or move it away, then try again.\n".utf8))
+            return 1
+        }
         // Report the failure instead of printing the new value and exiting 0. A read-only
         // or full home used to make `config set` claim success while persisting
         // nothing, so the user believed a setting had changed (audit Tier 5 #31).
@@ -466,21 +504,21 @@ enum CLI {
                 print("source: \(authority.rawValue) (\(ownership.rules.count) rule(s))")
                 for rule in ownership.rules { print("- \(rule.pattern) → \(rule.owner)") }
             case "pin":
-                let rules = try Ownership.pin(project: project, paths: paths, by: defaultAuthor())
+                let rules = try Ownership.pin(project: project, paths: paths, by: ownershipAuthor(arguments))
                 print("pinned \(rules.count) rule(s) from HANDOFF.md")
             case "add":
                 guard positional.count == 3 else {
                     print("usage: gentlemerge ownership add <pattern> <owner> [--project dir]")
                     return 64
                 }
-                let rules = try Ownership.setRule(pattern: positional[1], owner: positional[2], project: project, paths: paths, by: defaultAuthor())
+                let rules = try Ownership.setRule(pattern: positional[1], owner: positional[2], project: project, paths: paths, by: ownershipAuthor(arguments))
                 print("now \(rules.count) rule(s) pinned")
             case "rm":
                 guard positional.count == 2 else {
                     print("usage: gentlemerge ownership rm <pattern> [--project dir]")
                     return 64
                 }
-                let rules = try Ownership.setRule(pattern: positional[1], owner: nil, project: project, paths: paths, by: defaultAuthor())
+                let rules = try Ownership.setRule(pattern: positional[1], owner: nil, project: project, paths: paths, by: ownershipAuthor(arguments))
                 print("now \(rules.count) rule(s) pinned")
             default:
                 print("usage: gentlemerge ownership [pin|add <pattern> <owner>|rm <pattern>] [--project dir]")
@@ -512,7 +550,19 @@ enum CLI {
 
     private static func history(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        let limit = intValue(after: "-n", in: arguments) ?? 20
+        // `-n abc` and `-n 0` used to fall back to 20 without a word, which reads
+        // as "the last twenty are what you asked for".
+        var limit = 20
+        if let raw = value(after: "-n", in: arguments) {
+            guard let asked = Int(raw), asked > 0 else {
+                FileHandle.standardError.write(Data("history -n wants a positive number, not \"\(raw)\"\n".utf8))
+                return 64
+            }
+            limit = asked
+        } else if arguments.contains("-n") {
+            FileHandle.standardError.write(Data("history -n wants a number after it\n".utf8))
+            return 64
+        }
         let entries = Ledger(url: paths.ledger).recent(limit: limit)
         guard !entries.isEmpty else {
             print("No history yet.")
@@ -522,7 +572,9 @@ enum CLI {
         formatter.dateFormat = "MMM d HH:mm:ss"
         for entry in entries.reversed() {
             var line = "\(formatter.string(from: entry.at))  \(entry.kind.rawValue.padding(toLength: 9, withPad: " ", startingAt: 0))"
-            line += "  \(URL(fileURLWithPath: entry.project ?? "").lastPathComponent)"
+            // `URL(fileURLWithPath: "")` is the *current directory*, so an entry with
+            // no project used to show whatever folder you happened to be standing in.
+            line += "  \(entry.project.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "—")"
             if let title = entry.title { line += "  \(title)" }
             if let waited = entry.waitedSeconds { line += "  (waited \(Int(waited))s)" }
             print(line)
@@ -559,8 +611,19 @@ enum CLI {
         let author = identity.label
         if arguments.contains("--done") { return done(bus: bus, author: author, scope: scoped) }
 
+        // `--to` with nothing after it used to mean everyone: a note meant for one
+        // agent went to all of them.
+        for flag in ["--to", "--to-branch"] where arguments.contains(flag) {
+            guard let named = value(after: flag, in: arguments),
+                  !named.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                FileHandle.standardError.write(Data(
+                    "\(flag) needs a name. Without it the note would go to everyone, which is not what you asked for.\n".utf8))
+                return 64
+            }
+        }
+
         let text = positional(arguments).joined(separator: " ")
-        guard !text.isEmpty else {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             let usage = "usage: gentlemerge say \"...\" [--to claude|codex|hermes] [--to-branch name]\n"
                 + "                          [--project dir] [--global] [--replaces handle]\n"
                 + "                          [--kind fyi|update|urgent|handoff] [--urgent] [--fyi] [--nudge]\n"
@@ -571,6 +634,10 @@ enum CLI {
         }
 
         guard let kind = messageKind(in: arguments) else {
+            if value(after: "--kind", in: arguments) == nil {
+                FileHandle.standardError.write(Data("say: --urgent and --fyi contradict each other — pick one\n".utf8))
+                return 64
+            }
             // A resolve carries the id of what it buries, which is not something
             // you can type — that is why it is not on this list.
             let complaint = "unknown kind \"\(value(after: "--kind", in: arguments) ?? "")\""
@@ -628,7 +695,14 @@ enum CLI {
             toBranch: value(after: "--to-branch", in: arguments),
             verified: identity.verified
         )
-        let result = bus.post(message)
+        let result: Redactor.Result
+        do { result = try bus.send(message) }
+        catch {
+            // Said as plainly as the success: the other agents were NOT told.
+            FileHandle.standardError.write(Data(
+                "Not sent — the message log could not be written (\(error.localizedDescription)). See `gentlemerge doctor`.\n".utf8))
+            return 1
+        }
 
         if result.isSuppressed {
             print("Withheld — that was almost entirely \(result.summary). Nothing useful was shared.")
@@ -675,6 +749,9 @@ enum CLI {
             guard let kind = MessageKind(rawValue: raw), kind != .resolve else { return nil }
             return kind
         }
+        // Both at once has no right answer, and picking one silently sent a
+        // note as urgent that its author also called "for your information".
+        if arguments.contains("--urgent") && arguments.contains("--fyi") { return nil }
         if arguments.contains("--urgent") { return .urgent }
         if arguments.contains("--fyi") { return .fyi }
         return .update
@@ -750,7 +827,13 @@ enum CLI {
 
     /// Who is working on what, right now.
     private static func who(_ arguments: [String]) -> Int32 {
-        let bus = AgentBus(paths: Paths.fromEnvironment())
+        let paths = Paths.fromEnvironment()
+        // Drain first, like `brief`, `claims` and `precommit`: the activities
+        // this prints are made from hook events, and without the app running
+        // nothing else turns the spool into them. `who` answered "No agent
+        // sessions running" with two agents mid-turn (audit 2026-11-01).
+        InboxModel.drainHeadless(paths: paths)
+        let bus = AgentBus(paths: paths)
         // Everything, still: unlike the briefing, this is you asking, and the
         // whole point of asking is usually to find the session you lost. `--all`
         // is that default said out loud, so the briefing can name a command that
@@ -859,9 +942,17 @@ enum CLI {
         let project = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
         let includeSlow = arguments.contains("--slow")
         let baseline = value(after: "--since", in: arguments)
+        // A revision that does not exist is an error, not "nothing changed": a typo in
+        // --since printed a partial report (the untracked files only) and exited 0.
+        if let baseline, GitSnapshot.isRepository(project.path),
+           !WorkInspector.isCommit(baseline, in: project) {
+            FileHandle.standardError.write(Data("--since \(baseline): not a commit in this repository\n".utf8))
+            return 1
+        }
 
         let work = WorkInspector.summarize(projectPath: project.path, baseline: baseline)
         print("WHAT CHANGED")
+        if let problem = work.problem { print("  ⚠ \(problem)") }
         if !work.isRepository {
             print("  not a git repository")
         } else if work.changes.isEmpty {
@@ -924,6 +1015,34 @@ enum CLI {
 
     // MARK: - projects and handoff
 
+    /// A directory named on the command line that is not there is a typo. Every
+    /// command used to carry on with it: `say hola --project /no/such/dir` filed
+    /// the note under a project called `dir`, and `handoff /no/such/dir` printed a
+    /// handoff it had just made up.
+    private static func invalidDirectoryArgument(command: String?, rest: [String]) -> String? {
+        func missing(_ raw: String, flag: String?) -> String? {
+            let path = (raw as NSString).expandingTildeInPath
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
+                return nil
+            }
+            return (flag.map { "\($0) " } ?? "") + "\(raw): no such directory"
+        }
+        if let directory = value(after: "--project", in: rest), let problem = missing(directory, flag: "--project") {
+            return problem
+        }
+        // The commands that take the directory as a bare argument.
+        let bare: String?
+        switch command {
+        case "review", "handoff", "brief", "precommit": bare = positional(rest).first
+        case "project": bare = ["init", "adopt-worktrees"].contains(rest.first ?? "") ? positional(rest).dropFirst().first : nil
+        case "init": bare = positional(rest).first
+        default: bare = nil
+        }
+        if let bare, let problem = missing(bare, flag: nil) { return problem }
+        return nil
+    }
+
     private static func projectDirectory(_ arguments: [String], allowPositional: Bool = true) -> String {
         ProjectRegistry.canonicalPath(for: checkoutDirectory(arguments, allowPositional: allowPositional))
     }
@@ -968,11 +1087,15 @@ enum CLI {
         case "init":
             let directory = checkoutDirectory(Array(arguments.dropFirst()))
             do {
-                let handoff = try ProjectRegistry.initialize(projectPath: directory)
+                let (handoff, skipped) = try ProjectRegistry.initializeReportingSkips(projectPath: directory)
                 var registry = ProjectRegistry(url: Paths.fromEnvironment().projects)
                 registry.seen(path: directory, provider: nil, at: Date())
                 print("Handoff ready: \(ProjectHandoff.fileURL(for: handoff.projectPath).path)")
-                print("Pointed CLAUDE.md / AGENTS.md at it where they exist.")
+                print("Pointed CLAUDE.md / AGENTS.md at it where they exist"
+                    + (skipped.isEmpty ? "." : ", except:"))
+                for file in skipped {
+                    print("  left \(file.name) alone: \(file.reason). Add a line pointing at .gentlemerge/HANDOFF.md yourself.")
+                }
                 // Generated per-worktree ports stay out of git; the ports
                 // module owns that ignore line, not the Core init.
                 WorktreeEnv.ensureGitignore(projectPath: directory)
@@ -983,6 +1106,11 @@ enum CLI {
                 let paths = Paths.fromEnvironment()
                 if let label = value(after: "--label", in: arguments) {
                     print(try WorktreeLabel.write(label: label, in: URL(fileURLWithPath: directory)))
+                } else if arguments.contains("--label") {
+                    // `--label --git-hooks` (or nothing at all) used to be skipped without a
+                    // word, leaving a worktree with no identity and a success exit.
+                    FileHandle.standardError.write(Data("--label needs a name, e.g. --label claude\n".utf8))
+                    return 64
                 }
                 if arguments.contains("--git-hooks") {
                     print(try GitHookInstaller(paths: paths).install(repo: URL(fileURLWithPath: directory)))
@@ -1272,7 +1400,12 @@ enum CLI {
         let baseline = value(after: "--since", in: arguments)
             ?? sessionBaseline(for: directory, paths: paths, arguments: arguments)
         let report = PrecommitCheck.run(in: directory, baseline: baseline)
-        if report.isRepository {
+        // Only with a real baseline. Without one the report is "the last few
+        // commits", which includes the committer's own: every ordinary commit in a
+        // one-agent repository printed "⚠️ 1 file of yours already got committed
+        // to", a warning with nothing behind it that trains everyone to skim the
+        // gate's output. `gentlemerge precommit` still prints it, with its caveat.
+        if report.isRepository, !report.checkedRecentInstead {
             if report.overlaps.isEmpty {
                 print("Nobody has committed to any of the \(count(report.changed.count, "file")) staged/changed. You are clear so far.")
             } else {
@@ -1332,8 +1465,7 @@ enum CLI {
             // skip is published instead of silent: the variable is documented
             // for humans (hook comment, README) and never printed where a
             // model reads, and the bus hears about every use.
-            let skip = ProcessInfo.processInfo.environment["GENTLEMERGE_SKIP"]
-            if skip != nil && !skip!.isEmpty {
+            if EscapeHatch.isActive() {
                 let who = label ?? "you"
                 let summary = "\(who) skipped \(violations.count) blocking violation(s) on \(files.count) file(s)"
                 AgentBus(paths: paths).post(AgentMessage(
@@ -1412,7 +1544,8 @@ enum CLI {
         paths: Paths,
         arguments: [String]
     ) -> String? {
-        let label = value(after: "--as", in: arguments) ?? defaultAuthor()
+        let label = (try? actingLabel(arguments, explicit: value(after: "--as", in: arguments)))
+            ?? value(after: "--as", in: arguments) ?? defaultAuthor()
         guard let id = TaskClaims(paths: paths).currentSessionID(for: label, in: directory) else {
             return nil
         }
@@ -1626,7 +1759,9 @@ enum CLI {
 
         // `--as` for the cases `defaultAuthor()` cannot see: a wrapper running
         // on Hermes' behalf, or a subagent that wants its own name on it.
-        let label = value(after: "--as", in: arguments) ?? defaultAuthor()
+        let label: String
+        do { label = try actingLabel(arguments, explicit: value(after: "--as", in: arguments)) }
+        catch { FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1 }
         let claims = TaskClaims(paths: Paths.fromEnvironment())
 
         do {
@@ -1789,6 +1924,7 @@ enum CLI {
         let directory = projectDirectory(arguments, allowPositional: false)
 
         var event = "SessionStart"
+        var sessionSource: String?
         var sessionID: String?
         // No `--provider` means we do not know who this is, and guessing Claude
         // would hand a Claude session's messages to whoever ran the hook.
@@ -1799,6 +1935,7 @@ enum CLI {
            let payload = try? JSONCoding.decoder().decode(JSONValue.self, from: data) {
             event = payload.string("hook_event_name") ?? event
             sessionID = payload.string("session_id")
+            sessionSource = payload.string("source")
         }
         if let name = value(after: "--provider", in: arguments) {
             provider = AgentProvider(rawValue: name) ?? .unknown
@@ -1823,6 +1960,17 @@ enum CLI {
                     paths: paths))
         } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1
+        }
+
+        // Where the project stands *now*, at the moment the session begins: this hook
+        // is the one place that knows. Draining the spooled event later takes HEAD at
+        // that later time (see `SessionRegistry.recordBaseline`).
+        if event == "SessionStart", let sessionID, sessionSource == nil || ["startup", "resume"].contains(sessionSource!) {
+            var registry = SessionRegistry(url: paths.sessions)
+            registry.recordBaseline(
+                id: sessionID, provider: provider ?? .unknown,
+                projectPath: checkoutDirectory(arguments, allowPositional: false), at: Date(),
+                label: identity.verified ? identity.label : nil)
         }
 
         var blocks: [String] = []
@@ -1936,7 +2084,7 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         // The human escape hatch covers the edit-time advice too: skipped
         // means silent, the same as every other path in the bridge.
-        guard ProcessInfo.processInfo.environment["GENTLEMERGE_SKIP"] == nil else { return 0 }
+        guard !EscapeHatch.isActive() else { return 0 }
         let projectDirectory_ = projectDirectory(arguments, allowPositional: false)
         let checkout = checkoutDirectory(arguments, allowPositional: false)
         if let claimed = value(after: "--from", in: arguments) ?? value(after: "--as", in: arguments) {
@@ -1981,8 +2129,9 @@ enum CLI {
         // (audit 2026-10-08). `recordImplicitPathClaims` already resolves the
         // checkout correctly; this now agrees with it.
         let project = ProjectRegistry.canonicalPath(for: checkout)
-        let rel = ToolInputFormatter.relativePath(file, cwd: checkout)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "~"))
+        let rel = ToolInputFormatter.relativeToCheckout(file, checkout: checkout)
+            ?? ToolInputFormatter.relativePath(file, cwd: checkout)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "~"))
 
         // The same rules as the commit-time gate, decided before the edit
         // lands: a surprise at commit time is twenty minutes of wasted work.
@@ -2061,7 +2210,12 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         let cwd = checkoutDirectory(arguments, allowPositional: false)
         let config = AppConfig.load(from: paths.config)
-        let label = WorktreeLabel.read(cwd: URL(fileURLWithPath: cwd)) ?? defaultAuthor()
+        // Who is asking, resolved the way every other command resolves it:
+        // `GENTLEMERGE_LABEL` first, then this worktree's label. Reading only the
+        // worktree label meant agents told apart by the environment variable —
+        // the documented way for several of them sharing one folder — were all
+        // "you" here, and all got the same hundred ports (audit 2026-11-01).
+        let label = (try? actingLabel(arguments, explicit: nil)) ?? defaultAuthor()
         let text = WorktreeEnv.render(WorktreeEnv.allocation(label: label, config: config))
         guard arguments.contains("--write") else {
             print(text)
@@ -2113,17 +2267,32 @@ enum CLI {
         }
 
         let project = ProjectRegistry.canonicalPath(for: directory)
+        // Recorded relative to the repository: an absolute path under this checkout
+        // is what an agent naturally writes, and stored as written it protected the
+        // wrong thing (see `Glob.relativize`).
+        let roots = repositoryRoots(for: checkoutDirectory(arguments, allowPositional: false))
+        let recorded = patterns.map { Glob.relativize($0, roots: roots) }
         let intent = value(after: "--intent", in: arguments)
-        // `value(after:)` only rejects `--`-prefixed values, so `--ttl -5` parsed fine and
-        // recorded a claim that was **born expired** (`-5 * 60 = -300`), printing
-        // "0m left" while protecting nothing. Clamp rather than reject: a zero or
-        // negative ask is a mistake, but writing a claim that claims nothing is
-        // worse than writing one that expires (audit Tier 5 #26).
-        let ttl = (value(after: "--ttl", in: arguments) ?? "")
-            .flatMap { Double($0) }.map { max($0, 0) * 60 } ?? PathClaims.explicitTTL
+        // A claim that is born expired protects nothing and says it worked: `--ttl 0`
+        // and `--ttl -5` both printed "Claimed … 0m left" and exited 0 while
+        // `claims` listed nothing, and `--ttl abc` quietly became thirty minutes.
+        // A ttl that is not a positive number of minutes is a mistake to report
+        // (audit Tier 5 #26 clamped it, which only made the lie quieter).
+        let ttl: TimeInterval
+        if arguments.contains("--ttl") {
+            guard let raw = value(after: "--ttl", in: arguments),
+                  let minutes = Double(raw), minutes.isFinite, minutes > 0, minutes <= 24 * 60 else {
+                FileHandle.standardError.write(
+                    Data("--ttl wants a number of minutes between 0 and 1440, e.g. --ttl 30\n".utf8))
+                return 64
+            }
+            ttl = minutes * 60
+        } else {
+            ttl = PathClaims.explicitTTL
+        }
 
         do {
-            for pattern in patterns {
+            for pattern in recorded {
                 let claim = try PathClaims(paths: paths).claim(
                     pattern: pattern,
                     label: label,
@@ -2162,14 +2331,18 @@ enum CLI {
         }
 
         let project = ProjectRegistry.canonicalPath(for: directory)
+        let roots = repositoryRoots(for: checkoutDirectory(arguments, allowPositional: false))
         let patterns = (value(after: "--paths", in: arguments) ?? "")
             .split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
+            .map { Glob.relativize($0, roots: roots) }
 
         do {
-            try PathClaims(paths: paths).release(label: label, project: project, patterns: patterns.isEmpty ? nil : patterns)
-            print(patterns.isEmpty ? "Released every claim by \(label) in \(project)" : "Released \(patterns.count) claim(s)")
+            let store = PathClaims(paths: paths)
+            let asked = patterns.isEmpty ? nil : patterns
+            let released = try store.release(label: label, project: project, patterns: asked)
+            print(store.releaseSummary(released: released, asked: asked, label: label, project: project))
             return 0
         } catch {
             FileHandle.standardError.write(Data("could not release: \(error)\n".utf8))
@@ -2275,7 +2448,7 @@ enum CLI {
         case "list", nil:
             let label = value(after: "--as", in: arguments)
                 ?? value(after: "--from", in: arguments)
-                ?? WorktreeLabel.read(cwd: URL(fileURLWithPath: directory))
+                ?? (try? actingLabel(arguments, explicit: nil))
                 ?? defaultAuthor()
             let rows: [AgentRequest]
             if arguments.contains("--mine") {
@@ -2365,7 +2538,13 @@ enum CLI {
     /// worktree.
     private static func gitHooks(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        let action = arguments.first ?? "install"
+        // No default action: a bare `gentlemerge git-hooks` used to install, so
+        // somebody asking what the command does found hooks written into their
+        // repository. It says what it needs instead.
+        guard let action = arguments.first, action == "install" || action == "uninstall" else {
+            FileHandle.standardError.write(Data("usage: gentlemerge git-hooks install|uninstall [--project dir]\n".utf8))
+            return 64
+        }
         let directory = projectDirectory(Array(arguments.dropFirst()), allowPositional: false)
         let installer = GitHookInstaller(paths: paths)
 
@@ -2387,11 +2566,51 @@ enum CLI {
         }
     }
 
+    /// The directories an absolute path may be relative to: the worktree's own top
+    /// level, and the repository's canonical root.
+    private static func repositoryRoots(for checkout: String) -> [String] {
+        var roots: [String] = []
+        if let top = GitSnapshot(anyPathInside: checkout)?.repository.path { roots.append(top) }
+        roots.append(ProjectRegistry.canonicalPath(for: checkout))
+        return roots
+    }
+
+    /// Who is acting, the way `say` and `task add` already decide it: the env label,
+    /// then *this checkout's* worktree label, and only then the provider guess.
+    ///
+    /// `task claim`, `watch` and the session baseline asked `defaultAuthor()`
+    /// instead — the provider the environment hints at — so an agent in the worktree
+    /// labelled `hermes` claimed tasks and filed watches as `claude` (or as `you`),
+    /// and the real `claude` could claim the same task without a word of conflict.
+    /// `explicit` (`--as`) goes through `reconcile`, so nobody speaks as a label
+    /// their worktree does not carry.
+    private static func actingLabel(_ arguments: [String], explicit: String?) throws -> String {
+        let resolved = Identity.resolve(
+            cwd: checkoutDirectory(arguments, allowPositional: false),
+            provider: .unknown, paths: Paths.fromEnvironment())
+        let identity = try Identity.reconcile(explicit: explicit, resolved: resolved)
+        // A human at a plain shell resolves to "you"; an agent whose worktree has no
+        // label keeps the provider guess it always had.
+        return identity.source == .human && explicit == nil ? defaultAuthor() : identity.label
+    }
+
     /// Agents run these commands themselves; the label is who to credit.
     /// `GENTLEMERGE_NAME` first, so a subagent can sign with its own name —
     /// see `AgentBus.label(in:)`.
+    /// The running app, if there is one (see `SpoolStore.runningAppPID`).
+    static func runningAppPID(paths: Paths = .fromEnvironment()) -> Int32? {
+        SpoolStore(paths: paths).runningAppPID()
+    }
+
     private static func defaultAuthor() -> String {
         AgentBus.label(in: ProcessInfo.processInfo.environment)
+    }
+
+    /// Who an ownership change is credited to: the acting label, as for `say`
+    /// and `task claim`. `defaultAuthor()` alone credited an agent known by its
+    /// `GENTLEMERGE_LABEL` as `you` (audit 2026-11-01).
+    private static func ownershipAuthor(_ arguments: [String]) -> String {
+        (try? actingLabel(arguments, explicit: nil)) ?? defaultAuthor()
     }
 
     /// Leaves this agent's mark before the command it was actually asked for.
@@ -2482,7 +2701,7 @@ enum CLI {
         to watches: Watches
     ) -> Int32 {
         let words = positional(arguments)
-        guard !words.isEmpty else {
+        guard !words.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             let form: String
             switch kind {
             case .sessionEnd: form = "session-end <session id or agent label>"
@@ -2499,7 +2718,9 @@ enum CLI {
         let scoped = arguments.contains("--global") ? nil : directory
         // Whoever asks is who gets told. `--as` covers the cases the environment
         // cannot see — a wrapper asking on Hermes' behalf, mostly.
-        let owner = value(after: "--as", in: arguments) ?? defaultAuthor()
+        let owner: String
+        do { owner = try actingLabel(arguments, explicit: value(after: "--as", in: arguments)) }
+        catch { FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1 }
 
         // Written by a human or by an agent, and it ends up in somebody else's
         // context: scrubbed here as well as on its way onto the bus.
@@ -2637,16 +2858,21 @@ enum CLI {
             }
 
         case "restore":
-            guard let id = arguments.dropFirst().first,
-                  let reference = git.list().first(where: { $0.id.hasPrefix(id) }) else {
+            guard let id = arguments.dropFirst().first, !id.isEmpty else {
                 FileHandle.standardError.write(Data("usage: gentlemerge snapshot restore <id>\n".utf8))
                 return 64
+            }
+            guard let reference = git.list().first(where: { $0.id.hasPrefix(id) }) else {
+                FileHandle.standardError.write(Data(
+                    "no restore point starts with “\(id)”. `gentlemerge snapshot list` shows them.\n".utf8))
+                return 1
             }
             do {
                 let report = try git.restore(reference)
                 print("Restored “\(reference.label)”: \(report.summary).")
                 for path in report.restored.prefix(20) { print("  ← \(path)") }
                 for path in report.created.prefix(20) { print("  left in place: \(path)") }
+                for path in report.skipped.prefix(20) { print("  skipped (submodule): \(path)") }
                 print("Undo this restore with: gentlemerge snapshot restore \(report.safety.id)")
                 return 0
             } catch {
@@ -2774,7 +3000,8 @@ enum CLI {
           gentlemerge install [options]     install the hook bridge
           gentlemerge uninstall             remove our hooks (yours stay)
           gentlemerge status                what is installed and running
-          gentlemerge config get|set k [v]  knobs without the app: dispatchMode,
+          gentlemerge config get|set k [v]  knobs without the app: allowDispatch,
+                                              dispatchMode,
                                               dispatchDailyBudgetMinutes,
                                               claimsPolicy, retentionDays,
                                               autoLand
@@ -2941,6 +3168,10 @@ enum CLI {
                                             stopped. Lapses after 2h, or when the
                                             session that took it ends
           gentlemerge project init [dir]    create the handoff and point CLAUDE.md at it
+          gentlemerge git-hooks install|uninstall [--project dir]
+                                            the commit gate on its own (project init
+                                            --git-hooks does this and more). Needs
+                                            the verb: bare `git-hooks` prints this
           gentlemerge project adopt-worktrees [dir]
                                             one-shot, for a repository worked in
                                             through git worktrees before they were

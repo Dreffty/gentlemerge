@@ -37,6 +37,23 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
 
     public func contains(_ flag: String) -> Bool { raw.contains(flag) }
 
+    /// Whether a token is a flag (`--urgent`, `-n`) rather than somebody's text.
+    ///
+    /// "Starts with a dash" is not the same thing. Notes and task text are
+    /// ordinary words, and agents write `say "- done: parser"`, `say "-1 on this
+    /// approach"`, `task add "--no-verify is being used"`: all of them were taken
+    /// for flags and dropped, so the command answered with its usage text and the
+    /// note never went out. A flag is one or two dashes and then a name — letters,
+    /// digits, `-`, `_` — with no space in it.
+    public static func looksLikeFlag(_ token: String) -> Bool {
+        if token == "--" { return true }
+        let dashes = token.prefix(while: { $0 == "-" }).count
+        guard (1...2).contains(dashes) else { return false }
+        let name = token.dropFirst(dashes)
+        guard let first = name.first, first.isLetter else { return false }
+        return name.allSatisfy { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+    }
+
     /// The value after the first occurrence of `flag`.
     ///
     /// A following `--something` is another flag, not a value: `--to --global`
@@ -45,7 +62,7 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
     public func value(after flag: String) -> String? {
         guard let index = raw.firstIndex(of: flag), index + 1 < raw.count else { return nil }
         let value = raw[index + 1]
-        return value.hasPrefix("--") ? nil : value
+        return Self.looksLikeFlag(value) ? nil : value
     }
 
     /// Every value given for a flag that may be repeated, such as `--attach`.
@@ -53,7 +70,7 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
         var found: [String] = []
         var index = 0
         while index < raw.count {
-            if raw[index] == flag, index + 1 < raw.count, !raw[index + 1].hasPrefix("--") {
+            if raw[index] == flag, index + 1 < raw.count, !Self.looksLikeFlag(raw[index + 1]) {
                 found.append(raw[index + 1])
                 index += 2
             } else {
@@ -77,10 +94,10 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
                 // with no value left `single == false` downstream and swept every
                 // registered project instead of the named one, with no error
                 // (audit Tier 5 #25).
-                let nextIsValue = index + 1 < raw.count
-                    && !(raw[index + 1].hasPrefix("-") && raw[index + 1].count > 1)
+                let nextIsValue = index + 1 < raw.count && !Self.looksLikeFlag(raw[index + 1])
                 index += nextIsValue ? 2 : 1
-            } else if argument.hasPrefix("-") {
+            } else if Self.looksLikeFlag(argument) || argument == "-" {
+                // A bare "-" is the conventional "standard input" and never somebody's text.
                 index += 1
             } else {
                 result.append(argument)

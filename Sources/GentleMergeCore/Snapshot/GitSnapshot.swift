@@ -20,11 +20,17 @@ public struct RestoreReport: Sendable, Equatable {
     /// The snapshot taken of the current state before restoring, so this is undoable.
     /// Restoring refuses (instead of returning nil here) when it cannot be taken.
     public var safety: SnapshotRef
+    /// Submodules whose recorded commit differs. A snapshot holds their commit id,
+    /// not their files, so there is nothing to write back; they are left as they are.
+    public var skipped: [String] = []
 
     public var summary: String {
         var parts = ["restored \(restored.count) \(restored.count == 1 ? "file" : "files")"]
         if !created.isEmpty {
             parts.append("left \(created.count) new \(created.count == 1 ? "file" : "files") in place")
+        }
+        if !skipped.isEmpty {
+            parts.append("skipped \(skipped.count) \(skipped.count == 1 ? "submodule" : "submodules")")
         }
         return parts.joined(separator: ", ")
     }
@@ -174,28 +180,50 @@ public struct GitSnapshot: Sendable {
 
         var restored: [String] = []
         var created: [String] = []
+        var skipped: [String] = []
+        var plan: [(path: String, kind: Kind, destination: URL)] = []
 
+        // Plan first, write after. Every guard (a symlink in the way, a path
+        // that leaves the checkout) runs before the first byte is written, so a
+        // refusal leaves the tree exactly as it was instead of half restored.
         for entry in Self.parseNameStatus(diff.stdout) {
             guard let first = entry.paths.first else { continue }
             switch entry.status.first {
-            case "M", "T", "D":
-                // Present in the snapshot and different (or missing) now.
-                try writeFromSnapshot(commit: snapshot.commit, path: first)
-                restored.append(first)
-            case "A":
-                created.append(first)
-            case "R", "C":
-                // The snapshot knows the source name; write it back. The
-                // destination is the agent's own file after the rename —
-                // never deleted, reported as created so it reads as what it is.
-                try writeFromSnapshot(commit: snapshot.commit, path: first)
-                restored.append(first)
-                if let destination = entry.paths.last, destination != first,
+            case "M", "T", "D", "R", "C":
+                // Present in the snapshot and different (or missing) now. For a
+                // rename the snapshot knows the source name; the destination is
+                // the agent's own file after the rename — never deleted, reported
+                // as created so it reads as what it is.
+                let kind = try kind(of: first, in: snapshot.commit)
+                if kind == .submodule {
+                    skipped.append(first)
+                } else {
+                    // A link is replaced as a link, so only its parents may be
+                    // links; a file's bytes must never be written through one.
+                    let destination = try resolveWithinRepo(first, allowLinkAtDestination: kind == .symlink)
+                    plan.append((first, kind, destination))
+                    restored.append(first)
+                }
+                if entry.status.first == "R" || entry.status.first == "C",
+                   let destination = entry.paths.last, destination != first,
                    !created.contains(destination) {
                     created.append(destination)
                 }
+            case "A":
+                created.append(first)
             default:
                 continue
+            }
+        }
+
+        for step in plan {
+            do {
+                try write(step.kind, path: step.path, to: step.destination, commit: snapshot.commit)
+            } catch {
+                // Some files are already back; say how to return to the state
+                // this restore started from.
+                throw SnapshotError.git(
+                    "\(error.localizedDescription)\nThe state before this restore is saved: gentlemerge snapshot restore \(safety.id)")
             }
         }
 
@@ -205,40 +233,105 @@ public struct GitSnapshot: Sendable {
         // `d/old.txt` shows up as untracked against the index (the rename is
         // still staged), and reporting it under both "restored" and "left in
         // place" described one file as two (audit 2026-10-08).
-        for line in git(["status", "--porcelain"]).lines where line.hasPrefix("??") {
-            let path = String(line.dropFirst(3))
-            if !restored.contains(path) { created.append(path) }
+        //
+        // `-z` and `--untracked-files=all`: without `-z` git quotes and escapes
+        // names with accents or odd characters, so they never matched the
+        // restored ones; without `all` an untracked directory is one `d/` line
+        // that no restored `d/a.txt` can match.
+        for path in untrackedPaths() where !restored.contains(path) && !created.contains(path) {
+            created.append(path)
         }
 
-        return RestoreReport(restored: restored, created: created.sorted(), safety: safety)
+        return RestoreReport(restored: restored, created: created.sorted(), safety: safety, skipped: skipped)
     }
 
-    private func writeFromSnapshot(commit: String, path: String) throws {
+    private func untrackedPaths() -> [String] {
+        let fields = git(["status", "--porcelain", "-z", "--untracked-files=all"]).stdout.components(separatedBy: "\0")
+        var paths: [String] = []
+        var index = 0
+        while index < fields.count {
+            let entry = fields[index]
+            index += 1
+            guard entry.count > 3 else { continue }
+            if entry.hasPrefix("?? ") {
+                paths.append(String(entry.dropFirst(3)))
+            } else {
+                // A rename or copy carries its source as one more field.
+                let status = Array(entry.prefix(2))
+                if status.contains("R") || status.contains("C") { index += 1 }
+            }
+        }
+        return paths
+    }
+
+    /// What git records for a path: its mode says whether it is a file, an
+    /// executable, a symlink or a submodule.
+    private enum Kind: Equatable {
+        case file(executable: Bool)
+        case symlink
+        case submodule
+    }
+
+    private func kind(of path: String, in commit: String) throws -> Kind {
+        let output = git(["ls-tree", "-z", commit, "--", path])
+        guard output.succeeded else { throw SnapshotError.git(output.text) }
+        let mode = output.stdout.prefix { $0 != " " }
+        switch mode {
+        case "120000": return .symlink
+        case "160000": return .submodule
+        case "100755": return .file(executable: true)
+        default: return .file(executable: false)
+        }
+    }
+
+    private func write(_ kind: Kind, path: String, to destination: URL, commit: String) throws {
         let output = git(["show", "\(commit):\(path)"], timeout: 60)
         guard output.succeeded else { throw SnapshotError.git(output.text) }
 
-        // The bytes must land inside the checkout. A symlink at the
-        // destination — or in any parent directory — would send them
-        // outside the repository, so refuse instead of following it.
-        let destination = try resolveWithinRepo(path)
-        try FileManager.default.createDirectory(
-            at: destination.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try output.stdoutData.write(to: destination)
+        let manager = FileManager.default
+        try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        switch kind {
+        case .symlink:
+            // The blob is the link's target. Replace what is there, never follow
+            // it, and never remove a directory.
+            if let type = try? manager.attributesOfItem(atPath: destination.path)[.type] as? FileAttributeType {
+                guard type == .typeSymbolicLink || type == .typeRegular else {
+                    throw SnapshotError.git("cannot restore the link \(path): something else is in its place.")
+                }
+                try manager.removeItem(at: destination)
+            }
+            try manager.createSymbolicLink(
+                atPath: destination.path,
+                withDestinationPath: String(decoding: output.stdoutData, as: UTF8.self))
+
+        case .file(let executable):
+            try output.stdoutData.write(to: destination)
+            // Git records only the executable bit. A file written back fresh
+            // came out 0644 — a restored script that no longer runs.
+            let current = (try manager.attributesOfItem(atPath: destination.path)[.posixPermissions] as? Int) ?? 0o644
+            let wanted = executable ? current | 0o111 : current & ~0o111
+            if wanted != current {
+                try manager.setAttributes([.posixPermissions: wanted], ofItemAtPath: destination.path)
+            }
+
+        case .submodule:
+            break
+        }
     }
 
     /// Every component of `path` must resolve inside the repository, and
     /// none of them may be a symlink. Git paths are relative, so an
     /// absolute path or a `..` is a refusal, not a puzzle.
-    private func resolveWithinRepo(_ path: String) throws -> URL {
+    private func resolveWithinRepo(_ path: String, allowLinkAtDestination: Bool = false) throws -> URL {
         let components = path.split(separator: "/").map(String.init)
         guard !path.hasPrefix("/"), !components.contains(".."), !components.isEmpty else {
             throw SnapshotError.refusesSymlink(path)
         }
         var current = repository.standardized
-        for component in components {
+        for (offset, component) in components.enumerated() {
             current.appendPathComponent(component)
+            if allowLinkAtDestination, offset == components.count - 1 { break }
             if (try? FileManager.default.destinationOfSymbolicLink(atPath: current.path)) != nil {
                 throw SnapshotError.refusesSymlink(path)
             }

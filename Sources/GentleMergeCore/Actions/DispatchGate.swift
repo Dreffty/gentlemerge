@@ -23,6 +23,11 @@ public enum DispatchGate {
             return .skip(reason: "quiet period for \(to)")
         }
         switch config.dispatchMode {
+        case "off":
+            // A mode the CLI, the Settings picker and the docs all offer fell into
+            // the default branch below and was logged as "unknown dispatch mode
+            // \"off\" — want off, …" for every request.
+            return .skip(reason: "dispatch mode is off")
         case "strict":
             // Only human-created requests move on their own; an agent-made one
             // waits in the app's approvals. Delegation chains stop here.

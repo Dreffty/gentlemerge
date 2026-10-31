@@ -98,9 +98,7 @@ public struct Doctor: Sendable {
         // return 0 (it reports success for "any process may be signalled") and
         // printed "running (pid -1)"; `0` signals the caller's own process group
         // (audit Tier 5 #30).
-        if let pid = try? String(contentsOf: paths.appPID, encoding: .utf8)
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            let value = Int32(pid), value > 0, kill(value, 0) == 0 {
+        if let value = SpoolStore(paths: paths).runningAppPID() {
             return Check(name: "app", level: .ok, detail: "running (pid \(value))")
         }
         return Check(name: "app", level: .ok, detail: "not running — the CLI works without it")

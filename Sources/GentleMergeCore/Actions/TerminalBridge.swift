@@ -1,4 +1,7 @@
 import Foundation
+#if os(macOS)
+import AppKit
+#endif
 
 /// Finds the terminal a session is running in and, when the terminal has a
 /// scripting interface, drives it: focus the exact tab, or type an answer into
@@ -31,7 +34,7 @@ public struct TerminalBridge: Sendable {
             return activateApp(named: terminalProgram) ? .appActivatedOnly : .notFound
         }
 
-        for app in ScriptableTerminal.candidates(for: terminalProgram) {
+        for app in ScriptableTerminal.running(for: terminalProgram) {
             switch run(app.focusScript(tty: tty)) {
             case .success(let output) where output.contains("ok"):
                 return .focused
@@ -70,7 +73,7 @@ public struct TerminalBridge: Sendable {
             return .unsupported("This session did not report a terminal, so there is nothing to type into.")
         }
 
-        for app in ScriptableTerminal.candidates(for: terminalProgram) {
+        for app in ScriptableTerminal.running(for: terminalProgram) {
             switch run(app.sendScript(tty: tty, text: line)) {
             case .success(let output) where output.contains("ok"):
                 return .sent
@@ -92,11 +95,15 @@ public struct TerminalBridge: Sendable {
     #if os(macOS)
     // MARK: - Plumbing
 
+    /// Brings forward an app that is already running. It used to run
+    /// `tell application "<TERM_PROGRAM>" to activate`, and AppleScript launches
+    /// whatever it is told to talk to — or, for a name that is not installed
+    /// (`vscode`, `ghostty`), puts up a "Where is vscode?" file dialog.
     private func activateApp(named name: String?) -> Bool {
-        guard let name = name?.nonEmpty else { return false }
-        let script = "tell application \"\(ScriptableTerminal.applicationName(for: name))\" to activate"
-        if case .success = run(script) { return true }
-        return false
+        guard let name = name?.nonEmpty, let app = ScriptableTerminal.runningApplication(named: name) else {
+            return false
+        }
+        return app.activate()
     }
 
     enum ScriptResult {
@@ -211,6 +218,58 @@ enum ScriptableTerminal: Sendable {
         }
         if termProgram.contains("iterm") { return all }
         return all
+    }
+
+    /// The candidates that are open right now, and under the name their app bundle
+    /// really has. `tell application "iTerm2"` starts iTerm2 when it is closed
+    /// and asks "Where is iTerm2?" when it is not installed, so a session in VS
+    /// Code or Ghostty — which have no tty scripting — used to open or ask for
+    /// every terminal on the list before giving up. An app that is not running
+    /// has no session to focus or type into anyway.
+    static func running(for termProgram: String?) -> [ScriptableTerminal] {
+        var found: [ScriptableTerminal] = []
+        for candidate in candidates(for: termProgram) {
+            switch candidate {
+            case .appleTerminal:
+                if !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Terminal").isEmpty {
+                    found.append(candidate)
+                }
+            case .iTerm:
+                // "iTerm" and "iTerm2" are two names for one bundle: ask once, by
+                // the name of the .app that is actually open.
+                let alreadyThere = found.contains { if case .iTerm = $0 { return true } else { return false } }
+                if !alreadyThere,
+                   let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.googlecode.iterm2").first {
+                    let name = app.bundleURL?.deletingPathExtension().lastPathComponent ?? "iTerm2"
+                    found.append(.iTerm(name: name))
+                }
+            }
+        }
+        return found
+    }
+
+    /// The running app a `TERM_PROGRAM` value stands for, matched by bundle id for
+    /// the common ones and otherwise by the name of the app. Nil when it is not open.
+    static func runningApplication(named termProgram: String) -> NSRunningApplication? {
+        let wanted = applicationName(for: termProgram).lowercased().replacingOccurrences(of: " ", with: "")
+        let bundles: [String: [String]] = [
+            "vscode": ["com.microsoft.VSCode", "com.microsoft.VSCodeInsiders", "com.todesktop.230313mzl4w4u92"],
+            "ghostty": ["com.mitchellh.ghostty"],
+            "warpterminal": ["dev.warp.Warp-Stable"],
+            "hyper": ["co.zeit.hyper"],
+            "wezterm": ["com.github.wez.wezterm"],
+            "alacritty": ["org.alacritty"],
+            "kitty": ["net.kovidgoyal.kitty"],
+            "terminal": ["com.apple.Terminal"],
+            "iterm2": ["com.googlecode.iterm2"],
+        ]
+        for identifier in bundles[wanted] ?? [] {
+            if let app = NSRunningApplication.runningApplications(withBundleIdentifier: identifier).first { return app }
+        }
+        return NSWorkspace.shared.runningApplications.first { app in
+            let names = [app.localizedName, app.bundleURL?.deletingPathExtension().lastPathComponent]
+            return names.contains { ($0 ?? "").lowercased().replacingOccurrences(of: " ", with: "") == wanted }
+        }
     }
 
     func focusScript(tty: String) -> String {

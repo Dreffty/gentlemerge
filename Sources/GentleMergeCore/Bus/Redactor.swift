@@ -82,7 +82,9 @@ public enum Redactor {
         // base64 run of 20+ characters is required, so naming the header in
         // prose ("I found a -----BEGIN RSA PRIVATE KEY----- in config") is not
         // a key and is not redacted: there is nothing there to leak.
-        (.privateKey, #"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|-----BEGIN [A-Z ]*PRIVATE KEY-----(?:\s*[A-Za-z0-9+/=]{20,})+"#),
+        // `PRIVATE KEY BLOCK` is how PGP writes it; the header without the word
+        // BLOCK is everything else, and left a PGP key standing in full.
+        (.privateKey, #"-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:\s*[A-Za-z0-9+/=]{20,})+"#),
         (.jwt, #"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}"#),
         // An incoming webhook URL *is* the credential: anyone holding it can
         // post as you. Before the key rule so the URL is reported as what it
@@ -92,7 +94,11 @@ public enum Redactor {
         // client secret (`GOCSPX-`) or the access token (`ya29.`) that come
         // with it in every token file — only the JSON form was, because the
         // `client_secret` name gives it away (audit 2026-10-26).
-        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,})"#),
+        (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,}|whsec_[A-Za-z0-9]{20,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|sbp_[A-Za-z0-9]{30,}|nfp_[A-Za-z0-9]{16,}|shp(?:at|ca|pa|ss)_[A-Fa-f0-9]{32}|gsk_[A-Za-z0-9]{20,}|figd_[A-Za-z0-9_-]{20,}|dop_v1_[a-f0-9]{40,}|lin_api_[A-Za-z0-9]{20,})"#),
+        // A Telegram bot token is `<bot id>:<secret>`. The id is eight to ten
+        // digits, so the long-number rule took the id and left the half that is
+        // the actual secret sitting in the note: `[redacted number]:AAH…`.
+        (.apiKey, #"\b\d{8,10}:[A-Za-z0-9_-]{30,45}(?![A-Za-z0-9_-])"#),
         // An AWS secret access key: 40 characters of base64 with no prefix to
         // recognise it by. What tells it from everything else that shares the
         // alphabet:
@@ -114,13 +120,22 @@ public enum Redactor {
         // - **It has a digit and a capital**, which a random key nearly always
         //   does and a stretch of English or of a directory name rarely does.
         (.apiKey, #"(?<![A-Za-z0-9+/._~-])(?!/)(?=[A-Za-z0-9+/]{0,39}[+/])(?=[A-Za-z0-9+/]{0,39}[0-9])(?=[A-Za-z0-9+/]{0,39}[A-Z])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/_~-])(?!\.[A-Za-z0-9])"#),
-        (.credentialsInURL, #"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/@:]+:[^\s/@]+@"#),
-        (.email, #"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"#),
+        // Every run in these two is bounded (audit 2026-11-01). Unbounded, each
+        // word boundary in `a-a-a-…` or `a.a.a.…` started a scan to the end of
+        // the text before failing, so the cost grew with the square of the
+        // length: 40 KB took a second or two, and a 2 MB attachment never
+        // finished. No scheme is longer than 30 characters and no mailbox name
+        // than 64, so the bounds cost nothing that was ever a match. Both also
+        // start only where a run of their characters starts, not at every `\b`
+        // inside one: bounded but starting everywhere, the email rule still took
+        // four seconds over 400 KB of `a.a.a.`.
+        (.credentialsInURL, #"(?<![a-zA-Z0-9+.-])[a-zA-Z][a-zA-Z0-9+.-]{0,30}://[^\s/@:]{1,256}:[^\s/@]{1,256}@"#),
+        (.email, #"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,255}\.[A-Za-z]{2,24}\b"#),
         // IBAN before card: "ES91 2100 0418 4502 0005 1332" is an account, not
         // four card groups, and shredding it as a card leaves the country
         // prefix plus the check digits behind.
         (.iban, #"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){3,7}\b"#),
-        (.card, #"\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{2,4}\b"#),
+        (.card, #"\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{2,4}\b|\b\d{4}[ -]\d{6}[ -]\d{4,5}\b"#),
         // Short numbers are line numbers, ports and versions. Long runs are
         // phone numbers, document ids and account numbers.
         (.longNumber, #"\b\d{7,}\b"#),
@@ -145,12 +160,47 @@ public enum Redactor {
     ///   now snake_case/kebab segments (`DB_PASSWORD`, `api-key` still match),
     ///   and a letter or digit may not sit immediately before or after the
     ///   keyword.
+    ///
+    /// Audit 2026-11-01, three more:
+    ///
+    /// - **The name may go on after the keyword** — but only with the tails
+    ///   that still name a secret (`_KEY`, `_BASE`, `_VALUE`…). `SECRET_KEY`
+    ///   (Django), `SECRET_KEY_BASE` (Rails) and `JWT_SECRET_KEY` all have the
+    ///   keyword in the middle and were not matched; `secret_name` and
+    ///   `token_count` still are not. `PGPASSWORD` and `MYSQL_PWD` are the
+    ///   database clients' own spellings.
+    /// - **The value had a ceiling of 200 characters**, and what lay past it
+    ///   was left in the note: a 600-character bearer token came back as
+    ///   `[redacted]` followed by its last 400 characters, signature
+    ///   included. The ceiling is gone for a bare value and raised for a
+    ///   quoted one (which still stops at its closing quote or the line end).
+    /// - **The name, on the other hand, is bounded**: at most six segments of
+    ///   forty characters before the keyword. Unbounded, every boundary in a
+    ///   long run of `a-a-a-…` re-scanned the rest of the run, and 40 KB of
+    ///   kebab-case took 25 seconds; a 2 MB attachment hung `say`.
     private static let assignment =
-        #"(?i)\b((?:[A-Za-z0-9]+[_-])*(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key))(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?:"[^"\n]{1,200}"|'[^'\n]{1,200}'|[^\s,;)\]}]{3,200})"#
+        #"(?i)\b((?:[A-Za-z0-9]{1,40}[_-]){0,6}(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key|pgpassword|(?<=[_-])pwd)(?:[_-](?:key|base|value|string|phrase)){0,3})(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s,;)\]}]{3,})"#
+
+    /// A secret handed to a program on its command line. The name gives it
+    /// away here too, but the separator is a space, which `assignment` does
+    /// not read: `mysql --password hunter2` and `curl -u admin:s3cret` went to
+    /// the other agents as typed. `-u` means a user only on a command that
+    /// takes `user:password` (curl, wget, httpie) and only with a colon after
+    /// a name that starts with a letter: the first version of this rule ate
+    /// `date -u +%H:%M:%S` and `${RANDOM:-0}` out of this repository's own
+    /// shell script, and would eat docker's `-u 1000:1000`. `mysql -pSECRET`,
+    /// with no space and a flag that `mkdir -p` shares, is deliberately left
+    /// alone.
+    private static let commandLineSecrets: [String] = [
+        #"(?i)(?<![A-Za-z0-9-])(--(?:password|passwd|pass|passphrase|token|secret|client-secret|api-?key|access-?key|auth-?token|private-?key))[ =]\s*(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|(?![-<$])[^\s,;)\]}]{3,})"#,
+        #"(\b(?:curl|wget|http|https|xh)\b[^\n]{0,300}?\s(?:-u|--user)[ =][A-Za-z][A-Za-z0-9._-]{0,64}):[^\s]{3,}"#,
+    ]
 
     /// Every pattern, so a test can prove they all compile. A rule that does
     /// not compile is skipped at runtime, and skipping is invisible.
-    static var allPatterns: [(Kind, String)] { [(.assignedSecret, assignment)] + rules }
+    static var allPatterns: [(Kind, String)] {
+        [(.assignedSecret, assignment)] + commandLineSecrets.map { (.assignedSecret, $0) } + rules
+    }
 
     // MARK: - Compiled once
 
@@ -166,6 +216,14 @@ public enum Redactor {
         }
         return regex
     }()
+
+    private static let compiledCommandLine: [NSRegularExpression] = commandLineSecrets.compactMap { pattern in
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            Log.error("redaction rule for command-line secrets does not compile — it is NOT filtering")
+            return nil
+        }
+        return regex
+    }
 
     private static let compiledRules: [(Kind, NSRegularExpression)] = {
         var compiled: [(Kind, NSRegularExpression)] = []
@@ -192,6 +250,52 @@ public enum Redactor {
         return compiledANSI.stringByReplacingMatches(in: text, range: range, withTemplate: "")
     }
 
+    // MARK: - Long numbers that are not secrets
+
+    /// Whether a run of seven or more digits is a number worth hiding.
+    ///
+    /// The rule is deliberately broad — phone numbers, document and account ids — and
+    /// two ordinary things in an agent's notes hit it by accident, each costing the
+    /// reader something real:
+    ///
+    /// - **A file path.** `/backups/20261026/log.txt`, a session id used as a folder
+    ///   name, a timestamped file: the path came back as `/backups/[redacted number]/…`
+    ///   and pointed at nothing, which breaks an attachment's pointer and a task that
+    ///   names the folder. Inside a token that is a file path (starts with `/`, `./`,
+    ///   `../` or `~/`, and is not a URL) a digit run is a name, not an account.
+    /// - **A date written `YYYYMMDD`** (`build 20261026`, `release-20261026`): a valid
+    ///   calendar date is not an identifier of a person.
+    ///
+    /// Anything else of that length is still redacted, `account 21452098` included.
+    static func isWorthRedactingAsANumber(in text: String, at range: Range<String.Index>) -> Bool {
+        let digits = text[range]
+        if digits.count == 8, isCalendarDate(String(digits)) { return false }
+
+        let separators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"'`(),;<>[]{}"))
+        var start = range.lowerBound
+        while start > text.startIndex {
+            let before = text.index(before: start)
+            if text[before].unicodeScalars.allSatisfy(separators.contains) { break }
+            start = before
+        }
+        let token = text[start..<range.lowerBound]
+        guard token.hasPrefix("/") || token.hasPrefix("./") || token.hasPrefix("../") || token.hasPrefix("~/") else {
+            return true
+        }
+        var end = range.upperBound
+        while end < text.endIndex, !text[end].unicodeScalars.allSatisfy(separators.contains) {
+            end = text.index(after: end)
+        }
+        return text[start..<end].contains("://")
+    }
+
+    private static func isCalendarDate(_ digits: String) -> Bool {
+        guard digits.count == 8, let year = Int(digits.prefix(4)), (1900...2099).contains(year),
+              let month = Int(digits.dropFirst(4).prefix(2)), (1...12).contains(month),
+              let day = Int(digits.suffix(2)), (1...31).contains(day) else { return false }
+        return true
+    }
+
     // MARK: - Scrubbing
 
     public static func scrub(_ text: String) -> Result {
@@ -201,7 +305,10 @@ public enum Redactor {
         var kinds: [Kind] = []
         var redactedCharacters = 0
 
-        func apply(_ kind: Kind, _ regex: NSRegularExpression?, keepingPrefix: Bool = false) {
+        func apply(
+            _ kind: Kind, _ regex: NSRegularExpression?, keepingPrefix: Bool = false,
+            where shouldRedact: ((String, Range<String.Index>) -> Bool)? = nil
+        ) {
             guard let regex else {
                 // Failing open here would leak exactly what this exists to stop.
                 // (The missing compile is already logged where the cache built.)
@@ -213,6 +320,7 @@ public enum Redactor {
 
             for match in matches.reversed() {
                 guard let matchRange = Range(match.range, in: working) else { continue }
+                if let shouldRedact, !shouldRedact(working, matchRange) { continue }
                 let original = String(working[matchRange])
                 var replacement = kind.placeholder
 
@@ -229,7 +337,14 @@ public enum Redactor {
         }
 
         apply(.assignedSecret, compiledAssignment, keepingPrefix: true)
-        for (kind, regex) in compiledRules { apply(kind, regex) }
+        for regex in compiledCommandLine { apply(.assignedSecret, regex, keepingPrefix: true) }
+        for (kind, regex) in compiledRules {
+            if kind == .longNumber {
+                apply(kind, regex, where: { text, range in Self.isWorthRedactingAsANumber(in: text, at: range) })
+            } else {
+                apply(kind, regex)
+            }
+        }
 
         // If most of it was secret, the leftovers are not worth sharing: they
         // are the shape of the secret with the secret taken out.

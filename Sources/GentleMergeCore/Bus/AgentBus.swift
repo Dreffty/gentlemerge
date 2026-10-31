@@ -39,6 +39,12 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
     /// activities written before we kept it decode fine, and a binary that
     /// predates it ignores the key.
     public var socketPath: String?
+    /// The label this agent goes by (the worktree's, or the one on its presence
+    /// mark) — what `say --to` routes by. The provider alone cannot say it: a
+    /// Hermes, a Gemini and an OpenCode are all "an agent", and the briefing listed
+    /// every one of them as "Agent · <project>", so nobody reading it knew whom to
+    /// address. nil for an activity recorded before labels were kept.
+    public var label: String?
 
     /// `lastEvent` for a session the sweep buried. One word, because it is also
     /// what the presentation matches on.
@@ -56,7 +62,8 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         pid: Int? = nil,
         tty: String? = nil,
         terminalProgram: String? = nil,
-        socketPath: String? = nil
+        socketPath: String? = nil,
+        label: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -70,6 +77,16 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         self.tty = tty
         self.terminalProgram = terminalProgram
         self.socketPath = socketPath
+        self.label = label
+    }
+
+    /// How to name this agent to a person or to another agent: its label when that
+    /// says more than the provider does, the provider's name otherwise.
+    public var displayName: String {
+        guard let label, !label.isEmpty, label != AgentBus.label(for: provider) else {
+            return provider.displayName
+        }
+        return provider == .unknown ? label : "\(provider.displayName) (\(label))"
     }
 
     public var projectName: String {
@@ -118,7 +135,7 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
 
     /// One line for another agent to read.
     public func briefingLine(now: Date = Date()) -> String {
-        var line = "- \(provider.displayName) · \(projectName)"
+        var line = "- \(displayName) · \(projectName)"
         if let currentTask, !currentTask.isEmpty {
             line += " — “\(BriefingRenderer.quote(currentTask))”"
         } else if let lastEvent, !lastEvent.isEmpty, !diedUncleanly {
@@ -550,7 +567,7 @@ public struct AgentBus: Sendable {
             verified: verified,
             requestID: requestID
         )
-        let result = post(message)
+        let result = try send(message)
         if result.isSuppressed { throw RequestError.suppressed }
         return result
     }
@@ -568,6 +585,12 @@ public struct AgentBus: Sendable {
         budgetMinutes: Int
     ) throws -> AgentRequest {
         guard (1...1440).contains(budgetMinutes) else { throw RequestError.invalidBudget }
+        // Recorded the way a claim is: relative to the repository, so the contract
+        // an agent writes with an absolute path is the one the gate then enforces.
+        let mayTouch = mayTouch
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { Glob.relativize($0, roots: [projectPath]) }
         let combined = Redactor.scrub(title + "\n" + spec)
         guard !combined.isSuppressed else { throw RequestError.suppressed }
 
@@ -708,8 +731,27 @@ public struct AgentBus: Sendable {
         }.first?.label
     }
 
+    /// Fire-and-forget: a note that could not be written is logged, not thrown.
+    /// For the callers that have no one to tell (the app, a landing's broadcast).
+    /// Anything that answers a person — `say`, the MCP tool — uses `send`.
     @discardableResult
     public func post(_ message: AgentMessage) -> Redactor.Result {
+        do {
+            return try send(message)
+        } catch {
+            Log.error("could not post message: \(error.localizedDescription)")
+            return Redactor.scrub(message.text)
+        }
+    }
+
+    /// `post` that says so when the note did not land.
+    ///
+    /// `say` printed "Sent as #…" and exited 0 with a read-only home, a full disk
+    /// or a log that had become a directory, because the write error stopped at a
+    /// log line and the redaction result was returned as if all had gone well.
+    /// The sender is an agent about to carry on believing the others were told.
+    @discardableResult
+    public func send(_ message: AgentMessage) throws -> Redactor.Result {
         var message = message
         let result = Redactor.scrub(message.text)
 
@@ -774,7 +816,9 @@ public struct AgentBus: Sendable {
                 let counterData = try JSONCoding.encoder().encode(["last": next])
                 try AtomicFile.write(counterData, to: paths.messageSequence)
                 let data = try JSONCoding.encoder().encode(message)
-                guard let line = String(data: data, encoding: .utf8) else { return }
+                guard let line = String(data: data, encoding: .utf8) else {
+                    throw LockedFile.Error(path: paths.messages.path, code: EILSEQ)
+                }
                 // Raw O_APPEND write while holding the sidecar lock (not
                 // AtomicFile.append, which would take the same lock again).
                 let url = paths.messages
@@ -803,8 +847,6 @@ public struct AgentBus: Sendable {
                     }
                 }
             }
-        } catch {
-            Log.error("could not post message: \(error.localizedDescription)")
         }
         return result
     }

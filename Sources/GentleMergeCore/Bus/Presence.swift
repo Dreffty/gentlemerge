@@ -325,7 +325,8 @@ public enum Presence {
                 updatedAt: mark.updatedAt,
                 currentTask: mark.task ?? mark.branch.map { "on \($0)" },
                 state: .working,
-                pid: mark.pid
+                pid: mark.pid,
+                label: mark.label
             )
         }
     }

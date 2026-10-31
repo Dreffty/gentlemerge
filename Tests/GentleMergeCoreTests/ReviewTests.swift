@@ -32,6 +32,7 @@ final class ReviewTests: XCTestCase {
 
     func testASwiftPackageKnowsHowToCheckItself() throws {
         try write("Package.swift", "// swift-tools-version: 6.0")
+        try write("Tests/AppTests/AppTests.swift", "import XCTest")
         let checks = ProjectChecks.checks(for: project)
 
         XCTAssertEqual(checks.map(\.name), ["swift build", "swift test"])
@@ -82,6 +83,32 @@ final class ReviewTests: XCTestCase {
         XCTAssertEqual(checks.map(\.name), ["house rules"])
     }
 
+    /// `swift test` in a package with no tests exits 1 — a failing check for a project
+    /// that has nothing wrong with it.
+    func testASwiftPackageWithoutTestsIsNotAskedToRunThem() throws {
+        try write("Package.swift", "// swift-tools-version: 6.0")
+        XCTAssertEqual(ProjectChecks.checks(for: project).map(\.command), ["swift build"])
+
+        try write("Package.swift", "// swift-tools-version: 6.0\n.testTarget(name: \"AppTests\")")
+        XCTAssertEqual(ProjectChecks.checks(for: project).map(\.command), ["swift build", "swift test"])
+    }
+
+    func testATestRunThatFoundNoTestsIsSkippedNotFailed() throws {
+        let check = Check(
+            name: "tests", command: "echo 'error: no tests found; create a target' >&2; exit 1", kind: .test)
+        let result = try XCTUnwrap(ProjectChecks.run([check], in: project).first)
+        XCTAssertEqual(result.status, .skipped)
+        XCTAssertEqual(result.skipReason, "no tests found")
+
+        for phrase in ["no tests ran in 0.01s", "No test files found, exiting with code 1", "No tests found, exiting with code 1"] {
+            let runner = Check(name: "t", command: "echo '\(phrase)'; exit 1", kind: .test)
+            XCTAssertEqual(ProjectChecks.run([runner], in: project).first?.status, .skipped, phrase)
+        }
+
+        let real = Check(name: "t", command: "echo 'assertion failed' >&2; exit 1", kind: .test)
+        XCTAssertEqual(ProjectChecks.run([real], in: project).first?.status, .failed)
+    }
+
     func testMakefileTestTargetIsFound() throws {
         try write("Makefile", "build:\n\tswift build\n\ntest:\n\tswift test\n")
         XCTAssertEqual(ProjectChecks.makefileTarget(in: project), "test")
@@ -90,6 +117,7 @@ final class ReviewTests: XCTestCase {
 
     func testTheMakefileDoesNotDuplicateTestsWeAlreadyFound() throws {
         try write("Package.swift", "// swift-tools-version: 6.0")
+        try write("Tests/AppTests/AppTests.swift", "import XCTest")
         try write("Makefile", "test:\n\tswift test\n")
 
         // `make test` here is the same run as `swift test`; running both is

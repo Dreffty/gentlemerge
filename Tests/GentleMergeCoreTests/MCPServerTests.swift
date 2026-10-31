@@ -60,7 +60,8 @@ final class MCPServerTests: XCTestCase {
     func testClaimReleaseAndPresence() throws {
         XCTAssertTrue(text(try call("claim", ["paths": .array([.string("assets/**")])])).contains("claimed"))
         XCTAssertEqual(PathClaims(paths: paths).live(project: project.path).count, 1)
-        XCTAssertEqual(text(try call("release")), "released")
+        XCTAssertTrue(text(try call("release")).hasPrefix("Released every claim"), "it must say what it released")
+        XCTAssertTrue(text(try call("release")).hasPrefix("Nothing to release"), "and that there was nothing the second time")
         XCTAssertTrue(PathClaims(paths: paths).live(project: project.path).isEmpty)
         XCTAssertEqual(text(try call("presence", ["capabilities": .array([.string("art")])])), "ok")
         XCTAssertEqual(Presence.labels(withCapability: "art", project: project.path, paths: paths), ["a"])
