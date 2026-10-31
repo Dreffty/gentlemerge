@@ -113,6 +113,66 @@ final class AtomicFileTests: XCTestCase {
         XCTAssertEqual(second, Self.payload(2), "rename must replace, not merge or append")
     }
 
+    // MARK: - What the destination already is
+
+    private func mode(_ url: URL) throws -> Int {
+        try XCTUnwrap(FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int)
+    }
+
+    /// `project init` turned `CLAUDE.md -> AGENTS.md` into two files.
+    func testASymlinkIsWrittenThroughNotReplaced() throws {
+        let real = root.appendingPathComponent("AGENTS.md")
+        let link = root.appendingPathComponent("CLAUDE.md")
+        try Data("old\n".utf8).write(to: real)
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "AGENTS.md")
+
+        try AtomicFile.write(Data("new\n".utf8), to: link)
+
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: link.path), "AGENTS.md")
+        XCTAssertEqual(try String(contentsOf: real, encoding: .utf8), "new\n")
+    }
+
+    func testAChainOfSymlinksAndADanglingOneAreFollowed() throws {
+        let real = root.appendingPathComponent("target.txt")
+        let middle = root.appendingPathComponent("middle")
+        let outer = root.appendingPathComponent("outer")
+        try FileManager.default.createSymbolicLink(atPath: middle.path, withDestinationPath: "target.txt")
+        try FileManager.default.createSymbolicLink(atPath: outer.path, withDestinationPath: middle.path)
+
+        try AtomicFile.write(Data("x".utf8), to: outer)   // target.txt does not exist yet
+
+        XCTAssertEqual(try String(contentsOf: real, encoding: .utf8), "x")
+        XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: outer.path))
+    }
+
+    func testAnExistingFileKeepsItsPermissions() throws {
+        let script = root.appendingPathComponent("run.sh")
+        let secret = root.appendingPathComponent("secret.json")
+        try Data("a".utf8).write(to: script)
+        try Data("a".utf8).write(to: secret)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secret.path)
+
+        try AtomicFile.write(Data("b".utf8), to: script)
+        try AtomicFile.write(Data("b".utf8), to: secret)
+
+        XCTAssertEqual(try mode(script), 0o755, "a rewritten script stopped being executable")
+        XCTAssertEqual(try mode(secret), 0o600, "a private file became readable by everyone")
+    }
+
+    func testAReadOnlyFileIsRefusedNotReplaced() throws {
+        let url = root.appendingPathComponent("locked.md")
+        try Data("mine".utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: url.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path) }
+
+        XCTAssertThrowsError(try AtomicFile.write(Data("theirs".utf8), to: url))
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "mine")
+        XCTAssertEqual(try mode(url), 0o444)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix(".tmp-") }, [],
+                       "a refused write must not leave its temporary file behind")
+    }
+
     /// A plain thread-safe counter: `@MainActor` or locks would serialise the
     /// very thing under test.
     private final class Counter: @unchecked Sendable {

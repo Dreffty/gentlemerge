@@ -38,12 +38,13 @@ public enum JSONCoding {
 /// on it would point at an orphaned inode and the writes would vanish. The
 /// sidecar keeps its identity across those rewrites, which is the whole point.
 public enum LockedFile {
-    public struct Error: Swift.Error, CustomStringConvertible {
+    public struct Error: Swift.Error, LocalizedError, CustomStringConvertible {
         public let path: String
         public let code: Int32
         public var description: String {
             "could not lock \(path): \(String(cString: strerror(code)))"
         }
+        public var errorDescription: String? { description }
     }
 
     /// Run `body` with an exclusive hold on `url`. Blocks until the lock is
@@ -94,12 +95,15 @@ public enum LockedFile {
 }
 
 public enum AtomicFile {
-    public struct Error: Swift.Error, CustomStringConvertible {
+    public struct Error: Swift.Error, LocalizedError, CustomStringConvertible {
         public let path: String
         public let code: Int32
         public var description: String {
             "could not write \(path): \(String(cString: strerror(code)))"
         }
+        /// Without this `localizedDescription` is "The operation couldn't be completed.
+        /// (GentleMergeCore.AtomicFile.Error error 1.)" wherever a command prints it.
+        public var errorDescription: String? { description }
     }
 
     /// Write via a sibling temp file + `rename(2)`, so a reader (or a shell
@@ -117,11 +121,29 @@ public enum AtomicFile {
     /// 2026-10-07). The second writer in that race also lost: `moveItem` threw
     /// "file exists", destroying the previous content and leaking its temp file
     /// (4125 orphans in 3s on the cursor).
-    public static func write(_ data: Data, to url: URL) throws {
+    public static func write(_ data: Data, to requested: URL) throws {
+        // A symlink is written *through*. `rename` onto the link replaced it with a
+        // regular file, so `CLAUDE.md -> AGENTS.md` stopped being a link the first
+        // time anything here touched it.
+        let url = resolvingLink(at: requested)
+        let manager = FileManager.default
         let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+
+        // What the file already is: its permission bits come along, and a file its
+        // owner made read-only is refused, as a plain write would refuse it —
+        // renaming over it got around both. A file that is not there yet gets the
+        // default, as before.
+        let existing = try? manager.attributesOfItem(atPath: url.path)
+        if existing != nil, !manager.isWritableFile(atPath: url.path) {
+            throw Error(path: requested.path, code: EACCES)
+        }
+
         let temporary = directory.appendingPathComponent(".tmp-\(UUID().uuidString)")
         try data.write(to: temporary)
+        if let mode = (existing?[.posixPermissions] as? NSNumber)?.uint16Value {
+            chmod(temporary.path, mode_t(mode))
+        }
         guard rename(temporary.path, url.path) == 0 else {
             // Never leave the temp behind: there is no sweeper for these.
             let code = errno
@@ -140,6 +162,22 @@ public enum AtomicFile {
     /// exactly what the old seek-then-write did, and why `messages.jsonl` has
     /// spliced lines in it. `flock` on the data file itself is the belt to
     /// that braces, and the one another tool could honour.
+    /// Follows a symlink at the end of `url` (a few levels, relative targets
+    /// against the link's own directory). A link that loops or cannot be read
+    /// is left as it is.
+    static func resolvingLink(at url: URL) -> URL {
+        var current = url
+        for _ in 0..<16 {
+            guard let target = try? FileManager.default.destinationOfSymbolicLink(atPath: current.path) else {
+                return current
+            }
+            current = target.hasPrefix("/")
+                ? URL(fileURLWithPath: target)
+                : current.deletingLastPathComponent().appendingPathComponent(target).standardized
+        }
+        return url
+    }
+
     public static func append(_ line: String, to url: URL) throws {
         let data = Data((line + "\n").utf8)
 

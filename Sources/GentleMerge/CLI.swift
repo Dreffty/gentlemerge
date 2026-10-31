@@ -1019,11 +1019,15 @@ enum CLI {
         case "init":
             let directory = checkoutDirectory(Array(arguments.dropFirst()))
             do {
-                let handoff = try ProjectRegistry.initialize(projectPath: directory)
+                let (handoff, skipped) = try ProjectRegistry.initializeReportingSkips(projectPath: directory)
                 var registry = ProjectRegistry(url: Paths.fromEnvironment().projects)
                 registry.seen(path: directory, provider: nil, at: Date())
                 print("Handoff ready: \(ProjectHandoff.fileURL(for: handoff.projectPath).path)")
-                print("Pointed CLAUDE.md / AGENTS.md at it where they exist.")
+                print("Pointed CLAUDE.md / AGENTS.md at it where they exist"
+                    + (skipped.isEmpty ? "." : ", except:"))
+                for file in skipped {
+                    print("  left \(file.name) alone: \(file.reason). Add a line pointing at .gentlemerge/HANDOFF.md yourself.")
+                }
                 // Generated per-worktree ports stay out of git; the ports
                 // module owns that ignore line, not the Core init.
                 WorktreeEnv.ensureGitignore(projectPath: directory)

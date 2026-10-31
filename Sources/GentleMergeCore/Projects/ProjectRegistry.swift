@@ -667,6 +667,22 @@ public struct ProjectRegistry: Sendable {
     /// it. Idempotent: running it twice changes nothing.
     @discardableResult
     public static func initialize(projectPath: String, instructionFiles: [String] = ["CLAUDE.md", "AGENTS.md"]) throws -> ProjectHandoff {
+        try initializeReportingSkips(projectPath: projectPath, instructionFiles: instructionFiles).handoff
+    }
+
+    /// An instruction file `initialize` did not touch, and why.
+    public struct SkippedInstructionFile: Equatable, Sendable {
+        public var name: String
+        public var reason: String
+    }
+
+    /// `initialize`, saying which instruction files it left alone. The handoff is
+    /// created either way: a CLAUDE.md that cannot be edited is no reason to
+    /// refuse the shared list.
+    public static func initializeReportingSkips(
+        projectPath: String,
+        instructionFiles: [String] = ["CLAUDE.md", "AGENTS.md"]
+    ) throws -> (handoff: ProjectHandoff, skipped: [SkippedInstructionFile]) {
         let path = canonicalPath(for: projectPath)
         var handoff = handoff(for: path)
         // Report a write that did not land rather than printing "Handoff ready"
@@ -678,17 +694,33 @@ public struct ProjectRegistry: Sendable {
         }
         handoff = self.handoff(for: path)
 
+        var skipped: [SkippedInstructionFile] = []
         for name in instructionFiles {
             let url = URL(fileURLWithPath: path).appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
-            let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+            // The file is somebody's instructions, so anything that stops us reading
+            // it whole is a reason to leave it alone. `(try? String(...)) ?? ""` took
+            // a Latin-1 or UTF-16 file for an empty one and replaced it with the
+            // pointer alone.
+            guard let data = try? Data(contentsOf: url) else {
+                skipped.append(SkippedInstructionFile(name: name, reason: "it could not be read"))
+                continue
+            }
+            guard let existing = String(data: data, encoding: .utf8) else {
+                skipped.append(SkippedInstructionFile(name: name, reason: "it is not UTF-8 text, and appending to it would damage it"))
+                continue
+            }
             guard !existing.contains(pointerMarker) else { continue }
-            let separator = existing.hasSuffix("\n") ? "\n" : "\n\n"
+            let separator = existing.isEmpty || existing.hasSuffix("\n") ? "\n" : "\n\n"
             let updated = existing + separator + pointerSection(for: handoff.projectName) + "\n"
-            try AtomicFile.write(Data(updated.utf8), to: url)
+            do {
+                try AtomicFile.write(Data(updated.utf8), to: url)
+            } catch {
+                skipped.append(SkippedInstructionFile(name: name, reason: error.localizedDescription))
+            }
         }
 
-        return handoff
+        return (handoff, skipped)
     }
 }
 
