@@ -126,6 +126,10 @@ public enum Glob {
         while t.hasPrefix("./") { t.removeFirst(2) }
         while t.hasSuffix("/") { t.removeLast() }
         guard t.contains("/./") || t.contains("//") || t.contains("/..") else { return t }
+        // An absolute path stays absolute. Splitting on `/` drops the leading
+        // one, so `/x//y` came back as `x/y` and `/Users/../etc` as `etc` — a
+        // path inside the repository named `etc`.
+        let absolute = t.hasPrefix("/")
         var kept: [Substring] = []
         for part in t.split(separator: "/", omittingEmptySubsequences: true) {
             if part == "." { continue }
@@ -138,6 +142,8 @@ public enum Glob {
             }
             kept.append(part)
         }
+        // `..` above the root of an absolute path is the root (`/..` is `/`).
+        if absolute { return "/" + kept.drop { $0 == ".." }.joined(separator: "/") }
         return kept.joined(separator: "/")
     }
 

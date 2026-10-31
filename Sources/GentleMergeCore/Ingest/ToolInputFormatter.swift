@@ -151,13 +151,29 @@ public enum ToolInputFormatter {
     /// with it (audit 2026-11-01).
     public static func relativeToCheckout(_ file: String, checkout: String) -> String? {
         guard !file.isEmpty, !checkout.isEmpty else { return nil }
-        let root = URL(fileURLWithPath: checkout).resolvingSymlinksInPath().standardizedFileURL.path
-        let target = (file.hasPrefix("/") ? URL(fileURLWithPath: file)
-            : URL(fileURLWithPath: checkout).appendingPathComponent(file))
-            .resolvingSymlinksInPath().standardizedFileURL.path
+        let root = resolvingExistingPrefix(URL(fileURLWithPath: checkout)).path
+        let target = resolvingExistingPrefix(file.hasPrefix("/") ? URL(fileURLWithPath: file)
+            : URL(fileURLWithPath: checkout).appendingPathComponent(file)).path
         guard target.hasPrefix(root + "/") else { return nil }
         let relative = String(target.dropFirst(root.count + 1))
         return relative.isEmpty ? nil : relative
+    }
+
+    /// Symlinks resolved in the part of the path that exists, the rest appended
+    /// as written. `resolvingSymlinksInPath` gives up on a path that does not
+    /// exist yet, and the advice runs *before* a Write creates its file — so a
+    /// new file named through the symlinked spelling of the project was the one
+    /// case still left unmatched.
+    static func resolvingExistingPrefix(_ url: URL) -> URL {
+        var existing = url.standardizedFileURL
+        var missing: [String] = []
+        while existing.path != "/", !FileManager.default.fileExists(atPath: existing.path) {
+            missing.insert(existing.lastPathComponent, at: 0)
+            existing.deleteLastPathComponent()
+        }
+        var resolved = existing.resolvingSymlinksInPath()
+        for component in missing { resolved.appendPathComponent(component) }
+        return resolved.standardizedFileURL
     }
 
     /// Paths read better as `Sources/App/Foo.swift` than as 90 characters of home directory.

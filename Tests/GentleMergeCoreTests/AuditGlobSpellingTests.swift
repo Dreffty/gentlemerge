@@ -34,6 +34,15 @@ final class GlobSpellingTests: XCTestCase {
         XCTAssertEqual(Glob.normalize("../../x/./y"), "../../x/y")
     }
 
+    func testAnAbsolutePathStaysAbsolute() {
+        XCTAssertEqual(Glob.normalize("/x//y"), "/x/y")
+        XCTAssertEqual(Glob.normalize("/a/../b"), "/b")
+        XCTAssertEqual(Glob.normalize("/Users/../etc"), "/etc")
+        XCTAssertEqual(Glob.normalize("/../x"), "/x")
+        XCTAssertEqual(Glob.normalize("/plain/path"), "/plain/path")
+        XCTAssertFalse(Glob.matches("etc/**", "/Users/../etc/hosts"), "/etc is not the repository's etc/")
+    }
+
     func testNamesThatMerelyContainTwoDotsAreLeftAlone() {
         XCTAssertEqual(Glob.normalize("lib/a..b/c"), "lib/a..b/c")
         XCTAssertEqual(Glob.normalize("lib/..hidden/c"), "lib/..hidden/c")

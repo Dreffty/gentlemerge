@@ -25,6 +25,14 @@ final class AdviseSymlinkedPathTests: XCTestCase {
         XCTAssertEqual(ToolInputFormatter.relativeToCheckout(alias.path + "/lib/a.swift", checkout: alias.path), "lib/a.swift")
     }
 
+    func testANewFileIsFoundThroughEitherSpellingBeforeItExists() {
+        XCTAssertEqual(ToolInputFormatter.relativeToCheckout(alias.path + "/lib/new.swift", checkout: real.path), "lib/new.swift")
+        XCTAssertEqual(ToolInputFormatter.relativeToCheckout(alias.path + "/newdir/sub/new.swift", checkout: real.path),
+                       "newdir/sub/new.swift")
+        XCTAssertEqual(ToolInputFormatter.relativeToCheckout(real.path + "/newdir/new.swift", checkout: alias.path), "newdir/new.swift")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: real.path + "/lib/new.swift"))
+    }
+
     func testDotsAndDoubledSlashesCollapse() {
         XCTAssertEqual(ToolInputFormatter.relativeToCheckout(real.path + "/lib/../lib//a.swift", checkout: real.path), "lib/a.swift")
         XCTAssertEqual(ToolInputFormatter.relativeToCheckout("./lib/a.swift", checkout: real.path), "lib/a.swift")
