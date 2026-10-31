@@ -850,9 +850,17 @@ public final class InboxModel {
     ///
     /// The project list and `paths` are captured before the hop — `self` is not
     /// Sendable and the sweep needs neither, exactly as `maybeAutoLand` does.
+    ///
+    /// `@Sendable` is spelled out on both hops (audit 2026-11-01). Left to
+    /// inference, the closure handed to `async` from this main-actor method was
+    /// main-actor isolated wherever the SDK's Dispatch overlay did not already
+    /// mark it `@Sendable` — Xcode 16's did not — and the Swift 6 runtime on
+    /// macOS 15 traps (EXC_BREAKPOINT) the moment such a closure runs on the
+    /// radar's queue. The app died on its first drain, a third of a second
+    /// after launch, built with Xcode 16; Xcode 26's overlay hid it.
     private func sweepConflictRadar() {
         let (paths, projects) = (self.paths, self.projects)
-        RadarQueue.queue.async {
+        RadarQueue.queue.async { @Sendable in
             for summary in projects {
                 _ = ConflictRadar.sweep(project: summary.path, paths: paths)
             }
@@ -870,7 +878,7 @@ public final class InboxModel {
         guard event == "Stop" || event.contains("turn-complete") || event.contains("turn-ended") else { return }
         guard let cwd = envelope.workingDirectory else { return }
         let (paths, provider) = (self.paths, envelope.provider)
-        AutoLandQueue.queue.async {
+        AutoLandQueue.queue.async { @Sendable in
             _ = Landing.autoLand(cwd: cwd, provider: provider, paths: paths)
         }
     }
