@@ -7,7 +7,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-22.04]
+        # macos-14 is retired on 2026-11-02 and its brownouts were already
+        # cancelling the job before it started — every macOS run since
+        # 7986555 ended "cancelled", so nothing below was being verified.
+        os: [macos-15, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
