@@ -2124,8 +2124,9 @@ enum CLI {
         // (audit 2026-10-08). `recordImplicitPathClaims` already resolves the
         // checkout correctly; this now agrees with it.
         let project = ProjectRegistry.canonicalPath(for: checkout)
-        let rel = ToolInputFormatter.relativePath(file, cwd: checkout)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "~"))
+        let rel = ToolInputFormatter.relativeToCheckout(file, checkout: checkout)
+            ?? ToolInputFormatter.relativePath(file, cwd: checkout)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "~"))
 
         // The same rules as the commit-time gate, decided before the edit
         // lands: a surprise at commit time is twenty minutes of wasted work.
