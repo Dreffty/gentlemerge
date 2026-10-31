@@ -16,7 +16,8 @@ public final class InboxModel {
     public private(set) var items: [InboxItem] = []
     public var config: AppConfig {
         didSet {
-            guard config != oldValue else { return }
+            guard config != oldValue, !reloadingConfig else { return }
+            defer { configStamp = Self.modificationDate(of: paths.config) }
             // Best effort here — this is a property observer on a model the user
             // is looking at, and there is nowhere useful to surface a throw. The
             // CLI's own `config set` path does report its failure instead, which
@@ -88,6 +89,11 @@ public final class InboxModel {
     /// The app is the only process that runs long enough to be trusted with
     /// housekeeping; the hooks are gone in milliseconds.
     private var lastPruneAt: Date?
+    /// When `config.json` was last read or written by this model, so the tick
+    /// can tell a change made somewhere else.
+    @ObservationIgnored private var configStamp: Date?
+    /// Set while a reload assigns `config`, so the assignment is not saved back.
+    @ObservationIgnored private var reloadingConfig = false
 
     /// When we last typed into each session, keyed by session id. In memory
     /// because the rate limit is about a person watching a terminal, and a
@@ -105,6 +111,7 @@ public final class InboxModel {
         self.spool = SpoolStore(paths: paths)
         self.ledger = Ledger(url: paths.ledger)
         self.config = AppConfig.load(from: paths.config)
+        self.configStamp = Self.modificationDate(of: paths.config)
         self.sessions = SessionRegistry(url: paths.sessions)
         let registry = ProjectRegistry(url: paths.projects)
         self.projectRegistry = registry
@@ -158,12 +165,39 @@ public final class InboxModel {
         startWatching()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
+                self?.reloadConfigIfChanged()
                 self?.drainNow()
                 self?.pruneIfDue()
             }
         }
         spool.prune()
         pruneIfDue()
+    }
+
+    /// Pick up a `config.json` that changed under the app.
+    ///
+    /// The app read it once, at launch. `gentlemerge config set allowDispatch
+    /// true` — one of the two ways the README gives to turn dispatch on, and
+    /// the app is the only process that dispatches — did nothing until a
+    /// restart, and the next setting changed in the app saved its stale copy
+    /// over the file, quietly undoing what was set from the terminal (audit
+    /// 2026-11-01). On the 3 s tick it costs one `stat`. A file that is there
+    /// but unreadable is left for `doctor` to report: replacing a working
+    /// configuration with the defaults is the failure `loadChecked` exists to
+    /// prevent.
+    func reloadConfigIfChanged() {
+        let stamp = Self.modificationDate(of: paths.config)
+        guard stamp != configStamp else { return }
+        configStamp = stamp
+        let (loaded, problem) = AppConfig.loadChecked(from: paths.config)
+        guard problem == nil, loaded != config else { return }
+        reloadingConfig = true
+        config = loaded
+        reloadingConfig = false
+    }
+
+    static func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
     }
 
     /// Sweep the bus: stale delivery markers, and messages nobody will ever be
