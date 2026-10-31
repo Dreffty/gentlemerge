@@ -334,3 +334,51 @@ final class AuditBusCLITests: XCTestCase {
         XCTAssertTrue(out.stderr.contains("Not sent"), out.stderr)
     }
 }
+
+/// `release --paths nonexistent` said "Released 1 claim(s)" and released nothing.
+final class ReleaseSaysWhatItReleasedTests: XCTestCase {
+    private var home: URL!
+    private var claims: PathClaims!
+    private let project = "/tmp/proj"
+
+    override func setUpWithError() throws {
+        home = FileManager.default.temporaryDirectory.appendingPathComponent("release-\(UUID())")
+        claims = PathClaims(paths: try Paths(home: home).createDirectories())
+        try claims.claim(pattern: "lib/**", label: "claude", project: project, intent: nil)
+        try claims.claim(pattern: "a.txt", label: "claude", project: project, intent: nil)
+    }
+
+    override func tearDownWithError() throws { try? FileManager.default.removeItem(at: home) }
+
+    func testAPatternThatMatchesNothingReleasesNothingAndSaysSo() throws {
+        let released = try claims.release(label: "claude", project: project, patterns: ["zzz"])
+        XCTAssertTrue(released.isEmpty)
+        let message = claims.releaseSummary(released: released, asked: ["zzz"], label: "claude", project: project)
+        XCTAssertTrue(message.hasPrefix("Nothing released for `zzz`"), message)
+        XCTAssertTrue(message.contains("`lib/**`") && message.contains("`a.txt`"), "it must list what is held: \(message)")
+        XCTAssertEqual(claims.live(project: project).count, 2)
+    }
+
+    func testReleasingOneOfTwoNamedPatternsReportsBoth() throws {
+        let released = try claims.release(label: "claude", project: project, patterns: ["a.txt", "./nope"])
+        XCTAssertEqual(released.map(\.pattern), ["a.txt"])
+        let message = claims.releaseSummary(released: released, asked: ["a.txt", "./nope"], label: "claude", project: project)
+        XCTAssertTrue(message.contains("Released `a.txt`"), message)
+        XCTAssertTrue(message.contains("Nothing released for `./nope`"), message)
+    }
+
+    func testReleasingEverythingListsWhatWent() throws {
+        let released = try claims.release(label: "claude", project: project)
+        XCTAssertEqual(Set(released.map(\.pattern)), ["lib/**", "a.txt"])
+        XCTAssertTrue(claims.releaseSummary(released: released, asked: nil, label: "claude", project: project)
+            .hasPrefix("Released every claim by claude"))
+        XCTAssertTrue(claims.releaseSummary(released: [], asked: nil, label: "claude", project: project)
+            .hasPrefix("Nothing to release"))
+    }
+
+    func testAnotherLabelsClaimIsNeverReleased() throws {
+        let released = try claims.release(label: "codex", project: project, patterns: ["a.txt"])
+        XCTAssertTrue(released.isEmpty)
+        XCTAssertEqual(claims.live(project: project).count, 2)
+    }
+}

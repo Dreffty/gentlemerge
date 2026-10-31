@@ -234,6 +234,43 @@ final class AuditCLITests: XCTestCase {
                   timeout: 60)
     }
 
+    // Arguments that were accepted and then quietly meant something else
+
+    func testANoteToNobodyOrToNoOneIsRefusedInsteadOfGoingToEveryone() {
+        for arguments in [["say", "   ", "--global"], ["say", "hola", "--to", ""], ["say", "hola", "--to"],
+                          ["say", "hola", "--to-branch", ""], ["say", "hola", "--global", "--to"]] {
+            let out = run(arguments)
+            XCTAssertEqual(out.status, 64, "\(arguments) was accepted: \(out.stdout)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: home.appendingPathComponent("messages.jsonl").path),
+                       "nothing may have been sent")
+        XCTAssertEqual(run(["say", "hola", "--to", "codex", "--global"]).status, 0)
+    }
+
+    func testADirectoryThatIsNotThereIsAnErrorNotAFabricatedProject() {
+        let nowhere = root.appendingPathComponent("no-such-dir").path
+        for arguments in [["say", "hola", "--project", nowhere], ["handoff", nowhere], ["review", nowhere],
+                          ["brief", nowhere], ["precommit", nowhere], ["project", "init", nowhere],
+                          ["who", "--project", nowhere], ["radar", "--project", nowhere]] {
+            let out = run(arguments)
+            XCTAssertEqual(out.status, 64, "\(arguments) carried on: \(out.stdout)")
+            XCTAssertTrue(out.stderr.contains("no such directory"), out.stderr)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("no-such-dir").path))
+        XCTAssertEqual(run(["handoff", root.path]).status, 0, "an existing directory still works")
+    }
+
+    func testAWatchOnNothingAndARestoreOfNothingSaySo() {
+        XCTAssertEqual(run(["watch", "idle", ""]).status, 64)
+        XCTAssertEqual(run(["watch", "session-end", "  "]).status, 64)
+
+        let git = Shell.run("/usr/bin/env", ["git", "init", "-q"], in: root)
+        XCTAssertTrue(git.succeeded)
+        let out = run(["snapshot", "restore", "nonexistent"])
+        XCTAssertEqual(out.status, 1)
+        XCTAssertTrue(out.stderr.contains("no restore point starts with"), out.stderr)
+    }
+
     // --ttl: a claim that is born expired is a lie
 
     func testATtlThatIsNotAPositiveNumberOfMinutesIsRefused() {

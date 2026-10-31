@@ -188,10 +188,11 @@ public struct MCPServer {
                             id: args["id"]?.stringValue ?? "", by: identity, result: args["result"]?.stringValue, paths: paths)
                     case "release":
                         let releaseRoots = Self.repositoryRoots(directory: directory, project: project)
-                        try PathClaims(paths: paths).release(label: identity, project: project,
-                            patterns: args["paths"]?.arrayValue?.compactMap(\.stringValue)
-                                .map { Glob.relativize($0, roots: releaseRoots) })
-                        text = "released"
+                        let store = PathClaims(paths: paths)
+                        let asked = args["paths"]?.arrayValue?.compactMap(\.stringValue)
+                            .map { Glob.relativize($0, roots: releaseRoots) }
+                        let released = try store.release(label: identity, project: project, patterns: asked)
+                        text = store.releaseSummary(released: released, asked: asked, label: identity, project: project)
                     case "watch_add":
                         text = try Self.addWatch(kind: args["kind"]?.stringValue ?? "",
                             target: args["target"]?.stringValue ?? "",

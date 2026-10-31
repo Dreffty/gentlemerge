@@ -28,6 +28,11 @@ enum CLI {
         let command = arguments.dropFirst().first
         let rest = Array(arguments.dropFirst(2))
 
+        if let problem = invalidDirectoryArgument(command: command, rest: rest) {
+            FileHandle.standardError.write(Data("gentlemerge: \(problem)\n".utf8))
+            return 64
+        }
+
         if let command, commandsOfAWorkingAgent.contains(command) {
             noteThatWeAreHere(rest)
         }
@@ -595,8 +600,19 @@ enum CLI {
         let author = identity.label
         if arguments.contains("--done") { return done(bus: bus, author: author, scope: scoped) }
 
+        // `--to` with nothing after it used to mean everyone: a note meant for one
+        // agent went to all of them.
+        for flag in ["--to", "--to-branch"] where arguments.contains(flag) {
+            guard let named = value(after: flag, in: arguments),
+                  !named.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                FileHandle.standardError.write(Data(
+                    "\(flag) needs a name. Without it the note would go to everyone, which is not what you asked for.\n".utf8))
+                return 64
+            }
+        }
+
         let text = positional(arguments).joined(separator: " ")
-        guard !text.isEmpty else {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             let usage = "usage: gentlemerge say \"...\" [--to claude|codex|hermes] [--to-branch name]\n"
                 + "                          [--project dir] [--global] [--replaces handle]\n"
                 + "                          [--kind fyi|update|urgent|handoff] [--urgent] [--fyi] [--nudge]\n"
@@ -974,6 +990,34 @@ enum CLI {
     }
 
     // MARK: - projects and handoff
+
+    /// A directory named on the command line that is not there is a typo. Every
+    /// command used to carry on with it: `say hola --project /no/such/dir` filed
+    /// the note under a project called `dir`, and `handoff /no/such/dir` printed a
+    /// handoff it had just made up.
+    private static func invalidDirectoryArgument(command: String?, rest: [String]) -> String? {
+        func missing(_ raw: String, flag: String?) -> String? {
+            let path = (raw as NSString).expandingTildeInPath
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory), isDirectory.boolValue {
+                return nil
+            }
+            return (flag.map { "\($0) " } ?? "") + "\(raw): no such directory"
+        }
+        if let directory = value(after: "--project", in: rest), let problem = missing(directory, flag: "--project") {
+            return problem
+        }
+        // The commands that take the directory as a bare argument.
+        let bare: String?
+        switch command {
+        case "review", "handoff", "brief", "precommit": bare = positional(rest).first
+        case "project": bare = ["init", "adopt-worktrees"].contains(rest.first ?? "") ? positional(rest).dropFirst().first : nil
+        case "init": bare = positional(rest).first
+        default: bare = nil
+        }
+        if let bare, let problem = missing(bare, flag: nil) { return problem }
+        return nil
+    }
 
     private static func projectDirectory(_ arguments: [String], allowPositional: Bool = true) -> String {
         ProjectRegistry.canonicalPath(for: checkoutDirectory(arguments, allowPositional: allowPositional))
@@ -2265,8 +2309,10 @@ enum CLI {
             .map { Glob.relativize($0, roots: roots) }
 
         do {
-            try PathClaims(paths: paths).release(label: label, project: project, patterns: patterns.isEmpty ? nil : patterns)
-            print(patterns.isEmpty ? "Released every claim by \(label) in \(project)" : "Released \(patterns.count) claim(s)")
+            let store = PathClaims(paths: paths)
+            let asked = patterns.isEmpty ? nil : patterns
+            let released = try store.release(label: label, project: project, patterns: asked)
+            print(store.releaseSummary(released: released, asked: asked, label: label, project: project))
             return 0
         } catch {
             FileHandle.standardError.write(Data("could not release: \(error)\n".utf8))
@@ -2613,7 +2659,7 @@ enum CLI {
         to watches: Watches
     ) -> Int32 {
         let words = positional(arguments)
-        guard !words.isEmpty else {
+        guard !words.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             let form: String
             switch kind {
             case .sessionEnd: form = "session-end <session id or agent label>"
@@ -2770,10 +2816,14 @@ enum CLI {
             }
 
         case "restore":
-            guard let id = arguments.dropFirst().first,
-                  let reference = git.list().first(where: { $0.id.hasPrefix(id) }) else {
+            guard let id = arguments.dropFirst().first, !id.isEmpty else {
                 FileHandle.standardError.write(Data("usage: gentlemerge snapshot restore <id>\n".utf8))
                 return 64
+            }
+            guard let reference = git.list().first(where: { $0.id.hasPrefix(id) }) else {
+                FileHandle.standardError.write(Data(
+                    "no restore point starts with “\(id)”. `gentlemerge snapshot list` shows them.\n".utf8))
+                return 1
             }
             do {
                 let report = try git.restore(reference)
