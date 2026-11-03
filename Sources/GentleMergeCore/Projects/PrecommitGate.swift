@@ -109,7 +109,7 @@ public struct PrecommitGate: Sendable {
         activeRequests: [AgentRequest]? = nil,
         now: Date = Date(),
         presence: [Presence.PresenceMark] = [],
-        isPIDAlive: (@Sendable (Int) -> Bool?)? = nil
+        isPIDAlive: (@Sendable (Int, Date) -> Bool?)? = nil
     ) -> [Violation] {
         let effective: [PathClaim]
         if let isPIDAlive {

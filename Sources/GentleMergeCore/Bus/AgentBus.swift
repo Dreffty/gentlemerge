@@ -440,7 +440,7 @@ public struct AgentBus: Sendable {
     public func others(excluding sessionID: String?, project: String? = nil) -> [AgentActivity] {
         activities()
             .filter { $0.id != sessionID && $0.isLive }
-            .filter { Liveness.isProcessAlive($0.pid) != false }
+            .filter { Liveness.isProcessAlive($0.pid, seenAt: $0.updatedAt) != false }
             // An app idling in `/` or the home folder is working on nothing
             // a peer could collide with (see `Presence.isNoProject`).
             .filter { !Presence.isNoProject($0.projectPath) }
@@ -465,7 +465,7 @@ public struct AgentBus: Sendable {
             .filter { project == nil || $0.projectPath == project }
             .compactMap { activity in
                 if activity.diedUncleanly { return activity }
-                guard activity.state != .ended, Liveness.isProcessAlive(activity.pid) == false else { return nil }
+                guard activity.state != .ended, Liveness.isProcessAlive(activity.pid, seenAt: activity.updatedAt) == false else { return nil }
                 return activity.buried()
             }
             .sorted { $0.updatedAt > $1.updatedAt }
@@ -698,7 +698,7 @@ public struct AgentBus: Sendable {
     /// racers cannot both see the same free set and pick the same name.
     static func fairTarget(capability: String, project: String, paths: Paths) -> String? {
         let marks = Presence.marks(paths: paths).filter {
-            !$0.isExpired && Liveness.isProcessAlive($0.pid) != false
+            !$0.isExpired && Liveness.isProcessAlive($0.pid, seenAt: $0.updatedAt) != false
                 && $0.capabilities.contains(capability)
                 && $0.projectPath == project
         }

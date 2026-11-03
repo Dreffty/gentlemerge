@@ -31,7 +31,7 @@ public enum Advise {
         activeRequests: [AgentRequest]? = nil,
         now: Date = Date(),
         presence: [Presence.PresenceMark] = [],
-        isPIDAlive: (@Sendable (Int) -> Bool?)? = nil
+        isPIDAlive: (@Sendable (Int, Date) -> Bool?)? = nil
     ) -> [AdviseNote] {
         let live: [PathClaim]
         if let isPIDAlive {

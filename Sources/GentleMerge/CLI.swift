@@ -1433,7 +1433,7 @@ enum CLI {
         // not: an unlabeled commit must not stay blocked by a ghost either.
         let (_, reaped) = PathClaims.reap(
             claims.filter { $0.label != label },
-            presence: presence, isPIDAlive: { Liveness.isProcessAlive($0) }, now: Date()
+            presence: presence, isPIDAlive: { Liveness.isProcessAlive($0, seenAt: $1) }, now: Date()
         )
         if !reaped.isEmpty {
             Ledger(url: paths.ledger).append(LedgerEntry(
@@ -1451,7 +1451,7 @@ enum CLI {
             ownership: ownership,
             activeRequests: scoped,
             presence: presence,
-            isPIDAlive: { Liveness.isProcessAlive($0) }
+            isPIDAlive: { Liveness.isProcessAlive($0, seenAt: $1) }
         )
 
         if label == nil {
@@ -1973,6 +1973,18 @@ enum CLI {
                 label: identity.verified ? identity.label : nil)
         }
 
+        // The briefing below reads what has been drained. With the app running
+        // that lags by seconds; without it (Linux, or the app quit) nothing
+        // drained between one `brief` and the next, so a turn's delta never
+        // showed what the others had started and watches never fired
+        // (audit 2026-11-03). A small backlog is drained here, waiting at most
+        // a second for the lock; a big one is left to a command that no hook
+        // timeout can cut off halfway.
+        let spool = SpoolStore(paths: paths)
+        if spool.runningAppPID() == nil, spool.pendingCount() <= 100 {
+            InboxModel.drainHeadless(paths: paths, patience: 1)
+        }
+
         var blocks: [String] = []
 
         // The handoff is worth its tokens once, at the start of a session.
@@ -2151,7 +2163,7 @@ enum CLI {
             ownership: ownership,
             activeRequests: scopedAdvise,
             presence: Presence.marks(paths: paths),
-            isPIDAlive: { Liveness.isProcessAlive($0) }
+            isPIDAlive: { Liveness.isProcessAlive($0, seenAt: $1) }
         )
         guard !notes.isEmpty else { return 0 }
 

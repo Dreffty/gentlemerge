@@ -125,14 +125,14 @@ public struct TaskClaims: Sendable {
 
         if let sessionID = claim.sessionID,
            let session = activities.first(where: { $0.id == sessionID }) {
-            if session.state == .ended || Liveness.isProcessAlive(session.pid) == false { return true }
+            if session.state == .ended || Liveness.isProcessAlive(session.pid, seenAt: session.updatedAt) == false { return true }
             if session.isLive { return false }
         }
 
         let claimerIsWorking = activities.contains { activity in
             activity.projectPath == claim.projectPath
                 && activity.isLive
-                && Liveness.isProcessAlive(activity.pid) != false
+                && Liveness.isProcessAlive(activity.pid, seenAt: activity.updatedAt) != false
                 && Self.sameAgent(AgentBus.label(for: activity.provider), claim.claimedBy)
         }
         if claimerIsWorking { return false }

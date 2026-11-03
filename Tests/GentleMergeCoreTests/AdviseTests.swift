@@ -37,14 +37,14 @@ final class AdviseTests: XCTestCase {
     func testADeadOwnersClaimIsSilent() {
         let notes = Advise.check(path: "lib/a.swift", me: "codex",
             claims: [claim("claude", "lib/**")], ownership: ownership, now: now,
-            presence: [mark("claude", pid: 9)], isPIDAlive: { _ in false })
+            presence: [mark("claude", pid: 9)], isPIDAlive: { _, _ in false })
         XCTAssertTrue(notes.isEmpty, "reaped before the edit, not at the commit")
     }
 
     func testAnUnknownOwnerKeepsTheWarning() {
         let notes = Advise.check(path: "lib/a.swift", me: "codex",
             claims: [claim("claude", "lib/**")], ownership: ownership, now: now,
-            presence: [], isPIDAlive: { _ in nil })
+            presence: [], isPIDAlive: { _, _ in nil })
         XCTAssertEqual(notes.count, 1, "unknown is never dead")
     }
 

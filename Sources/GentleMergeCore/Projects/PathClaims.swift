@@ -288,8 +288,9 @@ public struct PathClaims: Sendable {
     /// `kill -9`) never releases, and without reaping its paths stay blocked
     /// until the TTL runs out: coordination that stops work.
     ///
-    /// Pure: `isPIDAlive` answers `kill(pid, 0)` (`nil` = unknown, never
-    /// dead), presence is the marks on disk. A claim is reaped only on one of
+    /// Pure: `isPIDAlive` answers `kill(pid, 0)` for a pid and the moment its
+    /// mark was written (`nil` = unknown, never dead; see `Liveness`),
+    /// presence is the marks on disk. A claim is reaped only on one of
     /// two independent signs that its session is dead:
     /// - a presence mark for its label names a pid that is dead, or
     /// - every mark for its label is stale (silent past the presence TTL) —
@@ -302,7 +303,7 @@ public struct PathClaims: Sendable {
     public static func reap(
         _ claims: [PathClaim],
         presence: [Presence.PresenceMark],
-        isPIDAlive: @Sendable (Int) -> Bool?,
+        isPIDAlive: @Sendable (Int, Date) -> Bool?,
         now: Date = Date()
     ) -> (live: [PathClaim], reaped: [PathClaim]) {
         var live: [PathClaim] = []
@@ -322,13 +323,14 @@ public struct PathClaims: Sendable {
             }
             let dead: Bool = {
                 guard !marks.isEmpty else { return false }
-                if marks.contains(where: { $0.pid.map(isPIDAlive) == false }) { return true }
+                if marks.contains(where: { mark in mark.pid.map { isPIDAlive($0, mark.updatedAt) } == false }) { return true }
                 // Staleness is not death. A session still running that has not
                 // written a heartbeat in a while must keep its claim; only
                 // marks whose process is gone *and* whose heartbeat is old
                 // count as evidence that the owner is gone.
-                return marks.allSatisfy {
-                    $0.pid.map(isPIDAlive) != true && now.timeIntervalSince($0.updatedAt) >= Presence.timeToLive
+                return marks.allSatisfy { mark in
+                    mark.pid.map { isPIDAlive($0, mark.updatedAt) } != true
+                        && now.timeIntervalSince(mark.updatedAt) >= Presence.timeToLive
                 }
             }()
             if dead { reaped.append(claim) } else { live.append(claim) }

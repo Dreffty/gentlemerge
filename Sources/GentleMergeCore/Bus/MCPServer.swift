@@ -95,7 +95,7 @@ public struct MCPServer {
                             ownership: Ownership.effective(project: project, paths: paths).ownership,
                             activeRequests: Requests(paths: paths).inProgress(assignedTo: identity, project: project),
                             presence: Presence.marks(paths: paths),
-                            isPIDAlive: { Liveness.isProcessAlive($0) })
+                            isPIDAlive: { Liveness.isProcessAlive($0, seenAt: $1) })
                         text = violations.isEmpty ? "No staged path violations." : violations.map { "\($0.path): \($0.reason)" }.joined(separator: "\n")
                         return toolReply(id, text, isError: violations.contains(where: { $0.blocking }))
                     case "claim":
@@ -135,7 +135,7 @@ public struct MCPServer {
                                 ? String(checkPath.dropFirst(project.count + 1)) : checkPath
                             let notes = Advise.check(path: rel, me: identity, claims: liveClaims,
                                 ownership: checkOwnership, activeRequests: checkActive,
-                                presence: checkPresence, isPIDAlive: { Liveness.isProcessAlive($0) })
+                                presence: checkPresence, isPIDAlive: { Liveness.isProcessAlive($0, seenAt: $1) })
                             return notes.isEmpty ? "ok \(checkPath)" : notes.map(\.text).joined(separator: "\n")
                         }.joined(separator: "\n")
                     case "task_add":

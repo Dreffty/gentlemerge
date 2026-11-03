@@ -213,7 +213,7 @@ public enum Presence {
             let sameSession = mark.sessionID == nil || previous.sessionID == nil
                 || mark.sessionID == previous.sessionID
             if mark.pid == nil, sameSession, !previous.isExpired(now: now),
-               Liveness.isProcessAlive(previous.pid) == true {
+               Liveness.isProcessAlive(previous.pid, seenAt: previous.updatedAt) == true {
                 mark.pid = previous.pid
                 if mark.sessionID == nil { mark.sessionID = previous.sessionID }
             }
@@ -305,7 +305,7 @@ public enum Presence {
             // Only when somebody recorded a pid worth checking. `!= false` on
             // purpose: nil is "we cannot tell", which is not a reason to bury
             // somebody.
-            guard Liveness.isProcessAlive(mark.pid) != false else { continue }
+            guard Liveness.isProcessAlive(mark.pid, seenAt: mark.updatedAt) != false else { continue }
 
             guard let session = mark.sessionID else { loose.append(mark); continue }
             if let row = rows[session],
@@ -333,7 +333,7 @@ public enum Presence {
 
     public static func labels(withCapability capability: String, project: String?, paths: Paths) -> [String] {
         marks(paths: paths)
-            .filter { !$0.isExpired && !isNoProject($0.projectPath) && Liveness.isProcessAlive($0.pid) != false
+            .filter { !$0.isExpired && !isNoProject($0.projectPath) && Liveness.isProcessAlive($0.pid, seenAt: $0.updatedAt) != false
                 && $0.capabilities.contains(capability) && (project == nil || $0.projectPath == project) }
             .sorted { $0.updatedAt > $1.updatedAt }
             .map(\.label)

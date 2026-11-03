@@ -142,14 +142,14 @@ public final class InboxModel {
     /// Safety against the app draining at the same time lives where it
     /// always has — atomic file writes and flock on the hot files — not in
     /// this process's executor.
-    nonisolated public static func drainHeadless(paths: Paths) {
+    nonisolated public static func drainHeadless(paths: Paths, patience: TimeInterval = 5) {
         MainActor.assumeIsolated {
             let model = InboxModel(paths: paths)
             // A short-lived process cannot wait for a headless agent to finish, so it
             // must not start one: the child outlived its parent with nobody to record
             // how it ended. Starting agents is the app's job (like nudges).
             model.mayDispatch = false
-            model.drainLockPatience = 5
+            model.drainLockPatience = patience
             model.loadState()
             model.drainNow()
             model.saveState()
@@ -569,7 +569,7 @@ public final class InboxModel {
         var buried: [AgentActivity] = []
 
         for index in list.indices where list[index].state != .ended {
-            guard Liveness.isProcessAlive(list[index].pid) == false else { continue }
+            guard Liveness.isProcessAlive(list[index].pid, seenAt: list[index].updatedAt) == false else { continue }
             list[index] = list[index].buried()
             buried.append(list[index])
         }

@@ -36,6 +36,12 @@ public struct SpoolStore: Sendable {
         drain(matching: envelopeID)
     }
 
+    /// Envelopes waiting to be drained.
+    public func pendingCount() -> Int {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: paths.spool.path)) ?? []
+        return names.filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") }.count
+    }
+
     private func drain(matching envelopeID: String?) -> [SpoolEnvelope] {
         let manager = FileManager.default
         guard let names = try? manager.contentsOfDirectory(atPath: paths.spool.path) else { return [] }
