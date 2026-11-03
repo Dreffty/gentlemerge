@@ -188,12 +188,17 @@ public enum Redactor {
     /// takes `user:password` (curl, wget, httpie) and only with a colon after
     /// a name that starts with a letter: the first version of this rule ate
     /// `date -u +%H:%M:%S` and `${RANDOM:-0}` out of this repository's own
-    /// shell script, and would eat docker's `-u 1000:1000`. `mysql -pSECRET`,
-    /// with no space and a flag that `mkdir -p` shares, is deliberately left
-    /// alone.
+    /// shell script, and would eat docker's `-u 1000:1000`. `-p` is the same
+    /// story: `mkdir -p`, `ssh -p 22` and `git add -p` share it, so a password
+    /// glued to it (`mysql -pSECRET`, `sshpass -p SECRET`) is read only on the
+    /// command line of a program where `-p` means the password, and never
+    /// when what follows is a variable (`-p"$PW"`) or nothing at all (`mysql
+    /// -p` asks for it at the prompt).
     private static let commandLineSecrets: [String] = [
         #"(?i)(?<![A-Za-z0-9-])(--(?:password|passwd|pass|passphrase|token|secret|client-secret|api-?key|access-?key|auth-?token|private-?key))[ =]\s*(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|(?![-<$])[^\s,;)\]}]{3,})"#,
         #"(\b(?:curl|wget|http|https|xh)\b[^\n]{0,300}?\s(?:-u|--user)[ =][A-Za-z][A-Za-z0-9._-]{0,64}):[^\s]{3,}"#,
+        #"(\b(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlcheck|mysqlshow|mysqlslap|mariadb(?:-dump|-admin)?)\b[^\n;|&]{0,300}?\s-p)(?!\s|["']?[<$])(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s"']\S{0,4000})"#,
+        #"(\bsshpass\b[^\n;|&]{0,100}?\s-p) ?(?![\s-]|["']?[<$])(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s"']\S{0,4000})"#,
     ]
 
     /// Every pattern, so a test can prove they all compile. A rule that does
