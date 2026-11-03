@@ -711,8 +711,14 @@ public struct ProjectRegistry: Sendable {
                 continue
             }
             guard !existing.contains(pointerMarker) else { continue }
-            let separator = existing.isEmpty || existing.hasSuffix("\n") ? "\n" : "\n\n"
-            let updated = existing + separator + pointerSection(for: handoff.projectName) + "\n"
+            // `utf8.last`, not `hasSuffix("\n")`: Swift reads `\r\n` as a single
+            // character, which is not "\n".
+            let separator = existing.isEmpty || existing.utf8.last == 0x0A ? "\n" : "\n\n"
+            var addition = separator + pointerSection(for: handoff.projectName) + "\n"
+            // Somebody's file keeps its own line endings: the pointer appended
+            // with bare `\n` to a `\r\n` file left it with both.
+            if existing.contains("\r\n") { addition = addition.replacingOccurrences(of: "\n", with: "\r\n") }
+            let updated = existing + addition
             do {
                 try AtomicFile.write(Data(updated.utf8), to: url)
             } catch {

@@ -483,6 +483,12 @@ public enum HandoffMarkdown {
     static let stepIndent = "  "
 
     public static func parse(_ text: String, projectPath: String) -> ProjectHandoff {
+        // Swift reads `\r\n` as one character, so splitting a file saved with
+        // Windows line endings on "\n" split nothing: the task metadata
+        // (`· added … · by …`) was read as part of the task's text, and the next
+        // save wrote a file with both endings in it (audit 2026-11-03). The
+        // file is ours and is written back with `\n`.
+        let text = text.replacingOccurrences(of: "\r\n", with: "\n")
         var handoff = ProjectHandoff(projectPath: projectPath)
         var currentHeading: String?
         var buffer: [String] = []
