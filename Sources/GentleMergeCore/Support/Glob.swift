@@ -121,8 +121,18 @@ public enum Glob {
     /// UTF-16 units) silently stopped matching the other spelling. And `a/../b`
     /// is `b`: a claim written with a `..` in the middle named a path nobody
     /// edits and protected nothing.
+    ///
+    /// On macOS case is folded too (audit 2026-11-03). A Mac's disk does not
+    /// tell `README.md` from `readme.md` — they are one file — so a claim on
+    /// `Sources/Bus/**` that met an edit of `sources/bus/x.swift` protected
+    /// nothing. Folding everywhere on a Mac costs a false overlap on the rare
+    /// case-sensitive volume, where two files differ only in case; not folding
+    /// cost a missed one. Linux keeps the case its file systems keep.
     static func normalize(_ s: String) -> String {
         var t = s.precomposedStringWithCanonicalMapping
+        #if os(macOS)
+        t = t.lowercased()
+        #endif
         while t.hasPrefix("./") { t.removeFirst(2) }
         while t.hasSuffix("/") { t.removeLast() }
         guard t.contains("/./") || t.contains("//") || t.contains("/..") else { return t }
