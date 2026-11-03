@@ -71,8 +71,12 @@ public struct GitSnapshot: Sendable {
 
     // MARK: - Creating
 
+    /// Takes a snapshot and prunes the oldest beyond the newest 30. `sparing`
+    /// survives the prune whatever its age: a restore takes its safety
+    /// snapshot *before* it reads the one it restores, and that one must not
+    /// vanish from the list halfway through.
     @discardableResult
-    public func create(label: String) throws -> SnapshotRef {
+    public func create(label: String, sparing: String? = nil) throws -> SnapshotRef {
         let indexFile = FileManager.default.temporaryDirectory
             .appendingPathComponent("gentlemerge-index-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: indexFile) }
@@ -109,6 +113,7 @@ public struct GitSnapshot: Sendable {
         let id = "\(Int(Date().timeIntervalSince1970))-\(UUID().uuidString.prefix(8))"
         let update = git(["update-ref", "\(Self.namespace)/\(id)", commit])
         guard update.succeeded else { throw SnapshotError.git(update.text) }
+        prune(sparing: sparing)
 
         let dirty = hasHead
             ? git(["diff", "--name-only", head, tree]).lines.count
@@ -155,9 +160,13 @@ public struct GitSnapshot: Sendable {
         _ = git(["update-ref", "-d", snapshot.reference])
     }
 
-    /// Keeps the ref namespace from growing forever.
-    public func prune(keeping limit: Int = 30) {
-        for snapshot in list().dropFirst(limit) {
+    /// Keeps the ref namespace from growing forever. Nothing called it, so
+    /// every restore point ever taken — and every restore adds one of its own —
+    /// stayed (audit 2026-11-03); `create` calls it now. Only the ref goes: git
+    /// keeps the unreachable commit until its own gc expires it, two weeks by
+    /// default, so a pruned snapshot can still be dug out by hand.
+    public func prune(keeping limit: Int = 30, sparing: String? = nil) {
+        for snapshot in list().dropFirst(limit) where snapshot.id != sparing {
             delete(snapshot)
         }
     }
@@ -170,7 +179,7 @@ public struct GitSnapshot: Sendable {
         // instead of replacing state with no way back.
         let safety: SnapshotRef
         do {
-            safety = try create(label: "before restoring \(snapshot.label)")
+            safety = try create(label: "before restoring \(snapshot.label)", sparing: snapshot.id)
         } catch {
             throw SnapshotError.safetyFailed(snapshot.label)
         }
