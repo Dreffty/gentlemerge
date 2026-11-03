@@ -67,6 +67,7 @@ public struct HookInstaller: Sendable {
         if !dryRun { try writeScripts() }
 
         var settings = try readJSONObject(at: paths.claudeSettings)
+        let original = settings
         var hooks = settings["hooks"] as? [String: Any] ?? [:]
 
         for event in plan.notifyEvents {
@@ -136,8 +137,15 @@ public struct HookInstaller: Sendable {
             return Result(changed: false, backup: nil, notes: notes + ["(dry run — nothing written)"])
         }
 
+        // Installing again over the same install changes nothing, so it writes
+        // nothing: it used to rewrite the file and leave one more backup each
+        // time (audit 2026-11-03).
+        if areEqual(settings, original) {
+            return Result(changed: false, backup: nil, notes: notes + ["already installed — settings.json left as it was"])
+        }
+
         let backup = try backupIfPresent(paths.claudeSettings)
-        try writeJSONObject(settings, to: paths.claudeSettings)
+        try writeClaudeSettings(settings)
         return Result(changed: true, backup: backup, notes: notes)
     }
 
@@ -170,7 +178,7 @@ public struct HookInstaller: Sendable {
         }
 
         let backup = try backupIfPresent(paths.claudeSettings)
-        try writeJSONObject(settings, to: paths.claudeSettings)
+        try writeClaudeSettings(settings)
         return Result(changed: true, backup: backup, notes: removed.map { "removed from \($0)" })
     }
 
@@ -504,11 +512,25 @@ func parseTOMLStringArray(_ text: String) -> [String] {
         return object
     }
 
+    /// Only `hooks` is ours, so only `hooks` is rewritten; the rest of the
+    /// file keeps its order, spacing and indent (see `JSONSplice`). The edited
+    /// text is read back and must say exactly what was meant, or the whole
+    /// file is written instead.
+    func writeClaudeSettings(_ settings: [String: Any]) throws {
+        let url = paths.claudeSettings
+        if let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8),
+           let edited = JSONSplice.setting("hooks", to: settings["hooks"], in: text),
+           let reread = try? JSONSerialization.jsonObject(with: Data(edited.utf8)),
+           areEqual(reread, settings) {
+            try AtomicFile.write(Data(edited.utf8), to: url)
+            return
+        }
+        try writeJSONObject(settings, to: url)
+    }
+
     func writeJSONObject(_ object: [String: Any], to url: URL) throws {
-        let data = try JSONSerialization.data(
-            withJSONObject: object,
-            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        )
+        let data = try JSONSplice.render(object, unit: "  ", level: 0).map { Data(($0 + "\n").utf8) }
+            ?? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
         try AtomicFile.write(data, to: url)
     }
 
