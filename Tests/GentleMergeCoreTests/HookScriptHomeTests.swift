@@ -65,3 +65,40 @@ final class HookScriptHomeTests: XCTestCase {
     }
     #endif
 }
+
+/// A hook that exits non-zero is not harmless: Claude Code treats status 2 from a
+/// PreToolUse hook as "block this tool call", and `set -u` plus an unguarded
+/// `$HOME` made a missing HOME exactly that under dash (Linux's /bin/sh).
+final class HookScriptWithoutHomeTests: XCTestCase {
+    func testAMissingHomeIsASilentNoOpUnderEveryShell() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("hook-nohome-\(UUID())")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let hook = root.appendingPathComponent("hook.sh")
+        try HookScript.source.write(to: hook, atomically: true, encoding: .utf8)
+
+        let shells = ["/bin/sh", "/bin/dash", "/bin/bash"].filter { FileManager.default.isExecutableFile(atPath: $0) }
+        XCTAssertFalse(shells.isEmpty)
+        for shell in shells {
+            for mode in ["notify", "context", "advise"] {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: shell)
+                process.arguments = [hook.path, "--provider", "claude-code", "--mode", mode]
+                // No HOME, no GENTLEMERGE_HOME, no XDG_STATE_HOME.
+                process.environment = ["PATH": "/usr/bin:/bin", "CLAUDE_PROJECT_DIR": root.path]
+                process.currentDirectoryURL = root
+                let input = Pipe(), output = Pipe(), errors = Pipe()
+                process.standardInput = input
+                process.standardOutput = output
+                process.standardError = errors
+                try process.run()
+                input.fileHandleForWriting.write(Data(#"{"hook_event_name":"PreToolUse"}"#.utf8))
+                try input.fileHandleForWriting.close()
+                process.waitUntilExit()
+                let stderr = String(decoding: errors.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+                XCTAssertEqual(process.terminationStatus, 0, "\(shell) --mode \(mode): \(stderr)")
+                XCTAssertTrue(stderr.isEmpty, "\(shell) --mode \(mode) wrote to stderr: \(stderr)")
+            }
+        }
+    }
+}

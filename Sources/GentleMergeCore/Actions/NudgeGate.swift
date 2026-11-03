@@ -95,7 +95,7 @@ public enum NudgeGate {
             // pid reuse acknowledged in `Liveness`, that is a notice delivered
             // to whatever inherited the socket (audit Tier 5 #29).
             guard activity.state != .ended else { return .skipped("recipient has ended") }
-            guard Liveness.isProcessAlive(activity.pid) == true else { return .skipped("process is gone") }
+            guard Liveness.isProcessAlive(activity.pid, seenAt: activity.updatedAt) == true else { return .skipped("process is gone") }
             if let lastNudgedAt, now.timeIntervalSince(lastNudgedAt) < quietPeriod {
                 return .skipped("nudged \(RelativeTime.compact(from: lastNudgedAt, to: now)) ago")
             }
@@ -121,7 +121,7 @@ public enum NudgeGate {
         // other reader treats a missing pid as "assume alive" because the cost
         // of being wrong is a stale line in a briefing; here the cost is typing
         // into whatever inherited that terminal after the agent left it.
-        guard Liveness.isProcessAlive(activity.pid) == true else { return .skipped("process is gone") }
+        guard Liveness.isProcessAlive(activity.pid, seenAt: activity.updatedAt) == true else { return .skipped("process is gone") }
 
         #if os(macOS)
         guard let tty = activity.tty, !tty.isEmpty else { return .skipped("no terminal on record") }

@@ -55,7 +55,11 @@ public struct PrecommitGate: Sendable {
         // what is staged, and returning [] reads as "nothing is claimed" —
         // which is how a gate that cannot see turns into a gate that says yes.
         guard output.succeeded, !output.timedOut else {
-            Log.error("could not read the staged files in \(repo.path): \(output.stderr.isEmpty ? "git failed or timed out" : output.stderr)")
+            // Run outside a repository, `git diff --cached` is read as `--no-index`
+            // and answers with its whole usage text, ~120 lines of options. Five
+            // of those had filled most of a real log; the first line says it all.
+            let why = output.stderr.split(whereSeparator: \.isNewline).first.map { String($0.prefix(300)) }
+            Log.error("could not read the staged files in \(repo.path): \(why ?? "git failed or timed out")")
             return ["\(PrecommitGate.unreadableIndexSentinel)"]
         }
         return PrecommitCheck.parseStagedNameStatus(output.stdout)
@@ -105,7 +109,7 @@ public struct PrecommitGate: Sendable {
         activeRequests: [AgentRequest]? = nil,
         now: Date = Date(),
         presence: [Presence.PresenceMark] = [],
-        isPIDAlive: (@Sendable (Int) -> Bool?)? = nil
+        isPIDAlive: (@Sendable (Int, Date) -> Bool?)? = nil
     ) -> [Violation] {
         let effective: [PathClaim]
         if let isPIDAlive {

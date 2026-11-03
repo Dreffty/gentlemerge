@@ -23,7 +23,10 @@ public struct GitHookInstaller: Sendable {
     /// 3: the default gate path is expanded at run time (see `gateShellWord`).
     /// Revision 2 hooks installed with the standard home checked nothing, so
     /// they must be replaced, not merely left behind as "current".
-    public static let gateRevision = 3
+    ///
+    /// 4: the post-commit hook no longer skips the user's own chained hook when
+    /// `GENTLEMERGE_SKIP` is set, and "no" values (`0`, `false`) are not a skip.
+    public static let gateRevision = 4
     public static let marker = "# gentlemerge pre-commit (gate \(gateRevision))"
     public static let hookNames = ["pre-commit", "pre-merge-commit"]
     public static let postCommitMarker = "# gentlemerge post-commit (gate \(gateRevision))"
@@ -111,10 +114,17 @@ public struct GitHookInstaller: Sendable {
     \(postCommitMarker)
     # Releases my claims on what just landed. Never blocks, never fails: git
     # ignores a post-commit exit code, and this exits 0 regardless.
-    [ -n "$GENTLEMERGE_SKIP" ] && exit 0
+    # A skip only means "do not release my claims": the user's own post-commit
+    # hook, chained below, still has to run. Exiting here used to skip it too.
+    case "${GENTLEMERGE_SKIP:-}" in
+      ""|0|false|no|off) SKIPPED=0 ;;
+      *) SKIPPED=1 ;;
+    esac
     AI_DEFAULT=\(gateShellWord(gateDefault))
     AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
-    if [ -x "$AI" ]; then
+    if [ "$SKIPPED" = 1 ]; then
+      :
+    elif [ -x "$AI" ]; then
       "$AI" postcommit --project "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true
     else
       echo "gentlemerge: gate binary not found at $AI — claims on this commit are NOT released (they expire). Reinstall or set GENTLEMERGE_BIN." >&2
@@ -296,8 +306,11 @@ public struct GitHookInstaller: Sendable {
 
     public func uninstall(repo: URL) throws -> String {
         let (directory, _) = try targetHooksDir(for: repo)
+        // The unversioned prefix, so a gate of ANY revision is recognised: matching
+        // only the current marker left an older gate in place with the answer
+        // "not ours; left alone" — it could never be removed once upgraded past.
         let hooks: [(name: String, marker: String)] =
-            Self.hookNames.map { ($0, Self.marker) } + [("post-commit", Self.postCommitMarker)]
+            Self.hookNames.map { ($0, Self.legacyMarkers[0]) } + [("post-commit", Self.legacyMarkers[1])]
         var removed = 0
         for hook in hooks {
             let path = directory.appendingPathComponent(hook.name)

@@ -36,6 +36,12 @@ public struct SpoolStore: Sendable {
         drain(matching: envelopeID)
     }
 
+    /// Envelopes waiting to be drained.
+    public func pendingCount() -> Int {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: paths.spool.path)) ?? []
+        return names.filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") }.count
+    }
+
     private func drain(matching envelopeID: String?) -> [SpoolEnvelope] {
         let manager = FileManager.default
         guard let names = try? manager.contentsOfDirectory(atPath: paths.spool.path) else { return [] }
@@ -97,6 +103,25 @@ public struct SpoolStore: Sendable {
                 }
             }
         }
+    }
+
+    /// The app recorded in `app.pid`, if that process is alive and is a
+    /// gentlemerge. After a crash and a reboot the number can belong to any
+    /// program, and then the app is "not running" — not "running", and not a
+    /// reason to refuse to start one (audit 2026-11-01). `pid > 0` before
+    /// `kill`: `kill(-1, 0)` succeeds for "any process", `0` is our own group.
+    public func runningAppPID() -> Int32? {
+        guard let raw = try? String(contentsOf: paths.appPID, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              let pid = Int32(raw), pid > 0, kill(pid, 0) == 0 || errno == EPERM
+        else { return nil }
+        #if os(macOS)
+        var buffer = [CChar](repeating: 0, count: 4096)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+        return URL(fileURLWithPath: String(cString: buffer)).lastPathComponent == "gentlemerge" ? pid : nil
+        #else
+        return pid
+        #endif
     }
 
     /// Lets `gentlemerge status` tell you whether the app is up.

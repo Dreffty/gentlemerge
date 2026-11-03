@@ -30,6 +30,10 @@ public enum Landing {
         /// `noMergeBase`, which is a fact about the repository (Tier 2 #8).
         case radarUnanswered(branch: String, into: String, detail: String)
         case conflicts(branch: String, into: String, details: [ConflictDetail])
+        /// The checkout that has the target branch open is dirty in files this branch
+        /// also changes, so the final fast-forward would be refused — found *before*
+        /// the rebase, not after it had already rewritten the branch.
+        case targetCheckoutDirty(into: String, checkout: String, files: [String])
         case rebaseFailed(into: String, output: String)
         case checksFailed([CheckResult])
         case cannotFastForward(reason: String)
@@ -65,6 +69,17 @@ public enum Landing {
                     lines.append("  \(detail.path) (touched by \(who))")
                 }
                 lines.append("Coordinate, rebase by hand, then land again.")
+                return lines.joined(separator: "\n")
+            case .targetCheckoutDirty(let into, let checkout, let files):
+                var lines = ["`\(into)` is checked out in \(checkout), with uncommitted changes to files this branch also changes:"]
+                lines += files.map { "  \($0)" }
+                if files.contains(".gentlemerge/HANDOFF.md") {
+                    lines.append("(.gentlemerge/HANDOFF.md is rewritten by GentleMerge as agents work: commit it on"
+                        + " `\(into)`, or discard it there with `git -C \(checkout) checkout -- .gentlemerge/HANDOFF.md`.)")
+                } else {
+                    lines.append("Commit or restore them there first.")
+                }
+                lines.append("Nothing was rebased and `\(into)` is untouched.")
                 return lines.joined(separator: "\n")
             case .rebaseFailed(let into, let output):
                 // The abort status rides in `output`: a hardcoded claim here
@@ -285,6 +300,19 @@ public enum Landing {
                 ConflictDetail(path: path, authors: authorsOf(path: path, branch: branch, into: into, repo: repoPath))
             }
             throw Failure.conflicts(branch: branch, into: into, details: details)
+        }
+
+        // The last step is a fast-forward in whichever checkout has `into` open, and git
+        // refuses it when that checkout is dirty in a file the branch changes. Known
+        // now, so the branch is not rebased (new SHAs) for a landing that cannot finish.
+        if let checkout = checkedOutWorktree(of: into, in: repoPath) {
+            let base = git(["merge-base", into, branch], in: repoPath).stdout
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !base.isEmpty, let branchTip = tip(of: branch, repo: repoPath) {
+                let changing = Set(filesChanged(from: base, to: branchTip, repo: repoPath))
+                let clash = dirtyFiles(repo: checkout).filter { changing.contains($0) }.sorted()
+                if !clash.isEmpty { throw Failure.targetCheckoutDirty(into: into, checkout: checkout, files: clash) }
+            }
         }
 
         let planned = skipChecks ? [] : ProjectChecks.checks(for: repo).filter({ !$0.optional })

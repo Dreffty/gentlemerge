@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Every path the app touches. `GENTLEMERGE_HOME` redirects the whole tree,
 /// which is what tests and dry runs use so nothing escapes into the real home.
@@ -13,9 +18,32 @@ public struct Paths: Sendable {
         self.codexConfigOverride = codexConfig
     }
 
-    public static func fromEnvironment(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> Paths {
+    /// The paths for this process. Under XCTest with no `GENTLEMERGE_HOME`, a scratch
+    /// directory instead of the real home: the suite called `ProjectRegistry.addTask`
+    /// and friends with their default `paths`, so every `swift test` left two dozen
+    /// `handoff-*.lock` files (and whatever else a test touched) in the developer's own
+    /// `~/.gentlemerge`.
+    public static func fromEnvironment() -> Paths {
+        let environment = ProcessInfo.processInfo.environment
+        // `swift test` does not always export the XCTest variables, but it always loads
+        // XCTest into the process; the real binaries (and the children a test starts) never do.
+        #if canImport(ObjectiveC)
+        let xctestLoaded = NSClassFromString("XCTestCase") != nil
+        #else
+        let xctestLoaded = false
+        #endif
+        let underTest = xctestLoaded
+            || environment["XCTestConfigurationFilePath"] != nil
+            || environment["XCTestBundlePath"] != nil
+        if underTest, (environment["GENTLEMERGE_HOME"] ?? "").isEmpty {
+            let scratch = URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("gentlemerge-xctest-home-\(getpid())", isDirectory: true)
+            return fromEnvironment(environment.merging(["GENTLEMERGE_HOME": scratch.path]) { _, new in new })
+        }
+        return fromEnvironment(environment)
+    }
+
+    public static func fromEnvironment(_ environment: [String: String]) -> Paths {
         func url(_ key: String) -> URL? {
             guard let value = environment[key], !value.isEmpty else { return nil }
             return URL(fileURLWithPath: (value as NSString).expandingTildeInPath)

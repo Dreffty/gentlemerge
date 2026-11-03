@@ -55,6 +55,11 @@ final class DemoTests: XCTestCase {
             try git(["init", "-q", "-b", "main"])
             try git(["config", "user.name", "caller"])
             try git(["config", "user.email", "caller@example.invalid"])
+            // `git commit` can start `maintenance run --auto` in the background; its
+            // `objects/maintenance.lock` appears and disappears while the snapshot
+            // below walks the directory, which failed CI once on an unrelated push.
+            try git(["config", "maintenance.auto", "false"])
+            try git(["config", "gc.auto", "0"])
             try AtomicFile.write(Data("original\n".utf8), to: caller.appendingPathComponent("sentinel.txt"))
             try git(["add", "."])
             try git(["-c", "commit.gpgsign=false", "commit", "-qm", "caller initial"])
@@ -84,9 +89,11 @@ final class DemoTests: XCTestCase {
         let files = try XCTUnwrap(FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]))
         var result: [String: Data] = [:]
         for case let file as URL in files {
-            if try file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true {
-                result[String(file.path.dropFirst(root.path.count))] = try Data(contentsOf: file)
-            }
+            // A file that vanishes between listing and reading was never part of the
+            // caller's work (a git lock, say); skip it rather than fail the test.
+            guard (try? file.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true,
+                  let data = try? Data(contentsOf: file) else { continue }
+            result[String(file.path.dropFirst(root.path.count))] = data
         }
         return result
     }

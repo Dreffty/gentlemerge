@@ -7,14 +7,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-22.04]
+        # macos-14 is retired on 2026-11-02 and its brownouts were already
+        # cancelling the job before it started — every macOS run since
+        # 7986555 ended "cancelled", so nothing below was being verified.
+        os: [macos-15, ubuntu-22.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: swift-actions/setup-swift@v2
+      # Linux gets a swift.org toolchain. macOS builds with the Xcode the
+      # runner ships, which is what anyone building on a Mac uses: the swift.org
+      # 6.0.3 toolchain on macos-15 crashed the compiler (signal 6, emitting IR
+      # for the SwiftUI App) against that image's newer SDK.
+      - if: runner.os == 'Linux'
+        uses: swift-actions/setup-swift@v2
         with:
           swift-version: "6.0"
+      - run: swift --version
       # `review` shells out to the project's own package script, and the smoke
       # test asserts on that line. macOS only, because the smoke test is.
       - if: runner.os == 'macOS'
@@ -48,3 +57,24 @@ jobs:
         run: make app
       - if: runner.os == 'macOS'
         run: GENTLEMERGE_BIN="$PWD/.build/release/gentlemerge" bash Scripts/smoke-test.sh
+      # A crash in the app shows up above only as checks that waited in vain.
+      # macOS writes the reason to a crash report; print the newest one.
+      - if: failure() && runner.os == 'macOS'
+        run: |
+          report=$(ls -t ~/Library/Logs/DiagnosticReports/gentlemerge* 2>/dev/null | head -1)
+          if [ -z "$report" ]; then echo "no crash report"; exit 0; fi
+          python3 - "$report" <<'PY'
+          import json, sys
+          text = open(sys.argv[1]).read()
+          body = json.loads(text[text.index("\n") + 1:])
+          print("exception:", body.get("exception"))
+          print("termination:", body.get("termination"))
+          for key in ("asi", "lastExceptionBacktrace"):
+              if key in body: print(key + ":", json.dumps(body[key])[:3000])
+          images = body.get("usedImages", [])
+          thread = body["threads"][body["faultingThread"]]
+          print("faulting thread", body["faultingThread"], thread.get("queue", ""), thread.get("name", ""))
+          for frame in thread["frames"][:40]:
+              image = images[frame["imageIndex"]].get("name", "?") if frame.get("imageIndex") is not None else "?"
+              print("  ", image, frame.get("symbol", hex(frame.get("imageOffset", 0))), frame.get("sourceFile", ""), frame.get("sourceLine", ""))
+          PY

@@ -51,7 +51,11 @@ final class HookInstallerTests: XCTestCase {
         XCTAssertEqual(stopCommands.filter { $0.contains(HookInstaller.marker) }.count, 1)
 
         XCTAssertTrue(commands(in: updated, event: "Notification").contains { $0.contains("--mode notify") })
-        XCTAssertTrue(commands(in: updated, event: "PreToolUse").isEmpty, "remote approval is opt-in")
+        // The advise hook (not the old remote-approval one) is part of the install.
+        // This line used to assert that PreToolUse stayed EMPTY, "remote approval is
+        // opt-in" — which pinned the bug where the advise entry was written and
+        // then stripped again, so the README's whole "Advised" tier never existed.
+        XCTAssertEqual(commands(in: updated, event: "PreToolUse").filter { $0.contains("--mode advise") }.count, 1)
 
         // Without SessionStart there is no baseline commit, and a review can
         // only diff against HEAD — which is not what the session changed.

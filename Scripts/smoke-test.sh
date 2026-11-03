@@ -52,8 +52,13 @@ echo "installer"
 check "hook script is executable" "$([ -x "$HOOK" ] && echo yes || echo no)" "yes"
 check "settings.json is valid JSON" \
     "$(python3 -c 'import json,sys; json.load(open(sys.argv[1])); print("yes")' "$GENTLEMERGE_CLAUDE_SETTINGS" 2>/dev/null)" "yes"
-check "nothing of ours gates a tool call" \
-    "$(grep -c 'PreToolUse' "$GENTLEMERGE_CLAUDE_SETTINGS")" "0"
+# The advise hook is part of the install (it used to be written and then stripped, so
+# this line asserted its ABSENCE). It warns before an edit lands on a claimed path; it
+# never answers a permission prompt for the agent.
+check "the advise hook is installed on the editing tools" \
+    "$(grep -c -- '--mode advise' "$GENTLEMERGE_CLAUDE_SETTINGS")" "1"
+check "and nothing of ours approves or denies a tool call by itself" \
+    "$(grep -c -- '--mode blocking' "$GENTLEMERGE_CLAUDE_SETTINGS")" "0"
 check "the binary is reachable from the hook" \
     "$([ -x "$GENTLEMERGE_HOME/bin/gentlemerge" ] && echo yes || echo no)" "yes"
 
@@ -226,7 +231,15 @@ else
     # agents are long-lived, so hand the hook the app's own pid to stand in.
     (cd "$REPO" && printf '{"session_id":"codex-1","type":"agent-turn-complete","last-assistant-message":"he migrado el schema de misiones"}' |
         GENTLEMERGE_PID=$TEST_APP_PID sh "$HOOK" --provider codex --mode notify) >/dev/null
-    wait_for "codex-1" || fail "the app never picked up the codex session"
+    if ! wait_for "codex-1"; then
+        fail "the app never picked up the codex session"
+        # Six failures below follow from this one; say why it happened. An app
+        # that died at launch left nothing but "never picked up" before.
+        if ! kill -0 "$TEST_APP_PID" 2>/dev/null; then
+            printf "  the app exited early; the last of its log:\n"
+            tail -40 "$SANDBOX/app.log" | sed 's/^/    /'
+        fi
+    fi
 
     # Claude starts a turn in the same project and is told about it.
     OUT=$(cd "$REPO" && printf '{"session_id":"claude-1","hook_event_name":"UserPromptSubmit","prompt":"arregla el generador"}' |
@@ -309,7 +322,7 @@ check "and does reach the one it names" \
 # The name is who runs the command, so it is who the note is from.
 GENTLEMERGE_NAME=claude#exec1 "$BIN" say "fase 5 lista" --project "$REPO" >/dev/null
 check "an executor signs with the name it was given" \
-    "$(cd "$REPO" && "$BIN" brief --as codex | grep -c 'claude#exec1')" "1"
+    "$(cd "$REPO" && "$BIN" brief --as codex | grep -c 'claude#exec1.*fase 5 lista')" "1"
 
 echo "nothing sensitive crosses the bus"
 SKEY="ghp_TEST00000000000000000000FAKE"

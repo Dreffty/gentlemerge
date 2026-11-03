@@ -8,7 +8,10 @@ import XCTest
 /// how to try it by hand.
 final class NudgeGateTests: XCTestCase {
     private let project = "/tmp/gameapp"
-    private let now = Date(timeIntervalSince1970: 1_770_000_000)
+    // Now, not a fixed date: the sessions below run under this test's own pid,
+    // and a session last seen before its process started is somebody else's
+    // (see `Liveness`).
+    private let now = Date()
 
     private var allowed: AppConfig {
         var config = AppConfig()

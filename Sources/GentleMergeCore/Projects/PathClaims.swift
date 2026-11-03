@@ -209,16 +209,46 @@ public struct PathClaims: Sendable {
         )
     }
 
-    public func release(label: String, project: String, patterns: [String]? = nil, requestID: String? = nil) throws {
+    ///
+    /// Returns what was released: a pattern that is not named exactly as it was claimed
+    /// releases nothing, and the caller used to say "Released 1 claim(s)" anyway.
+    @discardableResult
+    public func release(label: String, project: String, patterns: [String]? = nil, requestID: String? = nil) throws -> [PathClaim] {
+        var released: [PathClaim] = []
         try mutate { claims in
-            claims.removeAll { claim in
+            released = claims.filter { claim in
                 claim.label == label && claim.projectPath == project &&
                     (requestID == nil || claim.requestID == requestID) &&
                     (patterns == nil || patterns!.contains {
                         Glob.normalize($0) == Glob.normalize(claim.pattern)
                     })
             }
+            claims.removeAll { released.contains($0) }
         }
+        return released
+    }
+
+    /// What `release` did, in words: what went, and — when something asked for did
+    /// not match — what the label does hold, since a claim is released by the exact
+    /// pattern it was made with.
+    public func releaseSummary(released: [PathClaim], asked patterns: [String]?, label: String, project: String) -> String {
+        let patternsList: (([PathClaim]) -> String) = { $0.map { "`\($0.pattern)`" }.joined(separator: ", ") }
+        if patterns == nil {
+            return released.isEmpty
+                ? "Nothing to release: \(label) holds no claims in \(project)."
+                : "Released every claim by \(label) in \(project): \(patternsList(released))"
+        }
+        let held = live(project: project).filter { $0.label == label }
+        let unmatched = (patterns ?? []).filter { asked in
+            !released.contains { Glob.normalize($0.pattern) == Glob.normalize(asked) }
+        }
+        var lines: [String] = []
+        if !released.isEmpty { lines.append("Released \(patternsList(released))") }
+        if !unmatched.isEmpty {
+            lines.append("Nothing released for \(unmatched.map { "`\($0)`" }.joined(separator: ", ")): no claim of \(label) is named exactly like that."
+                + (held.isEmpty ? " You hold no claims here." : " You hold: \(patternsList(held))."))
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// Hand back every claim of `label` that covers one of `files` — the paths
@@ -258,8 +288,9 @@ public struct PathClaims: Sendable {
     /// `kill -9`) never releases, and without reaping its paths stay blocked
     /// until the TTL runs out: coordination that stops work.
     ///
-    /// Pure: `isPIDAlive` answers `kill(pid, 0)` (`nil` = unknown, never
-    /// dead), presence is the marks on disk. A claim is reaped only on one of
+    /// Pure: `isPIDAlive` answers `kill(pid, 0)` for a pid and the moment its
+    /// mark was written (`nil` = unknown, never dead; see `Liveness`),
+    /// presence is the marks on disk. A claim is reaped only on one of
     /// two independent signs that its session is dead:
     /// - a presence mark for its label names a pid that is dead, or
     /// - every mark for its label is stale (silent past the presence TTL) —
@@ -272,7 +303,7 @@ public struct PathClaims: Sendable {
     public static func reap(
         _ claims: [PathClaim],
         presence: [Presence.PresenceMark],
-        isPIDAlive: @Sendable (Int) -> Bool?,
+        isPIDAlive: @Sendable (Int, Date) -> Bool?,
         now: Date = Date()
     ) -> (live: [PathClaim], reaped: [PathClaim]) {
         var live: [PathClaim] = []
@@ -292,13 +323,14 @@ public struct PathClaims: Sendable {
             }
             let dead: Bool = {
                 guard !marks.isEmpty else { return false }
-                if marks.contains(where: { $0.pid.map(isPIDAlive) == false }) { return true }
+                if marks.contains(where: { mark in mark.pid.map { isPIDAlive($0, mark.updatedAt) } == false }) { return true }
                 // Staleness is not death. A session still running that has not
                 // written a heartbeat in a while must keep its claim; only
                 // marks whose process is gone *and* whose heartbeat is old
                 // count as evidence that the owner is gone.
-                return marks.allSatisfy {
-                    $0.pid.map(isPIDAlive) != true && now.timeIntervalSince($0.updatedAt) >= Presence.timeToLive
+                return marks.allSatisfy { mark in
+                    mark.pid.map { isPIDAlive($0, mark.updatedAt) } != true
+                        && now.timeIntervalSince(mark.updatedAt) >= Presence.timeToLive
                 }
             }()
             if dead { reaped.append(claim) } else { live.append(claim) }

@@ -160,23 +160,44 @@ public struct AppConfig: Codable, Sendable, Equatable {
     // MARK: - Persistence
 
     public static func load(from url: URL) -> AppConfig {
-        guard
-            let data = try? Data(contentsOf: url),
-            let config = try? JSONCoding.decoder().decode(AppConfig.self, from: data)
-        else {
-            return AppConfig()
+        loadChecked(from: url).config
+    }
+
+    /// `load`, plus the one thing it used to swallow: a file that is there and
+    /// cannot be read. A hand-edited `config.json` with a typo came back as a
+    /// whole default config with no word said, so `claimsPolicy: "deny"` quietly
+    /// became `warn` — and the next `config set` wrote those defaults over the
+    /// user's file, `agents` list included. `problem` is nil for a missing file
+    /// (a fresh install is not a fault) and for one that decodes.
+    public static func loadChecked(from url: URL) -> (config: AppConfig, problem: String?) {
+        guard let data = try? Data(contentsOf: url) else { return (AppConfig(), nil) }
+        do {
+            return (try JSONCoding.decoder().decode(AppConfig.self, from: data), nil)
+        } catch {
+            return (AppConfig(), "\(url.lastPathComponent) is not valid JSON (\(error.localizedDescription))")
         }
-        return config
     }
 
     /// Throws rather than logging.
-///
-/// A silent failure here is worse than a crash: `gentlemerge config set
+    ///
+    /// A silent failure here is worse than a crash: `gentlemerge config set
     /// claimsPolicy deny` printed `deny` and exited 0 on a read-only or full
     /// home, having persisted nothing — so the user believed a setting had
     /// changed when it had not (audit Tier 5 #31). Callers that genuinely want
     /// the old behaviour can drop the result; the CLI must not.
+    ///
+    /// A file that is there but unreadable is copied aside first
+    /// (`config.json.unreadable-<stamp>`): the defaults being written would
+    /// otherwise destroy whatever the user had typed in it.
     public func save(to url: URL) throws {
+        if let existing = try? Data(contentsOf: url),
+           (try? JSONCoding.decoder().decode(AppConfig.self, from: existing)) == nil {
+            let stamp = ISO8601DateFormatter.gentleMerge.string(from: Date())
+                .replacingOccurrences(of: ":", with: "-")
+            let aside = url.deletingLastPathComponent()
+                .appendingPathComponent("\(url.lastPathComponent).unreadable-\(stamp)")
+            try? existing.write(to: aside)
+        }
         try AtomicFile.write(try JSONCoding.encoder(pretty: true).encode(self), to: url)
     }
 }

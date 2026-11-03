@@ -1,4 +1,9 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// Executes only locally configured commands; callers must first apply DispatchGate.
 public struct Dispatcher: Sendable {
@@ -86,6 +91,25 @@ public struct Dispatcher: Sendable {
         cache = (fingerprint, starts)
         cacheLock.unlock()
         return starts
+    }
+
+    /// Takes the one start a request is allowed, for every process at once.
+    ///
+    /// "Already dispatched" lived in each process's memory, so every `brief`,
+    /// `claims` or `precommit` — each a fresh process that drains the spool — saw
+    /// the same assigned request and started the headless agent again: three read
+    /// commands, three `dispatch.start` lines and three child processes for one
+    /// request, each spending the daily budget. A restart of the app did the same.
+    /// An exclusive create settles it on disk: whoever creates the marker starts the
+    /// agent, everybody else leaves it alone.
+    public func claimStart(of requestID: String) -> Bool {
+        guard Requests.validID(requestID) else { return false }
+        try? FileManager.default.createDirectory(at: paths.dispatch, withIntermediateDirectories: true)
+        let marker = paths.dispatch.appendingPathComponent("\(requestID).started")
+        let descriptor = open(marker.path, O_WRONLY | O_CREAT | O_EXCL, 0o600)
+        guard descriptor >= 0 else { return false }
+        close(descriptor)
+        return true
     }
 
     public func promptText(for r: AgentRequest) -> String {

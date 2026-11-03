@@ -109,6 +109,13 @@ public struct SpoolEnvelope: Codable, Sendable, Equatable {
         try container.encode(payload, forKey: .payload)
     }
 
+    /// The label as it can be used for routing: scrubbed to what a label may be,
+    /// nil when the hook did not resolve one.
+    public var sessionLabel: String? {
+        guard let label, !label.isEmpty else { return nil }
+        return Identity.safe(label)
+    }
+
     // MARK: - Payload shortcuts
 
     public var eventName: String? {

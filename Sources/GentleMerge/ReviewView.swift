@@ -106,7 +106,9 @@ struct ReviewView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else if review.work.changes.isEmpty {
-                Text("No file changes since this session started.")
+                Text(review.work.problem == nil
+                    ? "No file changes since this session started."
+                    : "Nothing could be compared — see below.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
@@ -239,7 +241,7 @@ struct ReviewView: View {
             SectionHeader("Earlier reviews")
             ForEach(model.reviews.prefix(5)) { past in
                 HStack(spacing: 6) {
-                    Image(systemName: past.verdict == .problems ? "xmark.circle.fill" : "checkmark.circle")
+                    Image(systemName: past.historySymbol)
                         .font(.caption)
                         .foregroundStyle(verdictColor(past))
                     Text(past.projectName)

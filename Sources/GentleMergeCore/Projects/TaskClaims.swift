@@ -125,14 +125,14 @@ public struct TaskClaims: Sendable {
 
         if let sessionID = claim.sessionID,
            let session = activities.first(where: { $0.id == sessionID }) {
-            if session.state == .ended || Liveness.isProcessAlive(session.pid) == false { return true }
+            if session.state == .ended || Liveness.isProcessAlive(session.pid, seenAt: session.updatedAt) == false { return true }
             if session.isLive { return false }
         }
 
         let claimerIsWorking = activities.contains { activity in
             activity.projectPath == claim.projectPath
                 && activity.isLive
-                && Liveness.isProcessAlive(activity.pid) != false
+                && Liveness.isProcessAlive(activity.pid, seenAt: activity.updatedAt) != false
                 && Self.sameAgent(AgentBus.label(for: activity.provider), claim.claimedBy)
         }
         if claimerIsWorking { return false }
@@ -250,6 +250,14 @@ public struct TaskClaims: Sendable {
     /// this label is a safe guess; two of them is not, and an unknown session
     /// only costs the claim its death rule, never its correctness.
     public func currentSessionID(for label: String, in project: String) -> String? {
+        // The session says who it is. Claude Code exports its own session id to the
+        // tool calls it runs, and that is exact; guessing "the one live session of this
+        // provider" fails the moment two are open, which is the case this tool is for.
+        if let own = ProcessInfo.processInfo.environment[Presence.sessionEnvironmentKey], !own.isEmpty,
+           SessionRegistry(url: paths.sessions)[own] != nil
+            || AgentBus(paths: paths).storedActivities().contains(where: { $0.id == own }) {
+            return own
+        }
         let candidates = AgentBus(paths: paths)
             .others(excluding: nil, project: project)
             .filter { Self.sameAgent(AgentBus.label(for: $0.provider), label) }

@@ -20,6 +20,26 @@ final class TerminalScriptNameTests: XCTestCase {
         XCTAssertEqual(ScriptableTerminal.applicationName(for: "terminal"), "Terminal")
     }
 
+    /// The scripts only ever talk to terminals that are open: telling a closed app
+    /// something launches it, and a missing one raises a "Where is …?" dialog.
+    func testOnlyOpenTerminalsAreScripted() {
+        let isOpen: (String) -> Bool = { !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty }
+        for program in [nil, "vscode", "ghostty", "iTerm.app", "Apple_Terminal"] {
+            for terminal in ScriptableTerminal.running(for: program) {
+                switch terminal {
+                case .appleTerminal: XCTAssertTrue(isOpen("com.apple.Terminal"), "\(program ?? "nil")")
+                case .iTerm: XCTAssertTrue(isOpen("com.googlecode.iterm2"), "\(program ?? "nil")")
+                }
+            }
+            let names = ScriptableTerminal.running(for: program).map(\.applicationName)
+            XCTAssertEqual(names.count, Set(names).count, "iTerm and iTerm2 are one app; asked once: \(names)")
+        }
+    }
+
+    func testAnAppThatIsNotRunningIsNeverFound() {
+        XCTAssertNil(ScriptableTerminal.runningApplication(named: "definitely-not-an-app-\(UUID().uuidString.prefix(6))"))
+    }
+
     /// A real terminal name we do not have a case for must still come through.
     func testAnUnrecognisedButPlausibleNameIsKept() {
         XCTAssertEqual(ScriptableTerminal.applicationName(for: "Alacritty.app"), "Alacritty")

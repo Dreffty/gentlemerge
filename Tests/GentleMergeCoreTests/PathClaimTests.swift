@@ -348,7 +348,7 @@ final class PrecommitGateTests: XCTestCase {
         XCTAssertTrue(PrecommitGate.evaluate(
             staged: ["lib/store/a.swift"], me: "codex",
             claims: [claim("claude", "lib/**")], ownership: ownership,
-            presence: presence, isPIDAlive: { _ in false }
+            presence: presence, isPIDAlive: { _, _ in false }
         ).isEmpty, "a session that died without releasing must not block the living")
     }
 
@@ -359,7 +359,7 @@ final class PrecommitGateTests: XCTestCase {
         XCTAssertEqual(PrecommitGate.evaluate(
             staged: ["lib/store/a.swift"], me: "codex",
             claims: [claim("claude", "lib/**")], ownership: ownership,
-            presence: presence, isPIDAlive: { _ in true }
+            presence: presence, isPIDAlive: { _, _ in true }
         ).count, 1)
     }
 
@@ -370,7 +370,7 @@ final class PrecommitGateTests: XCTestCase {
         XCTAssertTrue(PrecommitGate.evaluate(
             staged: ["assets/x.png"], me: "claude",
             claims: [claim("claude", "assets/**")], ownership: ownership,
-            presence: presence, isPIDAlive: { _ in false }
+            presence: presence, isPIDAlive: { _, _ in false }
         ).isEmpty, "you cannot be dead while committing")
     }
 
@@ -397,7 +397,7 @@ final class ReapingTests: XCTestCase {
     func testADeadPIDReaps() {
         let (live, reaped) = PathClaims.reap(
             [claim("hermes")], presence: [mark("hermes", pid: 999_999)],
-            isPIDAlive: { _ in false }, now: now)
+            isPIDAlive: { _, _ in false }, now: now)
         XCTAssertTrue(live.isEmpty)
         XCTAssertEqual(reaped.count, 1)
     }
@@ -405,7 +405,7 @@ final class ReapingTests: XCTestCase {
     func testALivePIDKeeps() {
         let (live, reaped) = PathClaims.reap(
             [claim("hermes")], presence: [mark("hermes", pid: 1)],
-            isPIDAlive: { _ in true }, now: now)
+            isPIDAlive: { _, _ in true }, now: now)
         XCTAssertEqual(live.count, 1)
         XCTAssertTrue(reaped.isEmpty)
     }
@@ -413,7 +413,7 @@ final class ReapingTests: XCTestCase {
     func testNoMarksMeansUnknownNeverDead() {
         let (live, reaped) = PathClaims.reap(
             [claim("hermes")], presence: [],
-            isPIDAlive: { _ in nil }, now: now)
+            isPIDAlive: { _, _ in nil }, now: now)
         XCTAssertEqual(live.count, 1, "a plain shell leaves no presence; reaping it would punish the least instrumented agent")
         XCTAssertTrue(reaped.isEmpty)
     }
@@ -421,7 +421,7 @@ final class ReapingTests: XCTestCase {
     func testStalePresenceReapsWithoutAPID() {
         let (live, reaped) = PathClaims.reap(
             [claim("hermes")], presence: [mark("hermes", updatedMinutesAgo: 60)],
-            isPIDAlive: { _ in nil }, now: now)
+            isPIDAlive: { _, _ in nil }, now: now)
         XCTAssertTrue(live.isEmpty)
         XCTAssertEqual(reaped.count, 1)
     }
@@ -429,7 +429,7 @@ final class ReapingTests: XCTestCase {
     func testFreshPresenceWithoutPIDKeeps() {
         let (live, reaped) = PathClaims.reap(
             [claim("hermes")], presence: [mark("hermes")],
-            isPIDAlive: { _ in nil }, now: now)
+            isPIDAlive: { _, _ in nil }, now: now)
         XCTAssertEqual(live.count, 1)
         XCTAssertTrue(reaped.isEmpty)
     }
@@ -437,7 +437,7 @@ final class ReapingTests: XCTestCase {
     func testExpiredClaimsAreNotReaped() {
         let (live, reaped) = PathClaims.reap(
             [claim("hermes", ttl: -1)], presence: [mark("hermes", pid: 9)],
-            isPIDAlive: { _ in false }, now: now)
+            isPIDAlive: { _, _ in false }, now: now)
         XCTAssertTrue(live.isEmpty)
         XCTAssertTrue(reaped.isEmpty, "already dead by time is not reaped")
     }
@@ -445,7 +445,7 @@ final class ReapingTests: XCTestCase {
     func testASubagentMarkSpeaksForTheParentClaim() {
         let (live, reaped) = PathClaims.reap(
             [claim("claude")], presence: [mark("claude#exec1", pid: 9)],
-            isPIDAlive: { _ in false }, now: now)
+            isPIDAlive: { _, _ in false }, now: now)
         XCTAssertTrue(live.isEmpty)
         XCTAssertEqual(reaped.count, 1)
     }

@@ -298,3 +298,17 @@ public enum RequestError: Error, CustomStringConvertible {
         }
     }
 }
+
+
+extension AgentRequest {
+    /// Whether the window should list this request as open.
+    ///
+    /// A finished request somebody else delegated is that agent's business until it
+    /// acknowledges the result; listing it made "Requests · N open" count work that
+    /// was done, for up to a week. What stays visible is anything still moving, and
+    /// the results addressed to the person at the keyboard (`from == "you"`), who is
+    /// the one who acknowledges them from that very window.
+    public var isOpenInTheWindow: Bool {
+        state != .acked && (!state.isTerminal || from == "you")
+    }
+}

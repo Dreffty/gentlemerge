@@ -41,7 +41,10 @@ final class Notifier: NSObject {
             )
         ])
 
-        center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
+        // `@Sendable` spelled out: the system calls this back on a queue of its
+        // own, and a closure that inherited this method's main-actor isolation
+        // (what an SDK without the annotation infers) traps there on macOS 15.
+        center.requestAuthorization(options: [.alert, .sound]) { @Sendable [weak self] granted, _ in
             Task { @MainActor in self?.authorized = granted }
         }
     }

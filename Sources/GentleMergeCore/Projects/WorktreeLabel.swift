@@ -87,7 +87,23 @@ public enum WorktreeLabel {
             throw LabelError.gitRefused(path: repo.path,
                                        detail: output.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
-        return "label `\(safe)` set for this worktree"
+        return "label `\(safe)` set for this worktree" + cleaningNote(asked: label, stored: safe)
+    }
+
+    /// A label is typed once and read for ever. When the cleaned name is not the
+    /// one that was typed — `ñandú` stored as `and`, `日本語` as the generic
+    /// `agent` — say so, because two agents named like that would otherwise end
+    /// up as the same agent without either being told.
+    static func cleaningNote(asked: String, stored: String) -> String {
+        guard asked != stored else { return "" }
+        let allowed = "Only letters, digits and # - _ . are kept, up to 24 characters."
+        let usable = asked.utf8.contains { byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                || [35, 45, 95, 46].contains(byte)
+        }
+        return usable
+            ? " (cleaned from `\(asked)`. \(allowed))"
+            : " — nothing in `\(asked)` can be used, so it fell back to the generic `agent`. \(allowed) Pick another name if more than one agent shares this repository."
     }
 }
 
