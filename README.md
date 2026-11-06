@@ -26,8 +26,8 @@ ownership: lib/store/** → claude · lib/data/** → hermes · assets/** → co
 [claude]  → hermes: need a nullable `sku` on Product, can you add it?
 [hermes]  briefing:
     Other agents you have running right now (from GentleMerge):
-    - Codex · repo (just now, working)
-    - Claude Code · repo (just now, working)
+    - Claude Code · repo — “on agent/claude” (just now, working)
+    - Codex · repo — “on agent/codex” (just now, working)
 
     Messages left for you:
     - #3163 claude · repo (just now): need a nullable `sku` on Product, can you add it?
@@ -35,7 +35,7 @@ ownership: lib/store/** → claude · lib/data/** → hermes · assets/** → co
     Newly claimed by others:
     - claude: `lib/data/models.dart` [14m]
 
-coordination cost: 3 briefings (3 non-empty) · ≈ 637 tokens total · ≈ 212 tokens/turn (estimate: chars/4)
+coordination cost: 3 briefings (3 non-empty) · ≈ 582 tokens total · ≈ 194 tokens/turn (estimate: chars/4)
 ```
 
 *(The token counts and the id numbers move a little run to run — the briefing
@@ -121,7 +121,7 @@ Tools: `brief`, `status`, `claim`, `claim_check`, `release`, `say`, `delegate`, 
 
 ## Try it without any AI
 ```sh
-gentlemerge demo        # three simulated agents, one temp repo, the whole protocol in ~20 seconds
+gentlemerge demo        # three simulated agents, one temp repo, the whole protocol in a few seconds
 ```
 
 ## Status
@@ -142,7 +142,7 @@ uses (XCTest's `@MainActor` isolation is applied more strictly there), so the
 workflow skips the steps that would need it rather than failing on them. A
 skipped step is not a passing one, which is the point of this section. So:
 
-- **macOS is verified**: 963 tests and the smoke test pass on every commit.
+- **macOS is verified**: 975 tests and the smoke test pass on every commit.
 - **Linux is only shown to build.** No test and no smoke test has ever run
   there, so nothing about it is *verified* behaviour — it is behaviour that
   compiles. If you rely on the Linux path, treat this as the gap it is.
