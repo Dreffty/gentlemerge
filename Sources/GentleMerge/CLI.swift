@@ -28,6 +28,15 @@ enum CLI {
         let command = arguments.dropFirst().first
         let rest = Array(arguments.dropFirst(2))
 
+        // Asking about a command never runs it. No command looked for `--help`,
+        // so they all ignored it and did their job: `uninstall --help` removed
+        // the hooks, `compact --help` deep-cleaned, `land --help` merged
+        // (audit 2026-11-06). Up here, before anything can act or leave a trace.
+        if let command, command != "help", asksForHelp(rest) {
+            printUsage(of: command)
+            return 0
+        }
+
         if let problem = invalidDirectoryArgument(command: command, rest: rest) {
             FileHandle.standardError.write(Data("gentlemerge: \(problem)\n".utf8))
             return 64
@@ -144,7 +153,7 @@ enum CLI {
             print(HookScript.source)
             return 0
         case "help", "--help", "-h":
-            printUsage()
+            printUsage(of: rest.first)
             return 0
         case "--version", "version":
             print("gentlemerge \(AppInfo.version) (hook schema \(HookScript.version))")
@@ -3003,8 +3012,39 @@ enum CLI {
         CommandArguments(arguments).positional
     }
 
-    private static func printUsage() {
-        print("""
+    /// `--help` or `-h` anywhere before a `--`. No command takes a `-h` of its
+    /// own, and answering when somebody meant something else costs them a line,
+    /// while `land x -h` taken for a command merges a branch.
+    static func asksForHelp(_ arguments: [String]) -> Bool {
+        arguments.prefix { $0 != "--" }.contains { $0 == "--help" || $0 == "-h" }
+    }
+
+    /// The entries of the usage that describe one command, each with the
+    /// indented lines under it. Nil when the usage has none.
+    static func usage(of command: String, in text: String) -> String? {
+        let entry = "  gentlemerge "
+        var kept: [String] = []
+        var inside = false
+        for line in text.components(separatedBy: "\n") {
+            if line.hasPrefix(entry) {
+                inside = line.dropFirst(entry.count).split(separator: " ").first.map(String.init) == command
+            } else if !line.hasPrefix(" ") {
+                inside = false
+            }
+            if inside { kept.append(line) }
+        }
+        return kept.isEmpty ? nil : kept.joined(separator: "\n")
+    }
+
+    private static func printUsage(of command: String? = nil) {
+        if let command, let entries = usage(of: command, in: usageText) {
+            print(entries)
+        } else {
+            print(usageText)
+        }
+    }
+
+    private static let usageText = """
         gentlemerge — one place for every agent that needs you.
 
         USAGE
@@ -3212,8 +3252,7 @@ enum CLI {
           --minimal             only Notification and Stop hooks
           --codex               also bridge Codex's notify program
           --dry-run             show what would change, write nothing
-        """)
-    }
+        """
 }
 
 enum AppInfo {
