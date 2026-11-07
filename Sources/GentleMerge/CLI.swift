@@ -1224,7 +1224,9 @@ enum CLI {
         let baseline = value(after: "--since", in: arguments)
             ?? sessionBaseline(for: directory, paths: paths, arguments: arguments)
 
-        let report = PrecommitCheck.run(in: directory, baseline: baseline)
+        // The checkout, not the project: every worktree is one project, and each
+        // has its own uncommitted files.
+        let report = PrecommitCheck.run(in: checkoutDirectory(arguments), baseline: baseline)
 
         guard report.isRepository else {
             print("\(report.projectName) is not a git repository — nothing to check.")
