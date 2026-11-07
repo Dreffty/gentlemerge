@@ -430,6 +430,12 @@ public struct ProjectRegistry: Sendable {
         rebuildingWhenStale: Bool
     ) -> (map: ProjectMap?, head: String?, rebuilt: Bool) {
         let head = currentCommit(in: handoff.projectPath)
+        // A folder of projects is not a project: a map of it mixes them all, and
+        // sends every new session to some file of whichever one happens to be
+        // largest. That goes for a map built before this rule as well.
+        if ProjectMap.isFolderOfRepositories(handoff.projectPath) {
+            return (nil, head, handoff.map != nil)
+        }
         if let existing = handoff.map, existing.isSealed(with: head) || !rebuildingWhenStale {
             return (existing, head, false)
         }
@@ -615,13 +621,14 @@ public struct ProjectRegistry: Sendable {
     ) -> String? {
         var handoff = handoff(for: projectPath)
         let (map, head, rebuilt) = refreshedMap(for: handoff, rebuildingWhenStale: refreshingMap)
+        let hadOne = handoff.map != nil
         handoff.map = map
 
         // Writing the map back is what stops the next session walking the tree
         // again. Two conditions, both about consent: a caller that asked not to
         // refresh asked for a read, and a project with no handoff file has not
         // asked us to leave one behind.
-        if refreshingMap, rebuilt, map != nil, exists(for: handoff.projectPath) { save(handoff) }
+        if refreshingMap, rebuilt, map != nil || hadOne, exists(for: handoff.projectPath) { save(handoff) }
 
         let open = handoff.openTasks.prefix(taskLimit)
         guard map != nil || !handoff.commits.isEmpty || !open.isEmpty || !handoff.notes.isEmpty else {

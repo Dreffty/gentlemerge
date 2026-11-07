@@ -276,4 +276,68 @@ final class ProjectMapTests: XCTestCase {
             "a task written in the wrong section is still a task"
         )
     }
+
+    // MARK: - A folder of projects is not a project
+
+    private func makeNestedRepository(_ name: String) throws {
+        try write("code\n", to: "\(name)/Sources/main.swift")
+        XCTAssertEqual(Shell.run("/usr/bin/env", ["git", "init", "-q"], in: project.appendingPathComponent(name)).status, 0)
+    }
+
+    /// A session opened in a folder of projects was told "Start here:
+    /// vorssaint-utils/Tests/ScreenshotFeatureTests.swift", mixing five of them.
+    func testAFolderHoldingSeveralRepositoriesGetsNoMap() throws {
+        try makeNestedRepository("one")
+        try makeNestedRepository("two")
+
+        let (map, _, _) = ProjectRegistry.refreshedMap(
+            for: ProjectHandoff(projectPath: project.path), rebuildingWhenStale: true)
+        XCTAssertNil(map)
+        XCTAssertNil(ProjectRegistry.sessionContext(for: project.path), "there is nothing to say about it yet")
+    }
+
+    func testRepositoriesFurtherDownCountToo() throws {
+        try makeNestedRepository("clients/one")
+        try makeNestedRepository("clients/two")
+        XCTAssertNil(ProjectRegistry.refreshedMap(
+            for: ProjectHandoff(projectPath: project.path), rebuildingWhenStale: true).map)
+    }
+
+    /// The one built before this rule is still in the file, and a reader must not
+    /// be shown it, even one that asked not to refresh anything.
+    func testAMapAlreadyWrittenDownStopsBeingShownAndGoesAway() throws {
+        try makeNestedRepository("one")
+        try makeNestedRepository("two")
+        var handoff = ProjectHandoff(projectPath: project.path)
+        handoff.map = ProjectMap(stack: ["Swift"], fileCount: 2, hubs: ["one/Sources/main.swift"])
+        handoff.tasks = [TaskItem(text: "algo pendiente")]
+        XCTAssertTrue(ProjectRegistry.save(handoff))
+
+        let reading = try XCTUnwrap(ProjectRegistry.sessionContext(for: project.path, refreshingMap: false))
+        XCTAssertFalse(reading.contains("Start here"), reading)
+        XCTAssertTrue(reading.contains("algo pendiente"), reading)
+
+        _ = ProjectRegistry.sessionContext(for: project.path)
+        let file = try String(contentsOf: ProjectHandoff.fileURL(for: project.path), encoding: .utf8)
+        XCTAssertFalse(file.contains("## Project map"), file)
+        XCTAssertTrue(file.contains("algo pendiente"), file)
+    }
+
+    func testASingleRepositoryInsideAFolderStillLeavesAMap() throws {
+        try write("code\n", to: "notes.swift")
+        try makeNestedRepository("one")
+        XCTAssertNotNil(ProjectRegistry.refreshedMap(
+            for: ProjectHandoff(projectPath: project.path), rebuildingWhenStale: true).map)
+    }
+
+    /// A repository is a project, whatever it vendors inside it.
+    func testARepositoryWithRepositoriesInsideKeepsItsMap() throws {
+        makeRepository()
+        try write("code\n", to: "Sources/main.swift")
+        commitEverything("first")
+        try makeNestedRepository("vendor/one")
+        try makeNestedRepository("vendor/two")
+        XCTAssertNotNil(ProjectRegistry.refreshedMap(
+            for: ProjectHandoff(projectPath: project.path), rebuildingWhenStale: true).map)
+    }
 }
