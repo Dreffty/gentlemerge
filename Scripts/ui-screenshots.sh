@@ -23,6 +23,10 @@ APP="$ROOT/build/GentleMerge.app/Contents/MacOS/gentlemerge"
 mkdir -p "$HOME/Library/Caches"
 SANDBOX=$(cd "$(mktemp -d "$HOME/Library/Caches/gentlemerge-shots.XXXXXX")" && pwd -P)
 export GENTLEMERGE_HOME="$SANDBOX/home"
+# The agents in here are made up. Inherited, the identity of an agent running
+# this script overrode theirs: "this worktree is 'claude'; refusing to speak as
+# 'codex'" (see smoke-test.sh).
+unset GENTLEMERGE_LABEL GENTLEMERGE_NAME GENTLEMERGE_PID CLAUDE_CODE_SESSION_ID
 export GENTLEMERGE_CLAUDE_SETTINGS="$SANDBOX/settings.json"
 export GENTLEMERGE_CODEX_CONFIG="$SANDBOX/config.toml"
 cleanup() {

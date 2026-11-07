@@ -178,8 +178,13 @@ public enum Redactor {
     ///   forty characters before the keyword. Unbounded, every boundary in a
     ///   long run of `a-a-a-…` re-scanned the rest of the run, and 40 KB of
     ///   kebab-case took 25 seconds; a 2 MB attachment hung `say`.
+    ///
+    /// - **Its own output is not a value.** A note is scrubbed when it is written
+    ///   and again when it is read, and `key: [redacted]` read back as a key with
+    ///   the value `[redacted`: every pass replaced that and left the `]`, so a
+    ///   note grew `]]` (audit 2026-11-06).
     private static let assignment =
-        #"(?i)\b((?:[A-Za-z0-9]{1,40}[_-]){0,6}(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key|pgpassword|(?<=[_-])pwd)(?:[_-](?:key|base|value|string|phrase)){0,3})(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s,;)\]}]{3,})"#
+        #"(?i)\b((?:[A-Za-z0-9]{1,40}[_-]){0,6}(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key|pgpassword|(?<=[_-])pwd)(?:[_-](?:key|base|value|string|phrase)){0,3})(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?!\[redacted)(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s,;)\]}]{3,})"#
 
     /// A secret handed to a program on its command line. The name gives it
     /// away here too, but the separator is a space, which `assignment` does
@@ -192,13 +197,15 @@ public enum Redactor {
     /// story: `mkdir -p`, `ssh -p 22` and `git add -p` share it, so a password
     /// glued to it (`mysql -pSECRET`, `sshpass -p SECRET`) is read only on the
     /// command line of a program where `-p` means the password, and never
-    /// when what follows is a variable (`-p"$PW"`) or nothing at all (`mysql
-    /// -p` asks for it at the prompt).
+    /// when what follows is a variable (`-p"$PW"`), nothing at all (`mysql -p`
+    /// asks for it at the prompt) or this filter's own `-p: [redacted]` — a note
+    /// is scrubbed when it is written and again when it is read, and each pass
+    /// took the last one's output for a password and added a `[redacted]`.
     private static let commandLineSecrets: [String] = [
         #"(?i)(?<![A-Za-z0-9-])(--(?:password|passwd|pass|passphrase|token|secret|client-secret|api-?key|access-?key|auth-?token|private-?key))[ =]\s*(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|(?![-<$])[^\s,;)\]}]{3,})"#,
         #"(\b(?:curl|wget|http|https|xh)\b[^\n]{0,300}?\s(?:-u|--user)[ =][A-Za-z][A-Za-z0-9._-]{0,64}):[^\s]{3,}"#,
-        #"(\b(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlcheck|mysqlshow|mysqlslap|mariadb(?:-dump|-admin)?)\b[^\n;|&]{0,300}?\s-p)(?!\s|["']?[<$])(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s"']\S{0,4000})"#,
-        #"(\bsshpass\b[^\n;|&]{0,100}?\s-p) ?(?![\s-]|["']?[<$])(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s"']\S{0,4000})"#,
+        #"(\b(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlcheck|mysqlshow|mysqlslap|mariadb(?:-dump|-admin)?)\b[^\n;|&]{0,300}?\s-p)(?!\s|: \[|["']?[<$])(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s"']\S{0,4000})"#,
+        #"(\bsshpass\b[^\n;|&]{0,100}?\s-p) ?(?![\s-]|: \[|["']?[<$])(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s"']\S{0,4000})"#,
     ]
 
     /// Every pattern, so a test can prove they all compile. A rule that does

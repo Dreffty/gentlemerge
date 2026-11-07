@@ -316,7 +316,26 @@ public enum Presence {
             newestBySession[session] = mark
         }
 
-        return (loose + newestBySession.values).map { mark -> AgentActivity in
+        // A mark with no session is an agent's own CLI call, and it says less
+        // than the session row of that same agent. Codex is the plain case: its
+        // only hook fires at the end of a turn and never writes a mark, so the
+        // first `gentlemerge say` it ran listed it twice — once idle, once "on
+        // main" (audit 2026-11-06). If the row stops being live, the mark
+        // speaks again.
+        let sessions = stored.filter(\.isLive)
+        loose.removeAll { mark in
+            sessions.contains {
+                $0.projectPath == mark.projectPath && ($0.label ?? AgentBus.label(for: $0.provider)) == mark.label
+            }
+        }
+
+        // A mark's file is per branch, so one agent that said something from two
+        // branches had two loose marks and two lines. One label in one project
+        // is one agent: the newest says where it is now.
+        let newestLoose = Dictionary(grouping: loose) { "\($0.label)\u{0}\($0.projectPath ?? "")" }
+            .values.compactMap { marks in marks.max { $0.updatedAt < $1.updatedAt } }
+
+        return (newestLoose + newestBySession.values).map { mark -> AgentActivity in
             AgentActivity(
                 id: identity(of: mark),
                 provider: provider(for: mark.label),
