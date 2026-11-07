@@ -13,9 +13,11 @@ import Foundation
 /// refuses loudly instead of hiding a repo gate where nobody looks.
 ///
 /// Two gate hooks share one script: `pre-commit` (staged changes) and
-/// `pre-merge-commit` (merge commits bypass `pre-commit`). A third hook,
-/// `post-commit`, releases the committer's claims on what just landed and
-/// can never block (git ignores its exit code; ours is 0 regardless).
+/// `pre-merge-commit` (merge commits bypass `pre-commit`). Three more run after
+/// the fact and can never block (git ignores their exit codes; ours are 0
+/// regardless): `post-commit`, `post-merge` and `post-rewrite` count what went
+/// round the gate (see `GateAudit`), and `post-commit` also releases the
+/// committer's claims on what just landed.
 public struct GitHookInstaller: Sendable {
     /// Bump when `script`/`postCommitScript` change: a reinstall replaces an
     /// outdated gate instead of leaving silent old behavior behind.
@@ -26,13 +28,27 @@ public struct GitHookInstaller: Sendable {
     ///
     /// 4: the post-commit hook no longer skips the user's own chained hook when
     /// `GENTLEMERGE_SKIP` is set, and "no" values (`0`, `false`) are not a skip.
-    public static let gateRevision = 4
+    ///
+    /// 5: post-commit, post-merge and post-rewrite count what went round the gate.
+    public static let gateRevision = 5
     public static let marker = "# gentlemerge pre-commit (gate \(gateRevision))"
     public static let hookNames = ["pre-commit", "pre-merge-commit"]
     public static let postCommitMarker = "# gentlemerge post-commit (gate \(gateRevision))"
+    public static let postMergeMarker = "# gentlemerge post-merge (gate \(gateRevision))"
+    public static let postRewriteMarker = "# gentlemerge post-rewrite (gate \(gateRevision))"
+    /// Every hook an install leaves, with the line that says it is ours and current.
+    public static let installedHooks: [(name: String, marker: String)] =
+        hookNames.map { ($0, marker) } + [
+            ("post-commit", postCommitMarker),
+            ("post-merge", postMergeMarker),
+            ("post-rewrite", postRewriteMarker),
+        ]
     /// Any gate we ever installed, current or outdated. Outdated ones are
     /// replaced, never chained — chaining is for foreign hooks.
-    static let legacyMarkers = ["# gentlemerge pre-commit", "# gentlemerge post-commit"]
+    static let legacyMarkers = [
+        "# gentlemerge pre-commit", "# gentlemerge post-commit",
+        "# gentlemerge post-merge", "# gentlemerge post-rewrite",
+    ]
     public let paths: Paths
     public init(paths: Paths) { self.paths = paths }
 
@@ -112,20 +128,15 @@ public struct GitHookInstaller: Sendable {
         """
     #!/bin/sh
     \(postCommitMarker)
-    # Releases my claims on what just landed. Never blocks, never fails: git
-    # ignores a post-commit exit code, and this exits 0 regardless.
-    # A skip only means "do not release my claims": the user's own post-commit
-    # hook, chained below, still has to run. Exiting here used to skip it too.
-    case "${GENTLEMERGE_SKIP:-}" in
-      ""|0|false|no|off) SKIPPED=0 ;;
-      *) SKIPPED=1 ;;
-    esac
+    # Counts a commit that went round the gate (--no-verify, cherry-pick, revert),
+    # and releases my claims on what just landed. Never blocks, never fails: git
+    # ignores a post-commit exit code, and this exits 0 regardless. Under
+    # GENTLEMERGE_SKIP the binary keeps my claims; the user's own post-commit hook,
+    # chained below, still has to run.
     AI_DEFAULT=\(gateShellWord(gateDefault))
     AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
-    if [ "$SKIPPED" = 1 ]; then
-      :
-    elif [ -x "$AI" ]; then
-      "$AI" postcommit --project "$(git rev-parse --show-toplevel)" >/dev/null 2>&1 || true
+    if [ -x "$AI" ]; then
+      "$AI" postcommit --project "$(git rev-parse --show-toplevel)" >/dev/null || true
     else
       echo "gentlemerge: gate binary not found at $AI — claims on this commit are NOT released (they expire). Reinstall or set GENTLEMERGE_BIN." >&2
     fi
@@ -134,6 +145,57 @@ public struct GitHookInstaller: Sendable {
     [ -x "$PREV" ] && exec "$PREV" "$@"
     exit 0
     """
+    }
+
+    public static func postMergeScript(gateDefault: String = "$HOME/.gentlemerge/bin/gentlemerge") -> String {
+        """
+        #!/bin/sh
+        \(postMergeMarker)
+        # A fast-forward runs no gate, and neither does --no-verify. This counts what
+        # came in. Never blocks, never fails: git ignores this exit code.
+        AI_DEFAULT=\(gateShellWord(gateDefault))
+        AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
+        # $1 is 1 for a squash: nothing has entered yet, and the commit that follows
+        # meets the gate.
+        if [ "${1:-0}" = 1 ]; then
+          :
+        elif [ -x "$AI" ]; then
+          "$AI" postcommit --merge --project "$(git rev-parse --show-toplevel)" >/dev/null || true
+        else
+          echo "gentlemerge: gate binary not found at $AI — this merge is NOT counted. Reinstall or set GENTLEMERGE_BIN." >&2
+        fi
+        # Chain whatever was here before us.
+        PREV="$0.gentlemerge-prev"
+        [ -x "$PREV" ] && exec "$PREV" "$@"
+        exit 0
+        """
+    }
+
+    public static func postRewriteScript(gateDefault: String = "$HOME/.gentlemerge/bin/gentlemerge") -> String {
+        """
+        #!/bin/sh
+        \(postRewriteMarker)
+        # A rebase replays commits with no gate at all. This counts what it wrote.
+        # An amend is post-commit's. Never blocks, never fails: git ignores this exit code.
+        AI_DEFAULT=\(gateShellWord(gateDefault))
+        AI="${GENTLEMERGE_BIN:-$AI_DEFAULT}"
+        # git hands over the rewritten commits once, on stdin, and a chained hook
+        # needs them as much as we do.
+        INPUT=$(cat)
+        if [ "${1:-}" != rebase ]; then
+          :
+        elif [ -x "$AI" ]; then
+          printf '%s\\n' "$INPUT" | "$AI" postcommit --rewrite --project "$(git rev-parse --show-toplevel)" >/dev/null || true
+        else
+          echo "gentlemerge: gate binary not found at $AI — this rebase is NOT counted. Reinstall or set GENTLEMERGE_BIN." >&2
+        fi
+        # Chain whatever was here before us.
+        PREV="$0.gentlemerge-prev"
+        if [ -x "$PREV" ]; then
+          printf '%s\\n' "$INPUT" | "$PREV" "$@" || true
+        fi
+        exit 0
+        """
     }
 
     public func hooksDir(for repo: URL) throws -> URL {
@@ -212,7 +274,9 @@ public struct GitHookInstaller: Sendable {
         let gate = Self.gateDefault(paths: paths)
         let hooks: [(name: String, script: String, marker: String)] =
             Self.hookNames.map { ($0, Self.script(gateDefault: gate), Self.marker) }
-            + [("post-commit", Self.postCommitScript(gateDefault: gate), Self.postCommitMarker)]
+            + [("post-commit", Self.postCommitScript(gateDefault: gate), Self.postCommitMarker),
+               ("post-merge", Self.postMergeScript(gateDefault: gate), Self.postMergeMarker),
+               ("post-rewrite", Self.postRewriteScript(gateDefault: gate), Self.postRewriteMarker)]
         if dryRun {
             for hook in hooks {
                 let path = directory.appendingPathComponent(hook.name)
@@ -310,7 +374,11 @@ public struct GitHookInstaller: Sendable {
         // only the current marker left an older gate in place with the answer
         // "not ours; left alone" — it could never be removed once upgraded past.
         let hooks: [(name: String, marker: String)] =
-            Self.hookNames.map { ($0, Self.legacyMarkers[0]) } + [("post-commit", Self.legacyMarkers[1])]
+            Self.hookNames.map { ($0, "# gentlemerge pre-commit") } + [
+                ("post-commit", "# gentlemerge post-commit"),
+                ("post-merge", "# gentlemerge post-merge"),
+                ("post-rewrite", "# gentlemerge post-rewrite"),
+            ]
         var removed = 0
         for hook in hooks {
             let path = directory.appendingPathComponent(hook.name)

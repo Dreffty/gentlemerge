@@ -127,12 +127,11 @@ public struct Doctor: Sendable {
         } catch {
             return Check(name: "git-hooks", level: .warn, detail: error.localizedDescription)
         }
-        let missing = (GitHookInstaller.hookNames + ["post-commit"]).filter { name in
-            let path = directory.appendingPathComponent(name)
+        let missing = GitHookInstaller.installedHooks.filter { hook in
+            let path = directory.appendingPathComponent(hook.name)
             guard let body = try? String(contentsOf: path, encoding: .utf8) else { return true }
-            let marker = name == "post-commit" ? GitHookInstaller.postCommitMarker : GitHookInstaller.marker
-            return !body.contains(marker) || !FileManager.default.isExecutableFile(atPath: path.path)
-        }
+            return !body.contains(hook.marker) || !FileManager.default.isExecutableFile(atPath: path.path)
+        }.map(\.name)
         if missing.isEmpty {
             // Hooks without a gate binary warn on every commit but check
             // nothing. That is exactly the state worth shouting about.
@@ -162,7 +161,8 @@ public struct Doctor: Sendable {
                     detail: "hooks live in \(directory.path) but the gate binary is missing at \(gate) — commits pass unchecked. Reinstall (`gentlemerge install`) or set GENTLEMERGE_BIN.")
             }
             return Check(name: "git-hooks", level: .ok,
-                detail: "pre-commit + pre-merge-commit + post-commit live in \(directory.path)" + (note.map { " (\($0))" } ?? ""))
+                detail: GitHookInstaller.installedHooks.map(\.name).joined(separator: " + ")
+                    + " live in \(directory.path)" + (note.map { " (\($0))" } ?? ""))
         }
         return Check(name: "git-hooks", level: .warn,
             detail: "missing \(missing.joined(separator: ", ")) in \(directory.path) — run `gentlemerge git-hooks install --project \(repo.path)`")

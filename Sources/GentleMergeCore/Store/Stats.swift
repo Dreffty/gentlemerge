@@ -144,6 +144,8 @@ public enum Stats {
     public struct Value: Sendable, Equatable {
         /// Commits the gate stopped (`precommit.blocked`).
         public var blockedCommits: Int = 0
+        /// Commits that went round it and were counted afterwards (`gate.bypassed`).
+        public var gateBypasses: Int = 0
         /// Violations named on those lines.
         public var violations: Int = 0
         /// Conflicts the radar announced early (`radar.conflict`).
@@ -208,6 +210,8 @@ public enum Stats {
                     value.staleClaimsCleared += 1
                 case "claim.released":
                     value.claimsReleased += count(before: "path", in: entry.summary)
+                case GateAudit.ledgerTitle:
+                    value.gateBypasses += 1
                 case "land.ok":
                     value.landings += 1
                     value.claimsReleased += count(before: "claim", in: entry.summary)
@@ -222,7 +226,7 @@ public enum Stats {
     public static func valueLine(paths: Paths) -> String {
         let v = value(paths: paths)
         guard v.blockedCommits + v.conflictsAnnounced + v.preEditWarnings
-            + v.staleClaimsCleared + v.claimsReleased + v.landings > 0
+            + v.staleClaimsCleared + v.claimsReleased + v.landings + v.gateBypasses > 0
         else {
             return "coordination value: nothing recorded yet — peace, or an uninstalled hook."
                 + " `gentlemerge doctor` tells which."
@@ -230,6 +234,7 @@ public enum Stats {
         return """
         coordination value (from the ledger):
           \(v.blockedCommits) commit(s) blocked before they could collide (\(v.violations) violation(s))
+          \(v.gateBypasses) commit(s) went round the gate (counted, not stopped)
           \(v.conflictsAnnounced) conflict(s) announced early by the radar
           \(v.preEditWarnings) pre-edit warning(s) at the tool call
           \(v.staleClaimsCleared) dead session(s) cleared from claims

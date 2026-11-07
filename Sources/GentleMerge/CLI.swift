@@ -1436,15 +1436,6 @@ enum CLI {
         let gate = PrecommitGate(paths: paths)
         let files = staged ? gate.stagedFiles(repo: repo) : gate.dirtyFiles(repo: repo)
         let claims = PathClaims(paths: paths).live(project: project)
-        // A commit that rewrites HANDOFF.md cannot also be judged by it — the
-        // agent could stage the invasion and the deletion of the zone's
-        // declaration together. Only the pinned store rules in that case.
-        let ownership = Ownership.effective(
-            project: project,
-            paths: paths,
-            handoffIsStaged: files.contains(Ownership.handoffRelativePath)
-        ).ownership
-        let scoped = label.map { Requests(paths: paths).inProgress(assignedTo: $0, project: project) } ?? []
         let presence = Presence.marks(paths: paths)
         // Dead sessions lose their claims before the gate decides, labeled or
         // not: an unlabeled commit must not stay blocked by a ghost either.
@@ -1461,15 +1452,7 @@ enum CLI {
                 summary: reaped.map { "\($0.label):\($0.pattern)" }.joined(separator: ", ")
             ))
         }
-        let violations = PrecommitGate.evaluate(
-            staged: files,
-            me: label,
-            claims: claims,
-            ownership: ownership,
-            activeRequests: scoped,
-            presence: presence,
-            isPIDAlive: { Liveness.isProcessAlive($0, seenAt: $1) }
-        )
+        let violations = PrecommitGate.judge(files: files, me: label, project: project, paths: paths)
 
         if label == nil {
             print("gentlemerge: no label for this worktree (run `gentlemerge project init --label <name>`); live claims still block")
@@ -1509,25 +1492,46 @@ enum CLI {
         return 0
     }
 
-    /// `gentlemerge postcommit [--project dir]` — the git post-commit hook
-    /// calls this: release my claims on what just landed, so other agents are
-    /// unblocked without waiting for the TTL. Never blocks, never fails: the
-    /// exit is always 0, because a bookkeeping error must never break a commit.
+    /// `gentlemerge postcommit [--merge|--rewrite] [--project dir]` — what the git
+    /// post-commit, post-merge and post-rewrite hooks call: count whatever went round
+    /// the gate, and after a commit release my claims on what just landed, so other
+    /// agents are unblocked without waiting for the TTL. Never blocks, never fails:
+    /// the exit is always 0, because a bookkeeping error must never break a commit.
     private static func postcommit(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        let directory = projectDirectory(arguments, allowPositional: false)
+        let directory = checkoutDirectory(arguments, allowPositional: false)
+        let repo = URL(fileURLWithPath: directory)
         let project = ProjectRegistry.canonicalPath(for: directory)
-        // Only a verified label releases claims — the same one the gate judged
-        // this commit by (`committerLabel`), so what it let through as yours is
-        // what gets released as yours. Falling back to the project's single
-        // live presence mark released *somebody else's* claims — unblocking
-        // other agents on files this worktree never owned. Without a label the
-        // claims simply wait out their TTL, which is the safe direction.
-        guard let label = committerLabel(at: directory, paths: paths) else { return 0 }
+        // The same label the gate judges by (`committerLabel`), so what it let
+        // through as yours is what gets released as yours. Falling back to the
+        // project's single live presence mark released *somebody else's* claims —
+        // unblocking other agents on files this worktree never owned. Without a
+        // label the claims simply wait out their TTL, which is the safe direction.
+        let label = committerLabel(at: directory, paths: paths)
+
+        let entry: GateAudit.Entry
+        if isSet("--rewrite", in: arguments) {
+            let input = String(decoding: FileHandle.standardInput.readDataToEndOfFile(), as: UTF8.self)
+            entry = .rebase(newCommits: GateAudit.newCommits(fromRewriteLines: input))
+        } else if isSet("--merge", in: arguments) {
+            entry = .merge
+        } else {
+            entry = .commit
+        }
+
+        // As the gate does: a claim an edit reported seconds ago counts now. Not for
+        // long, though: somebody is waiting for their prompt back.
+        InboxModel.drainHeadless(paths: paths, patience: 1)
+        if let line = GateAudit.count(entry, repo: repo, project: project, me: label, paths: paths) {
+            FileHandle.standardError.write(Data((line + "\n").utf8))
+        }
+
+        // A human skip keeps its claims: only a plain landing hands them back.
+        guard entry == .commit, !EscapeHatch.isActive(), let label else { return 0 }
         let output = Shell.run(
             "/usr/bin/env",
-            ["git", "diff-tree", "--no-commit-id", "--name-only", "-z", "-r", "HEAD"],
-            in: URL(fileURLWithPath: directory),
+            ["git", "diff-tree", "--root", "--no-commit-id", "--name-only", "-z", "-r", "HEAD"],
+            in: repo,
             environment: ["GIT_OPTIONAL_LOCKS": "0", "GIT_CONFIG_COUNT": "1",
                           "GIT_CONFIG_KEY_0": "core.quotePath", "GIT_CONFIG_VALUE_0": "false"],
             timeout: 10

@@ -52,7 +52,7 @@ Sources/
     Install/
       HookInstaller.swift # Claude/Codex hooks: idempotent, backed up, reversible
       HookScript.swift   # embedded gentlemerge-hook.sh source
-      GitHookInstaller.swift # pre-commit gate in the repo common dir
+      GitHookInstaller.swift # commit gate and post-* counters in the repo common dir
     Model/
       InboxItem.swift / JSONValue.swift / SpoolEnvelope.swift / PathScope.swift
     Projects/
@@ -97,7 +97,9 @@ docs/  # AGENT_PROTOCOL.md (the ~200-token agent contract),
    reads directly for hook-less agents). Everything lands as JSON under
    `~/.gentlemerge` and tasks in `<repo>/.gentlemerge/HANDOFF.md`.
 3. **Enforce.** The pre-commit hook rejects commits that invade another
-   agent's live claim, ownership zone, or pending request contract.
+   agent's live claim, ownership zone, or pending request contract. What git
+   does not run it for (`--no-verify`, `cherry-pick`, `merge --ff-only`,
+   `rebase`) the post-* hooks count afterwards and publish as an urgent note.
 4. **Brief.** Each turn injects only what changed since the last one —
    silent when there is nothing new. Every injection is counted in the
    ledger as `briefing.injected`, which is what `stats` adds up.

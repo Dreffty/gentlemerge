@@ -60,7 +60,7 @@ public enum CommandOptions {
         "init": .init(always: projectInitOptions),
         "handoff": .init(always: identity.union(["--project"])),
         "precommit": .init(always: identity.union(["--project", "--since", "--enforce", "--staged"])),
-        "postcommit": .init(always: ["--project"]),
+        "postcommit": .init(always: ["--project", "--merge", "--rewrite"]),
         "land": .init(always: identity.union([
             "--project", "--branch", "--into", "--skip-checks", "--dry-run", "--fast",
         ])),

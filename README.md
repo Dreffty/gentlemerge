@@ -93,7 +93,7 @@ says so, and every rebuild asks again. `CODESIGN_IDENTITY=<name>` picks another.
 **Set up a repo for several agents**
 ```sh
 cd your-repo
-gentlemerge project init --git-hooks            # HANDOFF.md + pre-commit & pre-merge-commit in the hooks dir git actually uses (core.hooksPath wins; covers all worktrees)
+gentlemerge project init --git-hooks            # HANDOFF.md + the commit gate in the hooks dir git actually uses (core.hooksPath wins; covers all worktrees)
 git worktree add ../wt-claude -b agent/claude && (cd ../wt-claude && gentlemerge project init --label claude)
 git worktree add ../wt-hermes -b agent/hermes && (cd ../wt-hermes && gentlemerge project init --label hermes)
 ```
@@ -168,7 +168,19 @@ Native Windows blockers: `flock`, Unix domain sockets, POSIX permissions. PRs we
 Only if you opt in, GentleMerge can deliver a fixed one-line notice to another agent's session, or start a headless agent to handle a delegated request. Dispatch is off until you switch it on (`gentlemerge config set allowDispatch true`, or the toggle in the app under HEADLESS WORK); only the app ever starts an agent, never a one-shot command, and a request is started at most once. Once on it has three modes (`config set dispatchMode off|delegated|strict`): delegated, the default, lets agents trigger within tiers and a daily minute-budget; strict only runs human-created requests; off starts nothing. Every decision is gated by pure and exhaustively tested decision functions, and every decision is logged. Secrets are scrubbed before anything reaches another agent, the ledger or the bus — raw hook payloads rest briefly in the local spool (owner-only files, pruned within days). See [SECURITY.md](SECURITY.md).
 
 Guarantees come in three rungs, depending on the client — declared, not implied:
-- **Enforced** (git gate): `pre-commit`/`pre-merge-commit` block. No client option can skip it except the human escape hatch, and every skip is published to the bus. A hostile local process still can (`--no-verify`, editing the hook): the gate coordinates cooperative agents. A missing gate binary warns on every commit instead of passing silently.
+- **Enforced** (git gate): `pre-commit`/`pre-merge-commit` block a plain commit and a true merge. Git does not run them on every way into a branch, and no hook can stop what it does not run for, so the rest is **counted**: `post-commit`, `post-merge` and `post-rewrite` compare what came in with the live claims and post an urgent note to everyone in the project. Whatever passed the gate finds nothing there, so this stays silent unless something got round. A missing gate binary warns on every commit instead of passing silently. This coordinates cooperative agents; it is not a sandbox.
+
+  | How it gets in | What happens |
+  |---|---|
+  | `git commit`, `commit -a`, a partial commit, `merge --no-ff`, `cherry-pick --continue` | Blocked |
+  | `git commit --no-verify`, `merge --no-ff --no-verify` | Goes through. Urgent note, and a line in `stats --value` |
+  | `git cherry-pick`, `git revert` | Goes through. Urgent note |
+  | `git merge --ff-only`, a `git pull` that fast-forwards | Goes through. Urgent note |
+  | `git rebase`, `git pull --rebase` | Goes through. Urgent note when it finishes |
+  | `GENTLEMERGE_SKIP=1`, the human way out | Goes through. Published on the bus |
+  | `git am`, `commit-tree`/`update-ref`, editing or removing the hooks | Nobody hears about it |
+
+  Hooks installed before this table need `gentlemerge git-hooks install --project <repo>` once; `gentlemerge doctor` says so.
   Ownership zones are enforced from `HANDOFF.md`, with one deliberate blind spot: a commit that *rewrites the zones themselves* is not judged by them (that is the agent being its own judge), and only the pinned store rules apply in that case. Recording a task in `HANDOFF.md` — which the agent protocol tells every agent to do — does **not** switch the zones off; only changing them does.
 - **Advised** (hooks): PreToolUse warns before the edit lands. A client without hooks never hears it. (Installs made before 2026-10-26 never got this hook — `install` reported it and then dropped it; run `gentlemerge install` again and `gentlemerge status` should list `PreToolUse`.)
 - **Convention** (MCP): `claim_check` answers honestly, but nothing stops the edit. MCP clients coordinate by discipline plus the enforced gate at commit time.
