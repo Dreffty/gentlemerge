@@ -37,6 +37,18 @@ enum CLI {
             return 0
         }
 
+        // An option the command does not know stops the line here, before it can
+        // act or leave a trace. Exit 2, the usual answer to "that is not how you
+        // call this". A flag where a command should be gets the same.
+        if let command, let problem = CommandOptions.problem(command: command, arguments: rest) {
+            FileHandle.standardError.write(Data("gentlemerge \(problem)\n".utf8))
+            return 2
+        }
+        if let command, CommandArguments.looksLikeFlag(command), !["--help", "-h", "--version"].contains(command) {
+            FileHandle.standardError.write(Data("gentlemerge: unknown option \(command). Nothing was done. See `gentlemerge help`.\n".utf8))
+            return 2
+        }
+
         if let problem = invalidDirectoryArgument(command: command, rest: rest) {
             FileHandle.standardError.write(Data("gentlemerge: \(problem)\n".utf8))
             return 64
@@ -52,9 +64,9 @@ enum CLI {
         case "demo":
             do {
                 let root = Demo.temporaryRoot()
-                let paths = rest.contains("--home-real") ? Paths.fromEnvironment() : Paths(home: root.appendingPathComponent("home"))
+                let paths = isSet("--home-real", in: rest) ? Paths.fromEnvironment() : Paths(home: root.appendingPathComponent("home"))
                 _ = try MainActor.assumeIsolated {
-                    try Demo.run(in: root, keep: rest.contains("--keep"), paths: paths,
+                    try Demo.run(in: root, keep: isSet("--keep", in: rest), paths: paths,
                         // Not `arguments[0]`: that is the word the shell put in
                         // argv[0], which for a PATH-installed binary is just
                         // "gentlemerge" — it resolved to <cwd>/gentlemerge, the
@@ -211,9 +223,9 @@ enum CLI {
     private static func install(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
         let installer = HookInstaller(paths: paths)
-        let dryRun = arguments.contains("--dry-run")
-        let minimal = arguments.contains("--minimal")
-        let codex = arguments.contains("--codex")
+        let dryRun = isSet("--dry-run", in: arguments)
+        let minimal = isSet("--minimal", in: arguments)
+        let codex = isSet("--codex", in: arguments)
 
         var plan = HookInstaller.Plan()
         if minimal {
@@ -499,13 +511,7 @@ enum CLI {
         let paths = Paths.fromEnvironment()
         let directory = projectDirectory(arguments, allowPositional: false)
         let project = ProjectRegistry.canonicalPath(for: directory)
-        var positional: [String] = []
-        var i = 0
-        while i < arguments.count {
-            if arguments[i] == "--project" { i += 2; continue }
-            if arguments[i].hasPrefix("--") { i += 1; continue }
-            positional.append(arguments[i]); i += 1
-        }
+        let positional = self.positional(arguments)
         do {
             switch positional.first {
             case nil:
@@ -568,7 +574,7 @@ enum CLI {
                 return 64
             }
             limit = asked
-        } else if arguments.contains("-n") {
+        } else if isSet("-n", in: arguments) {
             FileHandle.standardError.write(Data("history -n wants a number after it\n".utf8))
             return 64
         }
@@ -615,14 +621,14 @@ enum CLI {
         // left by an agent is almost always about — and the sessions working
         // somewhere else pay context for every word of it. `--global` is the
         // escape hatch for the few things that really are everybody's business.
-        let scoped = arguments.contains("--global") ? nil : projectDirectory(arguments, allowPositional: false)
+        let scoped = isSet("--global", in: arguments) ? nil : projectDirectory(arguments, allowPositional: false)
 
         let author = identity.label
-        if arguments.contains("--done") { return done(bus: bus, author: author, scope: scoped) }
+        if isSet("--done", in: arguments) { return done(bus: bus, author: author, scope: scoped) }
 
         // `--to` with nothing after it used to mean everyone: a note meant for one
         // agent went to all of them.
-        for flag in ["--to", "--to-branch"] where arguments.contains(flag) {
+        for flag in ["--to", "--to-branch"] where isSet(flag, in: arguments) {
             guard let named = value(after: flag, in: arguments),
                   !named.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 FileHandle.standardError.write(Data(
@@ -698,7 +704,7 @@ enum CLI {
             projectPath: scoped,
             text: text,
             kind: kind,
-            nudge: arguments.contains("--nudge") ? true : nil,
+            nudge: isSet("--nudge", in: arguments) ? true : nil,
             attachments: attachments.isEmpty ? nil : attachments,
             replacesID: replaces,
             toBranch: value(after: "--to-branch", in: arguments),
@@ -760,9 +766,9 @@ enum CLI {
         }
         // Both at once has no right answer, and picking one silently sent a
         // note as urgent that its author also called "for your information".
-        if arguments.contains("--urgent") && arguments.contains("--fyi") { return nil }
-        if arguments.contains("--urgent") { return .urgent }
-        if arguments.contains("--fyi") { return .fyi }
+        if isSet("--urgent", in: arguments) && isSet("--fyi", in: arguments) { return nil }
+        if isSet("--urgent", in: arguments) { return .urgent }
+        if isSet("--fyi", in: arguments) { return .fyi }
         return .update
     }
 
@@ -847,7 +853,7 @@ enum CLI {
         // whole point of asking is usually to find the session you lost. `--all`
         // is that default said out loud, so the briefing can name a command that
         // reads as the opposite of `--project`.
-        let project = arguments.contains("--project") && !arguments.contains("--all")
+        let project = isSet("--project", in: arguments) && !isSet("--all", in: arguments)
             ? projectDirectory(arguments, allowPositional: false)
             : nil
         let live = bus.others(excluding: nil, project: project)
@@ -949,7 +955,7 @@ enum CLI {
     private static func review(_ arguments: [String]) -> Int32 {
         let path = positional(arguments).first ?? FileManager.default.currentDirectoryPath
         let project = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-        let includeSlow = arguments.contains("--slow")
+        let includeSlow = isSet("--slow", in: arguments)
         let baseline = value(after: "--since", in: arguments)
         // A revision that does not exist is an error, not "nothing changed": a typo in
         // --since printed a partial report (the untracked files only) and exited 0.
@@ -1115,13 +1121,13 @@ enum CLI {
                 let paths = Paths.fromEnvironment()
                 if let label = value(after: "--label", in: arguments) {
                     print(try WorktreeLabel.write(label: label, in: URL(fileURLWithPath: directory)))
-                } else if arguments.contains("--label") {
+                } else if isSet("--label", in: arguments) {
                     // `--label --git-hooks` (or nothing at all) used to be skipped without a
                     // word, leaving a worktree with no identity and a success exit.
                     FileHandle.standardError.write(Data("--label needs a name, e.g. --label claude\n".utf8))
                     return 64
                 }
-                if arguments.contains("--git-hooks") {
+                if isSet("--git-hooks", in: arguments) {
                     print(try GitHookInstaller(paths: paths).install(repo: URL(fileURLWithPath: directory)))
                 }
                 return 0
@@ -1209,7 +1215,7 @@ enum CLI {
         // files checked against path claims, ownership and requests, exit 1 on
         // a blocking violation. The overlap report below stays first — it is
         // the context, the gate is the decision.
-        if arguments.contains("--enforce") {
+        if isSet("--enforce", in: arguments) {
             return precommitEnforce(arguments, in: checkoutDirectory(arguments), paths: paths)
         }
 
@@ -1310,9 +1316,9 @@ enum CLI {
                 label: label,
                 verified: identity.verified,
                 paths: paths,
-                skipChecks: arguments.contains("--skip-checks"),
-                dryRun: arguments.contains("--dry-run"),
-                fast: arguments.contains("--fast"),
+                skipChecks: isSet("--skip-checks", in: arguments),
+                dryRun: isSet("--dry-run", in: arguments),
+                fast: isSet("--fast", in: arguments),
                 progress: { print($0) }
             )
             // The steps already printed on the way; a dry run ends on the plan.
@@ -1332,7 +1338,7 @@ enum CLI {
     /// sweep per project per three minutes; never fails, just says why not.
     private static func radar(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        let force = arguments.contains("--force")
+        let force = isSet("--force", in: arguments)
         let single = value(after: "--project", in: arguments) != nil || !positional(arguments).isEmpty
         let targets: [String]
         if single {
@@ -1390,7 +1396,7 @@ enum CLI {
     }
 
     private static func precommitEnforce(_ arguments: [String], in directory: String, paths: Paths) -> Int32 {
-        let staged = arguments.contains("--staged")
+        let staged = isSet("--staged", in: arguments)
         let repo = URL(fileURLWithPath: directory)
         let project = ProjectRegistry.canonicalPath(for: directory)
 
@@ -1718,11 +1724,11 @@ enum CLI {
         case "claim":
             // Name collision with `task claim <n>` (about *what*, hours):
             // `--paths` present means a path claim — about *where*, minutes.
-            if arguments.contains("--paths") { return pathClaim(arguments) }
+            if isSet("--paths", in: arguments) { return pathClaim(arguments) }
             return claim(arguments, in: directory)
         case "release":
             // Same collision: paths to hand back vs. a task number to drop.
-            if arguments.contains("--paths") { return pathRelease(arguments) }
+            if isSet("--paths", in: arguments) { return pathRelease(arguments) }
             return claim(arguments, in: directory)
 
         case "step", "steps":
@@ -2076,7 +2082,7 @@ enum CLI {
     /// counted up. Tokens are chars/4, always said as an estimate.
     private static func stats(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        if arguments.contains("--value") {
+        if isSet("--value", in: arguments) {
             print(Stats.valueLine(paths: paths))
             return 0
         }
@@ -2238,7 +2244,7 @@ enum CLI {
         // "you" here, and all got the same hundred ports (audit 2026-11-01).
         let label = (try? actingLabel(arguments, explicit: nil)) ?? defaultAuthor()
         let text = WorktreeEnv.render(WorktreeEnv.allocation(label: label, config: config))
-        guard arguments.contains("--write") else {
+        guard isSet("--write", in: arguments) else {
             print(text)
             return 0
         }
@@ -2300,7 +2306,7 @@ enum CLI {
         // A ttl that is not a positive number of minutes is a mistake to report
         // (audit Tier 5 #26 clamped it, which only made the lie quieter).
         let ttl: TimeInterval
-        if arguments.contains("--ttl") {
+        if isSet("--ttl", in: arguments) {
             guard let raw = value(after: "--ttl", in: arguments),
                   let minutes = Double(raw), minutes.isFinite, minutes > 0, minutes <= 24 * 60 else {
                 FileHandle.standardError.write(
@@ -2384,7 +2390,7 @@ enum CLI {
             return 0
         }
 
-        if arguments.contains("--json") {
+        if isSet("--json", in: arguments) {
             let data = (try? JSONCoding.encoder(pretty: true).encode(live)) ?? Data()
             print(String(decoding: data, as: UTF8.self))
             return 0
@@ -2472,9 +2478,9 @@ enum CLI {
                 ?? (try? actingLabel(arguments, explicit: nil))
                 ?? defaultAuthor()
             let rows: [AgentRequest]
-            if arguments.contains("--mine") {
+            if isSet("--mine", in: arguments) {
                 rows = store.mine(from: label, project: project)
-            } else if arguments.contains("--for-me") {
+            } else if isSet("--for-me", in: arguments) {
                 rows = store.pending(for: label, project: project)
             } else {
                 rows = store.all().filter { $0.projectPath == project }
@@ -2541,7 +2547,7 @@ enum CLI {
             branch: RepoIdentity.currentBranch(at: directory),
             task: value(after: "--task", in: arguments),
             paths: paths,
-            capabilities: arguments.contains("--capabilities")
+            capabilities: isSet("--capabilities", in: arguments)
                 ? splitCSV(values(after: "--capabilities", in: arguments)) : nil
         )
         print("Presence recorded for \(label)")
@@ -2677,7 +2683,7 @@ enum CLI {
             branch: RepoIdentity.currentBranch(at: checkout),
             sessionID: payloadSession,
             paths: Paths.fromEnvironment(),
-            capabilities: arguments.contains("--capabilities")
+            capabilities: isSet("--capabilities", in: arguments)
                 ? splitCSV(values(after: "--capabilities", in: arguments)) : nil
         )
     }
@@ -2736,7 +2742,7 @@ enum CLI {
         // Scoped to the project you are standing in, like `say`: a watch that
         // fires on any agent finishing anywhere is the noise this replaces.
         let directory = projectDirectory(arguments, allowPositional: false)
-        let scoped = arguments.contains("--global") ? nil : directory
+        let scoped = isSet("--global", in: arguments) ? nil : directory
         // Whoever asks is who gets told. `--as` covers the cases the environment
         // cannot see — a wrapper asking on Hermes' behalf, mostly.
         let owner: String
@@ -2879,7 +2885,7 @@ enum CLI {
             }
 
         case "restore":
-            guard let id = arguments.dropFirst().first, !id.isEmpty else {
+            guard let id = positional(Array(arguments.dropFirst())).first, !id.isEmpty else {
                 FileHandle.standardError.write(Data("usage: gentlemerge snapshot restore <id>\n".utf8))
                 return 64
             }
@@ -2914,7 +2920,7 @@ enum CLI {
     private static func testEvent(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
         let installer = HookInstaller(paths: paths)
-        let blocking = arguments.contains("--blocking")
+        let blocking = isSet("--blocking", in: arguments)
         // Refused rather than faked. The hook script has three modes — notify,
         // context and advise — and a fourth named `blocking` was passed here and
         // silently ignored, so `--blocking` produced an ordinary notify and then
@@ -3010,6 +3016,12 @@ enum CLI {
 
     private static func positional(_ arguments: [String]) -> [String] {
         CommandArguments(arguments).positional
+    }
+
+    /// Whether a flag was given, ahead of any `--`: `say -- --global` is a note
+    /// that says "--global", not a note for every project.
+    private static func isSet(_ flag: String, in arguments: [String]) -> Bool {
+        CommandArguments(arguments).contains(flag)
     }
 
     /// `--help` or `-h` anywhere before a `--`. No command takes a `-h` of its
@@ -3252,6 +3264,11 @@ enum CLI {
           --minimal             only Notification and Stop hooks
           --codex               also bridge Codex's notify program
           --dry-run             show what would change, write nothing
+
+        OPTIONS IN GENERAL
+          An option a command does not know stops it: exit 2, nothing done. After
+          a bare `--` everything is text, even what starts with a dash:
+          gentlemerge say -- "--no-verify hides this"
         """
 }
 
