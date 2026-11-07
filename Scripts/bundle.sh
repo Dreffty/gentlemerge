@@ -42,11 +42,15 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Signed with CODESIGN_IDENTITY when set, ad-hoc (`-`) otherwise: enough for
-# notifications and Automation prompts to attach to a stable identity on this
-# machine. Empty on purpose for public builds with no identity at hand.
-CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
-codesign --force --sign "$CODESIGN_IDENTITY" --identifier dev.gentlemerge.app "$APP" >/dev/null 2>&1 ||
-    echo "warning: could not codesign (notifications may not appear)" >&2
+# A stable identity when this machine has one, so macOS keeps what you granted
+# from one build to the next (see signing-identity.sh).
+IDENTITY=$(sh "$ROOT/Scripts/signing-identity.sh")
+if ! codesign --force --sign "$IDENTITY" --identifier dev.gentlemerge.app "$APP" >/dev/null 2>&1; then
+    # A certificate can be there and out of reach: a locked keychain, a session
+    # with no way to ask. An ad-hoc app still runs; a half-signed one does not.
+    echo "warning: could not sign with \"$IDENTITY\", signing ad-hoc instead" >&2
+    codesign --force --sign - --identifier dev.gentlemerge.app "$APP" >/dev/null 2>&1 ||
+        echo "warning: could not codesign (notifications may not appear)" >&2
+fi
 
 echo "$APP"

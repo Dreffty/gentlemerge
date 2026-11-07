@@ -81,6 +81,15 @@ gentlemerge install     # hooks for Claude Code (idempotent, backed up, reversib
 says so if it is not on your `PATH`, or if an older copy earlier in `PATH` is
 still the one that runs.
 
+**The menu-bar app (macOS, optional)**
+```sh
+make run                # builds it, installs ~/Applications/GentleMerge.app (elsewhere with APP_DIR=<dir>) and opens it
+```
+macOS remembers a permission against the app's signature. The build looks for an
+"Apple Development" certificate by itself (a free Apple ID gets you one), so what
+you grant stays granted from one build to the next; without one it signs ad-hoc,
+says so, and every rebuild asks again. `CODESIGN_IDENTITY=<name>` picks another.
+
 **Set up a repo for several agents**
 ```sh
 cd your-repo
