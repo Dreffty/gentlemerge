@@ -52,11 +52,13 @@ GentleMerge takes the opposite stance: **coordination is infrastructure, not int
 | Problem | How GentleMerge solves it | Tokens |
 |---|---|---|
 | Two agents edit the same file | **Path claims**, created automatically when an agent edits; a **git pre-commit hook** rejects commits that invade another agent's live claim or ownership zone | 0 |
-| Agent doesn't know what others are doing | **Delta briefings** injected only when something changed, hard-capped at ~300 tokens; empty when nothing's new | ~20–70/turn |
+| Agent doesn't know what others are doing | **Delta briefings** injected only when something changed, hard-capped at ~300 tokens; empty when nothing's new | ~100/turn |
 | "This task is better done by another agent" | **Requests**: a contract with `may_touch` paths, time budget, state machine and automatic callback. Delegate and keep working | ~50 once |
 | Branches will conflict at merge | **Conflict radar** (`git merge-tree`) warns both agents early; `gentlemerge land` rebases, runs checks, fast-forwards | 0 |
 | Dev servers collide on ports | Per-worktree `env.sh` with its own 100-port range (labels absent from `config.json` get one derived from a stable hash — different labels, but not a guarantee across every possible name; add `agents` to `config.json` for the guarantee) | 0 |
 | "Did the agent actually do it right?" | **Review** lists what changed, what checks ran, and what *nobody verified* — never says "all good" | 0 |
+
+The per-turn figure is measured, not hoped for: a month of one person's real use came to 466 briefings and about 47,400 tokens, some 100 a turn. `gentlemerge stats` shows yours.
 
 ## How it works
 
