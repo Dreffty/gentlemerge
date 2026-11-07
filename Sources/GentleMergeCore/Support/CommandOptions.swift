@@ -52,7 +52,7 @@ public enum CommandOptions {
         "show": .init(),
         "review": .init(always: ["--slow", "--since"]),
         "radar": .init(always: ["--project", "--force"]),
-        "projects": .init(),
+        "projects": .init(always: ["--all"]),
         "project": .init(bySubcommand: [
             "init": projectInitOptions,
             "adopt-worktrees": ["--project"],

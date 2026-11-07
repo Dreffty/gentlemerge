@@ -166,6 +166,7 @@ public final class InboxModel {
         loadState()
         loadReviews()
         drainNow()
+        settleProjects()
         startWatching()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in
@@ -176,6 +177,25 @@ public final class InboxModel {
         }
         spool.prune()
         pruneIfDue()
+    }
+
+    /// The projects that get a row in the window.
+    public var visibleProjects: [ProjectSummary] { projects.filter { $0.isListed() } }
+
+    /// Looks at each project's folder once, for the entries nobody has yet. Off the
+    /// main thread: they may live in a folder macOS protects, and the window must not
+    /// wait for that answer.
+    private func settleProjects() {
+        let unknown = projects.filter { $0.isEstablished == nil }.map(\.path)
+        guard !unknown.isEmpty else { return }
+        RadarQueue.queue.async { @Sendable [weak self] in
+            let found = Dictionary(uniqueKeysWithValues: unknown.map { ($0, ProjectRegistry.isEstablished($0)) })
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.projectRegistry.adoptEstablished(found)
+                self.projects = self.projectRegistry.projects
+            }
+        }
     }
 
     /// Pick up a `config.json` that changed under the app.

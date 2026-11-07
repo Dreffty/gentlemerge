@@ -20,7 +20,7 @@ struct MainWindow: View {
             sidebar
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
         } detail: {
-            if let projectPath = selection ?? model.projects.first?.path {
+            if let projectPath = selection ?? model.visibleProjects.first?.path {
                 ProjectPane(
                     model: model,
                     projectPath: projectPath,
@@ -35,7 +35,7 @@ struct MainWindow: View {
         .frame(minWidth: 780, minHeight: 520)
         .onAppear {
             model.refreshBus()
-            if selection == nil { selection = model.projects.first?.path }
+            if selection == nil { selection = model.visibleProjects.first?.path }
         }
     }
 
@@ -74,7 +74,7 @@ struct MainWindow: View {
             }
 
             Section("Projects") {
-                ForEach(model.projects) { summary in
+                ForEach(model.visibleProjects) { summary in
                     Label(summary.name, systemImage: "folder")
                         .tag(summary.path)
                 }

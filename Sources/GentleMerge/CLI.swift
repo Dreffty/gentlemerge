@@ -122,7 +122,7 @@ enum CLI {
         case "radar":
             return radar(rest)
         case "projects":
-            return projectList()
+            return projectList(rest)
         case "project":
             return project(rest)
         case "init":
@@ -1075,15 +1075,17 @@ enum CLI {
         return (raw as NSString).expandingTildeInPath
     }
 
-    private static func projectList() -> Int32 {
+    private static func projectList(_ arguments: [String]) -> Int32 {
         let paths = Paths.fromEnvironment()
-        let registry = ProjectRegistry(url: paths.projects)
+        var registry = ProjectRegistry(url: paths.projects)
         guard !registry.projects.isEmpty else {
             print("No projects yet. They appear as agents work in them, or run `gentlemerge project init`.")
             return 0
         }
+        registry.refreshEstablished()
+        let shown = isSet("--all", in: arguments) ? registry.projects : registry.visibleProjects()
 
-        for summary in registry.projects {
+        for summary in shown {
             let handoff = ProjectRegistry.handoff(for: summary.path, refreshingCommits: false)
             let open = handoff.openTasks.count
             var line = summary.name
@@ -1093,6 +1095,11 @@ enum CLI {
             }
             print(line)
             print("   \(summary.path)")
+        }
+        let hidden = registry.projects.count - shown.count
+        if hidden > 0 {
+            print("\(hidden) more: scratch folders, and plain folders nobody has worked in for a week."
+                + " `gentlemerge projects --all` lists them.")
         }
         return 0
     }
@@ -1346,7 +1353,8 @@ enum CLI {
         if single {
             targets = [projectDirectory(arguments)]
         } else {
-            targets = ProjectRegistry(url: paths.projects).projects.map(\.path)
+            // The ones with a row: a scratch folder has no branches to compare.
+            targets = ProjectRegistry(url: paths.projects).visibleProjects().map(\.path)
             guard !targets.isEmpty else {
                 print("No projects yet. They appear as agents work in them, or run `gentlemerge project init`.")
                 return 0
@@ -3206,7 +3214,10 @@ enum CLI {
                                             fast-forwards: no rebase, no checks
 
         PROJECTS — shared state between sessions and models
-          gentlemerge projects              every project, with open task counts
+          gentlemerge projects [--all]      every project, with open task counts.
+                                            Scratch folders, and plain folders
+                                            nobody has worked in for a week, only
+                                            with --all
           gentlemerge handoff [dir]         print what the next session should know
           gentlemerge precommit [dir]       BEFORE EVERY COMMIT. Which of the files
                                             you have changed somebody already
