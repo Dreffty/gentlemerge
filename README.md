@@ -26,8 +26,8 @@ ownership: lib/store/** → claude · lib/data/** → hermes · assets/** → co
 [claude]  → hermes: need a nullable `sku` on Product, can you add it?
 [hermes]  briefing:
     Other agents you have running right now (from GentleMerge):
-    - Claude Code · repo — “on agent/claude” (just now, working)
-    - Codex · repo — “on agent/codex” (just now, working)
+    - Claude Code · repo on agent/claude (just now, working)
+    - Codex · repo on agent/codex (just now, working)
 
     Messages left for you:
     - #3163 claude · repo (just now): need a nullable `sku` on Product, can you add it?

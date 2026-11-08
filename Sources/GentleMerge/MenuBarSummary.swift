@@ -49,7 +49,7 @@ struct MenuBarSummary: View {
                             Text("\(activity.displayName) · \(activity.projectName)")
                                 .fontWeight(.medium)
                                 .lineLimit(1)
-                            Text(activity.currentTask ?? activity.stateLabel)
+                            Text(activity.currentTask ?? activity.branch.map { "on \($0)" } ?? activity.stateLabel)
                                 .font(.callout)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(2)

@@ -45,6 +45,9 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
     /// every one of them as "Agent · <project>", so nobody reading it knew whom to
     /// address. nil for an activity recorded before labels were kept.
     public var label: String?
+    /// The branch it is on, when its presence mark said. Kept apart from
+    /// `currentTask`, whose quotation marks mean "what you asked it for".
+    public var branch: String?
 
     /// `lastEvent` for a session the sweep buried. One word, because it is also
     /// what the presentation matches on.
@@ -63,7 +66,8 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         tty: String? = nil,
         terminalProgram: String? = nil,
         socketPath: String? = nil,
-        label: String? = nil
+        label: String? = nil,
+        branch: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -78,6 +82,7 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         self.terminalProgram = terminalProgram
         self.socketPath = socketPath
         self.label = label
+        self.branch = branch
     }
 
     /// How to name this agent to a person or to another agent: its label when that
@@ -130,12 +135,13 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
     /// silence. Identity, state and the thing it is doing are what "news"
     /// actually means here.
     public var fingerprintLine: String {
-        "\(id)|\(state.rawValue)|\(currentTask ?? lastEvent ?? "")"
+        "\(id)|\(state.rawValue)|\(currentTask ?? lastEvent ?? "")" + (branch.map { "|on \($0)" } ?? "")
     }
 
     /// One line for another agent to read.
     public func briefingLine(now: Date = Date()) -> String {
         var line = "- \(displayName) · \(projectName)"
+        if let branch, !branch.isEmpty { line += " on \(branch)" }
         if let currentTask, !currentTask.isEmpty {
             line += " — “\(BriefingRenderer.quote(currentTask))”"
         } else if let lastEvent, !lastEvent.isEmpty, !diedUncleanly {

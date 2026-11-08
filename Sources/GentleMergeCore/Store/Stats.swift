@@ -27,6 +27,11 @@ public enum Stats {
         public var estTokens: Int { chars / 4 }
         public var avgPerTurn: Int { turns == 0 ? 0 : estTokens / turns }
 
+        /// What a session has cost, the way the window says it.
+        public var costLine: String {
+            "\(turns) \(turns == 1 ? "briefing" : "briefings") · ≈\(estTokens) tokens (estimate)"
+        }
+
         mutating func add(chars: Int, mode: String?) {
             turns += 1
             if chars > 0 { nonEmpty += 1 }

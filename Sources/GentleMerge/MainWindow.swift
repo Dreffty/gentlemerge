@@ -289,7 +289,7 @@ private struct ProjectPane: View {
                         // What this session has cost so far. Tokens are chars/4
                         // off the ledger, always said as an estimate.
                         if let cost = costs[activity.id], cost.turns > 0 {
-                            Text("\(cost.turns) briefings · ≈\(cost.estTokens) tokens (estimate)")
+                            Text(cost.costLine)
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }

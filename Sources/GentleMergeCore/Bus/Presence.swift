@@ -342,10 +342,11 @@ public enum Presence {
                 projectPath: mark.projectPath,
                 startedAt: mark.updatedAt,
                 updatedAt: mark.updatedAt,
-                currentTask: mark.task ?? mark.branch.map { "on \($0)" },
+                currentTask: mark.task,
                 state: .working,
                 pid: mark.pid,
-                label: mark.label
+                label: mark.label,
+                branch: mark.branch
             )
         }
     }
