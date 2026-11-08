@@ -5,8 +5,9 @@ share one repository: a local bus (hooks or MCP in, briefings out), a git
 pre-commit gate that costs no tokens, and a filesystem protocol any language
 can speak. 100% local — Swift 6, Swift Package Manager, no dependencies.
 
-One binary, two modes: `gentlemerge <command>` is the CLI, bare
-`gentlemerge` is the macOS menu-bar app. All logic lives in `GentleMergeCore`,
+One binary, two modes: `gentlemerge <command>` is the CLI, and the same
+binary inside `GentleMerge.app` (or `gentlemerge app`) is the macOS menu-bar
+app; bare `gentlemerge` in a terminal prints the help. All logic lives in `GentleMergeCore`,
 which imports no UI frameworks, so the same code runs the app, the Linux CLI,
 and the test suite.
 
@@ -15,7 +16,7 @@ and the test suite.
 ```
 Sources/
   GentleMerge/            # thin layer: CLI + macOS UI, all logic in Core
-    main.swift           # argv>1 → CLI, else the SwiftUI app
+    main.swift           # a command → CLI; inside the .app with none → the SwiftUI app
     CLI.swift            # every subcommand (say, brief, task, claim, delegate,
                          #   request, watch, precommit, land, radar, review,
                          #   stats, env, snapshot, sim, demo, mcp, install…)

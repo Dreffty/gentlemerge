@@ -91,6 +91,7 @@ public enum CommandOptions {
         "history": .init(always: ["-n"]),
         "test-event": .init(always: ["--blocking"]),
         "print-hook": .init(),
+        "app": .init(),
     ]
 
     /// The same command under another name.

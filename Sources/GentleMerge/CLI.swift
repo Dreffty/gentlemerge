@@ -60,7 +60,14 @@ enum CLI {
 
         switch command {
         case nil:
-            return nil // fall through to the menu bar app
+            // Typed in a terminal, this started the app inside it and kept the
+            // terminal busy. Help, as on Linux; the app itself, launched from
+            // Finder or `open`, is the one place where nothing typed means "run".
+            if launchedAsTheApp { return nil }
+            printUsage()
+            return 0
+        case "app":
+            return openApp()
         case "demo":
             do {
                 let root = Demo.temporaryRoot()
@@ -175,6 +182,48 @@ enum CLI {
             printUsage()
             return 64
         }
+    }
+
+    /// The binary inside `GentleMerge.app`, which is what Finder and `open` start.
+    private static var launchedAsTheApp: Bool {
+        #if os(macOS)
+        Bundle.main.bundleURL.pathExtension == "app"
+        #else
+        false
+        #endif
+    }
+
+    /// `gentlemerge app`: the installed app when there is one, opened the way
+    /// Finder would, so this terminal is free again at once. nil runs it here, in
+    /// this process: inside the bundle, or when nothing is installed.
+    private static func openApp() -> Int32? {
+        #if os(macOS)
+        if launchedAsTheApp { return nil }
+        // One app per home, before anything is opened or started.
+        if let running = runningAppPID() {
+            FileHandle.standardError.write(Data("GentleMerge is already running (pid \(running)); it is in the menu bar.\n".utf8))
+            return 0
+        }
+        let home = Paths.userHome().path
+        let installed = [home + "/Applications/GentleMerge.app", "/Applications/GentleMerge.app"]
+            .first { FileManager.default.fileExists(atPath: $0) }
+        guard let installed else {
+            FileHandle.standardError.write(Data(
+                ("No GentleMerge.app installed (`make install-app`), so it runs here, in this terminal,"
+                    + " without notifications. ⌃C stops it.\n").utf8))
+            return nil
+        }
+        let opened = Shell.run("/usr/bin/open", [installed], timeout: 20)
+        guard opened.succeeded else {
+            FileHandle.standardError.write(Data("could not open \(installed): \(opened.text)\n".utf8))
+            return 1
+        }
+        print("GentleMerge is in the menu bar (\(installed)).")
+        return 0
+        #else
+        FileHandle.standardError.write(Data("The menu-bar app is macOS only; every command works without it.\n".utf8))
+        return 1
+        #endif
     }
 
     private static func simulation(_ arguments: [String]) -> Int32 {
@@ -3078,7 +3127,9 @@ enum CLI {
         gentlemerge — coordination for AI coding agents that share one repository.
 
         USAGE
-          gentlemerge                       start the menu bar app
+          gentlemerge                       this help
+          gentlemerge app                   open the menu bar app (macOS;
+                                              `make run` installs it)
           gentlemerge install [options]     install the hook bridge
           gentlemerge uninstall             remove our hooks (yours stay)
           gentlemerge status                what is installed and running

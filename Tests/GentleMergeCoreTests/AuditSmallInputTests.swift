@@ -174,7 +174,7 @@ final class SingleAppInstanceTests: XCTestCase {
 
         XCTAssertTrue(status().contains("running (pid \(stand.processIdentifier))"), status())
 
-        let second = Shell.run(binary, [], in: root, environment: ["GENTLEMERGE_HOME": paths.home.path], timeout: 15)
+        let second = Shell.run(binary, ["app"], in: root, environment: ["GENTLEMERGE_HOME": paths.home.path], timeout: 15)
         XCTAssertFalse(second.timedOut, "a second app started instead of stepping aside")
         XCTAssertEqual(second.status, 0)
         XCTAssertTrue(second.stderr.contains("already running"), second.stderr)
