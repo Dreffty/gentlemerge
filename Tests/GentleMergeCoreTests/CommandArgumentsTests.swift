@@ -91,16 +91,19 @@ final class CommandArgumentsTests: XCTestCase {
     /// Adding a flag to one list and not the other is the whole bug, and no
     /// amount of testing the parser in isolation would ever catch it.
     func testEveryFlagTheCLIReadsAValueFromIsDeclared() throws {
-        let cli = URL(fileURLWithPath: #filePath)
+        let directory = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()   // GentleMergeCoreTests
             .deletingLastPathComponent()   // Tests
             .deletingLastPathComponent()   // package root
-            .appendingPathComponent("Sources/GentleMerge/CLI.swift")
+            .appendingPathComponent("Sources/GentleMerge")
 
-        let source = try XCTUnwrap(
-            try? String(contentsOf: cli, encoding: .utf8),
-            "could not read \(cli.path) — if the CLI moved, point this at its new home rather than deleting it"
-        )
+        // The CLI is one file per command family: every one of them, read as one.
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        let source = try files
+            .filter { $0.lastPathComponent.hasPrefix("CLI") && $0.pathExtension == "swift" }
+            .map { try String(contentsOf: $0, encoding: .utf8) }
+            .joined(separator: "\n")
+        XCTAssertFalse(source.isEmpty, "found no CLI source in \(directory.path) — if it moved, point this at its new home")
 
         let pattern = try NSRegularExpression(pattern: #"values?\(after: "([^"]+)""#)
         let matches = pattern.matches(in: source, range: NSRange(source.startIndex..., in: source))

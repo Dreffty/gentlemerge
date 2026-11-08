@@ -17,9 +17,11 @@ and the test suite.
 Sources/
   GentleMerge/            # thin layer: CLI + macOS UI, all logic in Core
     main.swift           # a command → CLI; inside the .app with none → the SwiftUI app
-    CLI.swift            # every subcommand (say, brief, task, claim, delegate,
-                         #   request, watch, precommit, land, radar, review,
-                         #   stats, env, snapshot, sim, demo, mcp, install…)
+    CLI.swift            # the dispatch: which command runs, and the door that
+                         #   refuses an option nobody declared
+    CLI+<Family>.swift   # one file per family of commands: Bus (say, who,
+                         #   brief, show), Tasks, Gate (precommit, land, radar),
+                         #   Hooks, Claims, Requests, Watch, Projects, Install…
     MainWindow.swift     # sessions, messages, requests, tasks, commits
     MenuBarSummary.swift # popover counts
     Notifier.swift       # UserNotifications for questions/failures
