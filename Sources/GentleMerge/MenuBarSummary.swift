@@ -39,6 +39,7 @@ struct MenuBarSummary: View {
                         .foregroundStyle(.secondary)
                 }
 
+                let names = AgentActivity.distinctNames(model.liveActivities)
                 ForEach(model.liveActivities.prefix(5)) { activity in
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Circle()
@@ -46,7 +47,7 @@ struct MenuBarSummary: View {
                             .frame(width: 7, height: 7)
                             .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("\(activity.displayName) · \(activity.projectName)")
+                            Text("\(names[activity.id] ?? activity.displayName) · \(activity.projectName)")
                                 .fontWeight(.medium)
                                 .lineLimit(1)
                             Text(activity.currentTask ?? activity.branch.map { "on \($0)" } ?? activity.stateLabel)

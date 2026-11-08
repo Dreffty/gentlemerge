@@ -787,7 +787,7 @@ public final class InboxModel {
     }
 
     public var liveActivities: [AgentActivity] {
-        activities.filter(\.isLive).sorted { $0.updatedAt > $1.updatedAt }
+        activities.filter(\.isLive).sorted(by: AgentActivity.byUrgency)
     }
 
     /// Implicit path claims: the moment an agent edits a file, everyone else

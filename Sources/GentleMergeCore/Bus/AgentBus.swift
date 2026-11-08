@@ -119,6 +119,47 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         return copy
     }
 
+    /// How much this needs you: a question waiting first, then a turn that ended
+    /// with the next move yours, then the ones at work.
+    public var urgency: Int {
+        switch state {
+        case .waiting: return 0
+        case .idle: return 1
+        case .working: return 2
+        case .ended: return 3
+        }
+    }
+
+    /// The order a person should read them in: what waits on you first, however
+    /// long it has waited, and the newest first within each state.
+    public static func byUrgency(_ lhs: AgentActivity, _ rhs: AgentActivity) -> Bool {
+        lhs.urgency != rhs.urgency ? lhs.urgency < rhs.urgency : lhs.updatedAt > rhs.updatedAt
+    }
+
+    /// A name for each, by id, that tells apart sessions which would all read
+    /// "Claude Code": the branch when they are on different ones, and otherwise a
+    /// number in the order they started, which is the order you opened them in.
+    public static func distinctNames(_ activities: [AgentActivity]) -> [String: String] {
+        let shared = Dictionary(grouping: activities, by: \.displayName).filter { $0.value.count > 1 }
+        var names: [String: String] = [:]
+        for activity in activities {
+            guard let twins = shared[activity.displayName] else {
+                names[activity.id] = activity.displayName
+                continue
+            }
+            let sameBranch = twins.filter { $0.branch == activity.branch }
+            if let branch = activity.branch, !branch.isEmpty, sameBranch.count == 1 {
+                names[activity.id] = "\(activity.displayName) · on \(branch)"
+                continue
+            }
+            let order = sameBranch.sorted { ($0.startedAt, $0.id) < ($1.startedAt, $1.id) }
+            let number = (order.firstIndex { $0.id == activity.id } ?? 0) + 1
+            let branch = activity.branch.map { " · on \($0)" } ?? ""
+            names[activity.id] = "\(activity.displayName)\(branch) · \(number)"
+        }
+        return names
+    }
+
     public var stateLabel: String {
         switch state {
         case .working: return "working"
