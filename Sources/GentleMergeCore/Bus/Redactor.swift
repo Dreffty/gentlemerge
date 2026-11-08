@@ -136,6 +136,11 @@ public enum Redactor {
         // prefix plus the check digits behind.
         (.iban, #"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){3,7}\b"#),
         (.card, #"\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{2,4}\b|\b\d{4}[ -]\d{6}[ -]\d{4,5}\b"#),
+        // A phone number the way people write one: a `+`, the country, then
+        // groups. The rule below only sees an unbroken run of seven digits, so
+        // `+34 612 345 678` went through whole. Three groups at least, which keeps
+        // "+1 on this" and "+12 today" what they are.
+        (.longNumber, #"(?<![\w+])\+\d{1,3}(?:[ .-]\d{2,4}){2,5}(?![\w])"#),
         // Short numbers are line numbers, ports and versions. Long runs are
         // phone numbers, document ids and account numbers.
         (.longNumber, #"\b\d{7,}\b"#),
