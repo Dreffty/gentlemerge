@@ -160,8 +160,8 @@ public enum EventTranslator {
         // was always nil and `scope` always `.unknown` — which silently disabled
         // the README's third Review bullet: "what nobody verified" could never
         // mention a file outside the project, because the paths to check were
-        // never recorded. `PathExtractor.paths` had zero callers anywhere
-        // (audit Tier 5 #37). A caller that knows better still wins.
+        // never recorded. `PathExtractor.paths` had zero callers anywhere.
+        // A caller that knows better still wins.
         //
         // The tool arguments arrive nested under `tool_input`, while
         // `PathExtractor` reads its keys from the top level — feeding it the

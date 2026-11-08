@@ -63,7 +63,7 @@ public struct MCPServer {
                 // unrecognised tool name is invalid params, and MCP says so. The
                 // old value was also identical to the one used two lines later
                 // for a genuinely unknown method, so a client could not tell
-                // "bad method" from "bad tool" (audit Tier 5 #27).
+                // "bad method" from "bad tool".
                 return rpcError(id, -32602, "unknown tool: \(name)")
             }
             // Same reason as the CLI read commands: hook events wait in the
@@ -143,8 +143,7 @@ public struct MCPServer {
                         // returns the handoff either way, so "added" was
                         // returned for text the redactor had refused as almost
                         // entirely a secret — and the agent believed the task was
-                        // on the board, without retrying or mentioning it
-                        // (audit Tier 5 #32).
+                        // on the board, without retrying or mentioning it.
                         let outcome = ProjectRegistry.addTaskReporting(
                             args["text"]?.stringValue ?? "", to: project, by: identity, paths: paths
                         ).outcome
@@ -155,7 +154,7 @@ public struct MCPServer {
                         case .writeFailed:
                             // Honest, and an error: "added" for a write that did
                             // not land is how an agent ends up moving on with
-                            // work nobody is tracking (audit 2026-10-08).
+                            // work nobody is tracking.
                             text = "not added: the task list could not be written"
                             isError = true
                         case .refusedAsSecret:
@@ -165,7 +164,7 @@ public struct MCPServer {
                     case "task_done":
                         // An id nobody issued must error, not answer `done`: an
                         // agent that believes it closed work that never existed
-                        // reports completion upstream (audit 2026-10-06, finding 3).
+                        // reports completion upstream.
                         let doneID = args["id"]?.stringValue ?? ""
                         let handoff = ProjectRegistry.handoff(for: project, refreshingCommits: false)
                         guard handoff.tasks.contains(where: { $0.id == doneID }) else {

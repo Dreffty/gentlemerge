@@ -12,7 +12,7 @@ import Foundation
 /// hooks with `GENTLEMERGE_BIN` taken from argv[0], every commit then printed
 /// "gate binary not found … this commit is NOT checked" and passed unchecked,
 /// and the demo's own headline step reported `commit ok` where the README
-/// advertises `commit BLOCKED` (audit 2026-10-08). `Bundle.main` is the honest
+/// advertises `commit BLOCKED`. `Bundle.main` is the honest
 /// answer and is already what `GitHookInstaller.ensureBinaryLink` uses.
 public enum CurrentExecutable {
     public static var url: URL {

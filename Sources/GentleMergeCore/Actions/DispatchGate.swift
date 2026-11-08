@@ -48,7 +48,7 @@ public enum DispatchGate {
         // drain will check the dispatch gate", the gate still answered
         // needsApproval, and `approvalNotifiedIDs` suppressed re-notification —
         // so the UI showed a pending approval the user had already granted, with
-        // no further feedback and no log line (audit Tier 4 #17). The spend
+        // no further feedback and no log line. The spend
         // still lands in the ledger either way, so the budget accounting stays
         // honest; only the unattended gate is overridden.
         if approved { return .dispatch(target) }

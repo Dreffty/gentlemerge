@@ -10,11 +10,15 @@ public struct PrecommitGate: Sendable {
         public let reason: String
         /// A non-blocking violation is reported but lets the commit through.
         public let blocking: Bool
+        /// Who the path belongs to, when somebody does: the claim's holder, or the
+        /// owner of the zone.
+        public let holder: String?
 
-        public init(path: String, reason: String, blocking: Bool) {
+        public init(path: String, reason: String, blocking: Bool, holder: String? = nil) {
             self.path = path
             self.reason = reason
             self.blocking = blocking
+            self.holder = holder
         }
     }
 
@@ -25,7 +29,7 @@ public struct PrecommitGate: Sendable {
     /// output that never quotes, escapes or truncates a path.
     ///
     /// Three deliberate choices, each of which was a live bypass before
-    /// (audit 2026-10-07):
+    ///:
     ///
     /// - **`-z`, not `--name-only`.** With `--name-only` git C-quotes any path
     ///   holding a non-ASCII byte (`"lib/donn\303\251es/caf\303\251.txt"`), and
@@ -151,7 +155,8 @@ public struct PrecommitGate: Sendable {
                 violations.append(.init(
                     path: path,
                     reason: reason,
-                    blocking: true
+                    blocking: true,
+                    holder: holder.label
                 ))
                 continue
             }
@@ -166,7 +171,8 @@ public struct PrecommitGate: Sendable {
                     violations.append(.init(
                         path: path,
                         reason: "owned by \(owner) per HANDOFF.md; claim it explicitly to override",
-                        blocking: true
+                        blocking: true,
+                        holder: owner
                     ))
                     continue
                 }
@@ -185,6 +191,35 @@ public struct PrecommitGate: Sendable {
             }
         }
         return violations
+    }
+
+    /// `evaluate` with the world looked up: the one decision the commit-time gate
+    /// and the count of what went round it both make, so they cannot disagree.
+    public static func judge(
+        files: [String],
+        me: String?,
+        project: String,
+        paths: Paths,
+        now: Date = Date()
+    ) -> [Violation] {
+        // A commit that rewrites HANDOFF.md cannot also be judged by it — the
+        // agent could stage the invasion and the deletion of the zone's
+        // declaration together. Only the pinned store rules in that case.
+        let ownership = Ownership.effective(
+            project: project,
+            paths: paths,
+            handoffIsStaged: files.contains(Ownership.handoffRelativePath)
+        ).ownership
+        return evaluate(
+            staged: files,
+            me: me,
+            claims: PathClaims(paths: paths).live(project: project),
+            ownership: ownership,
+            activeRequests: me.map { Requests(paths: paths).inProgress(assignedTo: $0, project: project) } ?? [],
+            now: now,
+            presence: Presence.marks(paths: paths),
+            isPIDAlive: { Liveness.isProcessAlive($0, seenAt: $1) }
+        )
     }
 
     static func short(_ date: Date) -> String {

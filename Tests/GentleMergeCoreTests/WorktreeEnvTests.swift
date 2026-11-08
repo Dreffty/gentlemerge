@@ -100,13 +100,13 @@ final class WorktreeEnvTests: XCTestCase {
 
         WorktreeEnv.ensureGitignore(projectPath: directory.path)
         WorktreeEnv.ensureGitignore(projectPath: directory.path)
-        XCTAssertEqual(try String(contentsOf: ignore, encoding: .utf8), ".gentlemerge/env.sh\n")
+        XCTAssertEqual(try String(contentsOf: ignore, encoding: .utf8), ".gentlemerge/env.sh\n.gentlemerge/HANDOFF.md\n")
 
         try Data("node_modules/\n".utf8).write(to: ignore)
         WorktreeEnv.ensureGitignore(projectPath: directory.path)
         XCTAssertEqual(
             try String(contentsOf: ignore, encoding: .utf8),
-            "node_modules/\n.gentlemerge/env.sh\n"
+            "node_modules/\n.gentlemerge/env.sh\n.gentlemerge/HANDOFF.md\n"
         )
     }
 }

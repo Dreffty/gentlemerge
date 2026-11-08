@@ -1,4 +1,4 @@
-.PHONY: build release test app bundle run install install-hooks install-hooks-approval status uninstall-hooks clean
+.PHONY: build release test app bundle run install install-app install-hooks status uninstall-hooks clean
 .DEFAULT_GOAL := build
 UNAME_S := $(shell uname -s)
 
@@ -11,8 +11,13 @@ UNAME_S := $(shell uname -s)
 ## sudo) still works for anyone who wants it there.
 PREFIX ?= $(HOME)/.local
 
+## Where the app lives once installed. Not build/: a repository under ~/Downloads,
+## ~/Documents or ~/Desktop is in a folder macOS protects, and an app started from
+## there has to be granted that folder before it can so much as load itself.
+APP_DIR ?= $(HOME)/Applications
+
 ifeq ($(UNAME_S),Darwin)
-CLI = ./build/GentleMerge.app/Contents/MacOS/gentlemerge
+CLI =./build/GentleMerge.app/Contents/MacOS/gentlemerge
 CLI_PREREQUISITE = app
 else
 CLI = ./.build/release/gentlemerge
@@ -55,29 +60,30 @@ ifeq ($(UNAME_S),Darwin)
 app bundle:
 	@sh Scripts/bundle.sh
 
+## Into the folder where it keeps its permissions (see APP_DIR). Needs no sudo.
+install-app: app
+	@sh Scripts/install-app.sh "$(APP_DIR)"
+
 ## Stops the running copy only when the new one can be opened. `open` needs a
 ## graphical session: from a context without one (an agent's shell, ssh) it fails
 ## with -600, and the old rule — kill first, open after, never check — left the
 ## person with no menu-bar app at all.
-run: app
+run: install-app
 	@if [ "$$(launchctl managername 2>/dev/null)" != "Aqua" ]; then \
 	  echo "make run: no graphical session here, so the app cannot be opened (the running copy was left alone). Run it from a Terminal on the Mac." >&2; exit 1; \
 	fi
 	@pkill -f 'GentleMerge.app/Contents/MacOS/gentlemerge' 2>/dev/null || true
 	@sleep 1
-	@open build/GentleMerge.app || { echo "make run: open failed; start it by hand: open build/GentleMerge.app" >&2; exit 1; }
+	@open "$(APP_DIR)/GentleMerge.app" || { echo "make run: open failed; start it by hand: open \"$(APP_DIR)/GentleMerge.app\"" >&2; exit 1; }
 	@echo "GentleMerge is in the menu bar."
 else
-app bundle run:
+app bundle install-app run:
 	@printf 'The menu-bar app is macOS only; use make install for the CLI.\n' >&2
 	@exit 1
 endif
 
 install-hooks: $(CLI_PREREQUISITE)
 	@$(CLI) install
-
-install-hooks-approval: $(CLI_PREREQUISITE)
-	@$(CLI) install --remote-approval
 
 status: $(CLI_PREREQUISITE)
 	@$(CLI) status

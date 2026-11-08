@@ -16,8 +16,8 @@ public struct Dispatcher: Sendable {
     /// Memoised on the ledger's size and mtime, the same fingerprint
     /// `Stats.summaries` uses: this runs on the app's 3-second tick, on the main
     /// actor, and decoding every line of the ledger each time made the tick cost
-    /// ~2 seconds on a 50k-line ledger — with or without any request assigned
-    /// (audit 2026-10-11). The parse is the expensive half; filtering what was
+    /// ~2 seconds on a 50k-line ledger — with or without any request assigned.
+    /// The parse is the expensive half; filtering what was
     /// parsed by day is not.
     public static func spentTodayMinutes(paths: Paths, now: Date = Date()) -> Int {
         let calendar = Calendar.current
@@ -164,7 +164,7 @@ public struct Dispatcher: Sendable {
                 // claims blocking other agents until their TTL, its task open,
                 // and the requester with no result line — the README's
                 // "automatic callback" never fired for the most common dispatch
-                // failure (audit Tier 4 #18).
+                // failure.
                 do {
                     _ = try RequestActions.perform(
                         action: current.state == .assigned ? "reject" : "fail",

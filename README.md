@@ -26,8 +26,8 @@ ownership: lib/store/** → claude · lib/data/** → hermes · assets/** → co
 [claude]  → hermes: need a nullable `sku` on Product, can you add it?
 [hermes]  briefing:
     Other agents you have running right now (from GentleMerge):
-    - Claude Code · repo — “on agent/claude” (just now, working)
-    - Codex · repo — “on agent/codex” (just now, working)
+    - Claude Code · repo on agent/claude (just now, working)
+    - Codex · repo on agent/codex (just now, working)
 
     Messages left for you:
     - #3163 claude · repo (just now): need a nullable `sku` on Product, can you add it?
@@ -52,11 +52,13 @@ GentleMerge takes the opposite stance: **coordination is infrastructure, not int
 | Problem | How GentleMerge solves it | Tokens |
 |---|---|---|
 | Two agents edit the same file | **Path claims**, created automatically when an agent edits; a **git pre-commit hook** rejects commits that invade another agent's live claim or ownership zone | 0 |
-| Agent doesn't know what others are doing | **Delta briefings** injected only when something changed, hard-capped at ~300 tokens; empty when nothing's new | ~20–70/turn |
+| Agent doesn't know what others are doing | **Delta briefings** injected only when something changed, hard-capped at ~300 tokens; empty when nothing's new | ~100/turn |
 | "This task is better done by another agent" | **Requests**: a contract with `may_touch` paths, time budget, state machine and automatic callback. Delegate and keep working | ~50 once |
 | Branches will conflict at merge | **Conflict radar** (`git merge-tree`) warns both agents early; `gentlemerge land` rebases, runs checks, fast-forwards | 0 |
 | Dev servers collide on ports | Per-worktree `env.sh` with its own 100-port range (labels absent from `config.json` get one derived from a stable hash — different labels, but not a guarantee across every possible name; add `agents` to `config.json` for the guarantee) | 0 |
 | "Did the agent actually do it right?" | **Review** lists what changed, what checks ran, and what *nobody verified* — never says "all good" | 0 |
+
+The per-turn figure is measured, not hoped for: a month of one person's real use came to 466 briefings and about 47,400 tokens, some 100 a turn. `gentlemerge stats` shows yours.
 
 ## How it works
 
@@ -81,13 +83,24 @@ gentlemerge install     # hooks for Claude Code (idempotent, backed up, reversib
 says so if it is not on your `PATH`, or if an older copy earlier in `PATH` is
 still the one that runs.
 
+**The menu-bar app (macOS, optional)**
+```sh
+make run                # builds it, installs ~/Applications/GentleMerge.app (elsewhere with APP_DIR=<dir>) and opens it
+```
+macOS remembers a permission against the app's signature. The build looks for an
+"Apple Development" certificate by itself (a free Apple ID gets you one), so what
+you grant stays granted from one build to the next; without one it signs ad-hoc,
+says so, and every rebuild asks again. `CODESIGN_IDENTITY=<name>` picks another.
+
 **Set up a repo for several agents**
 ```sh
 cd your-repo
-gentlemerge project init --git-hooks            # HANDOFF.md + pre-commit & pre-merge-commit in the hooks dir git actually uses (core.hooksPath wins; covers all worktrees)
+gentlemerge project init --git-hooks            # HANDOFF.md + the commit gate in the hooks dir git actually uses (core.hooksPath wins; covers all worktrees)
 git worktree add ../wt-claude -b agent/claude && (cd ../wt-claude && gentlemerge project init --label claude)
 git worktree add ../wt-hermes -b agent/hermes && (cd ../wt-hermes && gentlemerge project init --label hermes)
 ```
+`init` also keeps `.gentlemerge/HANDOFF.md` out of git, in `.gitignore`: it is rewritten after every commit, because it lists the last ones, and every worktree reads the main checkout's copy. If yours is already tracked, `gentlemerge doctor` gives you the line to untrack it.
+
 Every worktree gets its own label: that is what `say --to <label>` routes by and
 what the gate judges "mine" from. Labels are ASCII (letters, digits and `#` `-` `_` `.`, 24 chars)
 — anything else is stripped, and the same stripping is applied when git hands the
@@ -156,10 +169,22 @@ Native Windows blockers: `flock`, Unix domain sockets, POSIX permissions. PRs we
 
 ## Safety
 
-Only if you opt in, GentleMerge can deliver a fixed one-line notice to another agent's session, or start a headless agent to handle a delegated request. Dispatch is off until you switch it on (`gentlemerge config set allowDispatch true`, or the toggle in the app under HEADLESS WORK); only the app ever starts an agent, never a one-shot command, and a request is started at most once. Once on it has three modes (`config set dispatchMode off|delegated|strict`): delegated, the default, lets agents trigger within tiers and a daily minute-budget; strict only runs human-created requests; off starts nothing. Every decision is gated by pure and exhaustively tested decision functions, and every decision is logged. Secrets are scrubbed before anything reaches another agent, the ledger or the bus — raw hook payloads rest briefly in the local spool (owner-only files, pruned within days). See [SECURITY.md](SECURITY.md).
+Only if you opt in, GentleMerge can deliver a fixed one-line notice to another agent's session, or start a headless agent to handle a delegated request. Dispatch is off until you switch it on (`gentlemerge config set allowDispatch true`, or the toggle in the app under HEADLESS WORK); only the app ever starts an agent, never a one-shot command, and a request is started at most once. Once on it has three modes (`config set dispatchMode off|delegated|strict`): delegated, the default, lets agents trigger within tiers and a daily minute-budget; strict only runs human-created requests; off starts nothing. Every decision is gated by pure and exhaustively tested decision functions, and every decision is logged. Secrets are scrubbed before anything reaches another agent, the ledger or the bus (broadly: any number of seven or more digits goes too, a PR number or a timestamp included — write those shorter, or as a link) — raw hook payloads rest briefly in the local spool (owner-only files, pruned within days). See [SECURITY.md](SECURITY.md).
 
 Guarantees come in three rungs, depending on the client — declared, not implied:
-- **Enforced** (git gate): `pre-commit`/`pre-merge-commit` block. No client option can skip it except the human escape hatch, and every skip is published to the bus. A hostile local process still can (`--no-verify`, editing the hook): the gate coordinates cooperative agents. A missing gate binary warns on every commit instead of passing silently.
+- **Enforced** (git gate): `pre-commit`/`pre-merge-commit` block a plain commit and a true merge. Git does not run them on every way into a branch, and no hook can stop what it does not run for, so the rest is **counted**: `post-commit`, `post-merge` and `post-rewrite` compare what came in with the live claims and post an urgent note to everyone in the project. Whatever passed the gate finds nothing there, so this stays silent unless something got round. A missing gate binary warns on every commit instead of passing silently. This coordinates cooperative agents; it is not a sandbox.
+
+  | How it gets in | What happens |
+  |---|---|
+  | `git commit`, `commit -a`, a partial commit, `merge --no-ff`, `cherry-pick --continue` | Blocked |
+  | `git commit --no-verify`, `merge --no-ff --no-verify` | Goes through. Urgent note, and a line in `stats --value` |
+  | `git cherry-pick`, `git revert` | Goes through. Urgent note |
+  | `git merge --ff-only`, a `git pull` that fast-forwards | Goes through. Urgent note |
+  | `git rebase`, `git pull --rebase` | Goes through. Urgent note when it finishes |
+  | `GENTLEMERGE_SKIP=1`, the human way out | Goes through. Published on the bus |
+  | `git am`, `commit-tree`/`update-ref`, editing or removing the hooks | Nobody hears about it |
+
+  Hooks installed before this table need `gentlemerge git-hooks install --project <repo>` once; `gentlemerge doctor` says so.
   Ownership zones are enforced from `HANDOFF.md`, with one deliberate blind spot: a commit that *rewrites the zones themselves* is not judged by them (that is the agent being its own judge), and only the pinned store rules apply in that case. Recording a task in `HANDOFF.md` — which the agent protocol tells every agent to do — does **not** switch the zones off; only changing them does.
 - **Advised** (hooks): PreToolUse warns before the edit lands. A client without hooks never hears it. (Installs made before 2026-10-26 never got this hook — `install` reported it and then dropped it; run `gentlemerge install` again and `gentlemerge status` should list `PreToolUse`.)
 - **Convention** (MCP): `claim_check` answers honestly, but nothing stops the edit. MCP clients coordinate by discipline plus the enforced gate at commit time.

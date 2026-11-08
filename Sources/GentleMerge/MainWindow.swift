@@ -20,7 +20,7 @@ struct MainWindow: View {
             sidebar
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 300)
         } detail: {
-            if let projectPath = selection ?? model.projects.first?.path {
+            if let projectPath = selection ?? model.visibleProjects.first?.path {
                 ProjectPane(
                     model: model,
                     projectPath: projectPath,
@@ -35,52 +35,68 @@ struct MainWindow: View {
         .frame(minWidth: 780, minHeight: 520)
         .onAppear {
             model.refreshBus()
-            if selection == nil { selection = model.projects.first?.path }
+            if selection == nil { selection = model.visibleProjects.first?.path }
         }
     }
 
     // MARK: - Sidebar
 
+    /// Projects, not agents: the agents of the selected one are the first thing
+    /// in the pane, and listing them here too showed the same people twice
+    /// (review 2026-11-07, D1). What the sidebar keeps from them is what cannot
+    /// wait for you to open the right project: a session waiting on you.
     private var sidebar: some View {
-        List(selection: $selection) {
+        let live = model.liveActivities
+        let waiting = live.filter { $0.state == .waiting }
+        let names = AgentActivity.distinctNames(live)
+        return List(selection: $selection) {
             // No fixed point sizes in here: a sidebar's text follows the size
             // people pick in General settings (`sidebars.md` › Desktop).
-            Section("Running now") {
-                if model.liveActivities.isEmpty {
-                    Text("No agent sessions")
-                        .foregroundStyle(.secondary)
-                }
-                ForEach(model.liveActivities) { activity in
-                    HStack(spacing: 8) {
-                        Circle()
-                            .fill(activity.state.tint)
-                            .frame(width: 8, height: 8)
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(activity.displayName)
-                            Text("\(activity.projectName) · \(activity.stateLabel)")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
+            if !waiting.isEmpty {
+                Section("Waiting on you") {
+                    ForEach(waiting) { activity in
+                        Label {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(names[activity.id] ?? activity.displayName)
+                                Text(activity.projectName)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        } icon: {
+                            Image(systemName: "exclamationmark.bubble.fill")
+                                .foregroundStyle(.orange)
                         }
+                        .accessibilityElement(children: .combine)
+                        // The project it works in, and nothing else: a row whose
+                        // session has no project has nowhere to navigate, and the
+                        // old `?? ""` tagged it as an empty project that sat in the
+                        // same selection space as the real ones — clickable, and
+                        // resolving to nothing.
+                        .tag(activity.projectPath)
                     }
-                    .accessibilityElement(children: .combine)
-                    // The project it works in, and nothing else: a row whose
-                    // session has no project has nowhere to navigate, and the
-                    // old `?? ""` tagged it as an empty project that sat in the
-                    // same selection space as the real ones — clickable, and
-                    // resolving to nothing (audit 2026-10-11).
-                    .tag(activity.projectPath)
                 }
             }
 
             Section("Projects") {
-                ForEach(model.projects) { summary in
+                ForEach(sidebarProjects) { summary in
+                    let running = live.filter { $0.projectPath == summary.path }.count
                     Label(summary.name, systemImage: "folder")
+                        .badge(running)
+                        .accessibilityValue(running == 0 ? "" : "\(running) running")
                         .tag(summary.path)
                 }
             }
         }
         .listStyle(.sidebar)
+    }
+
+    /// The listed projects, plus any other one somebody is working in right now.
+    private var sidebarProjects: [ProjectSummary] {
+        let listed = model.visibleProjects
+        let busy = Set(model.liveActivities.compactMap(\.projectPath))
+        let extra = model.projects.filter { busy.contains($0.path) && !listed.contains($0) }
+        return listed + extra
     }
 }
 
@@ -110,8 +126,7 @@ private struct ProjectPane: View {
 
     /// Whether the project has a handoff file, resolved once per refresh rather
     /// than in the body: `ProjectRegistry.exists` canonicalises a path, which
-    /// spawns git, and the body re-renders on every 3-second drain tick
-    /// (audit 2026-10-11).
+    /// spawns git, and the body re-renders on every 3-second drain tick.
     @State private var handoffExists = false
     /// Merged in at render time, by task id. Never part of the handoff file.
     @State private var claimed: [String: TaskClaim] = [:]
@@ -126,7 +141,7 @@ private struct ProjectPane: View {
     private var agents: [AgentActivity] {
         model.activities
             .filter { $0.projectPath == projectPath && $0.isLive }
-            .sorted { $0.updatedAt > $1.updatedAt }
+            .sorted(by: AgentActivity.byUrgency)
     }
 
     private var conversation: [AgentMessage] {
@@ -162,7 +177,7 @@ private struct ProjectPane: View {
         // The model writes `lastMessage` from ~30 places and nothing read it:
         // add a task, deny a request, kick off a headless run and the window
         // said nothing either way — including when the write had failed and the
-        // answer was the one thing worth seeing (audit 2026-10-08).
+        // answer was the one thing worth seeing.
         .safeAreaInset(edge: .bottom) {
             if let message = model.lastMessage, !message.isEmpty {
                 Text(message)
@@ -182,8 +197,7 @@ private struct ProjectPane: View {
                     // The newest session in this project, so the diff is since
                     // *its* baseline. Passing no session fell back to HEAD, and
                     // a Review of work already committed then said "nothing
-                    // since HEAD" — the button appeared to do nothing
-                    // (audit 2026-10-11).
+                    // since HEAD" — the button appeared to do nothing.
                     let session = model.mostRecentSession(in: projectPath)
                     model.startReview(projectPath: projectPath, sessionID: session?.id)
                     showReview = true
@@ -217,7 +231,7 @@ private struct ProjectPane: View {
         .onChange(of: projectPath) { _, _ in reload() }
         // Tasks and claims were read once, in `reload`, and never again: what
         // another agent added or ticked did not appear in the window until the
-        // pane was torn down and rebuilt (audit 2026-10-11). The drain already
+        // pane was torn down and rebuilt. The drain already
         // ticks every 3 seconds for the bus, so this piggybacks on it and reads
         // the cheap local files — `handoffWithoutCommits` skips the `git log`.
         .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
@@ -255,53 +269,55 @@ private struct ProjectPane: View {
             // memoized on the ledger's size+mtime, so this stays free while
             // the file does not move.
             let costs = Stats.summaries(paths: model.paths).bySession
-            ForEach(agents) { activity in
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    // The provider's own colour, the same one its notes use
-                    // below, so a session and what it said read as one thing.
-                    Image(systemName: activity.provider.symbolName)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(Palette.tint(for: activity.provider))
-                        .frame(width: 18)
-                        .accessibilityHidden(true)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .firstTextBaseline, spacing: 7) {
-                            Text(activity.displayName)
-                                .font(.headline)
-                            StateBadge(state: activity.state, label: activity.stateLabel)
-                            Spacer(minLength: 8)
-                            Text(RelativeTime.short(from: activity.updatedAt))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                        }
-
-                        if let task = activity.currentTask {
-                            Text("“\(task)”")
-                                .fixedSize(horizontal: false, vertical: true)
-                        } else if let event = activity.lastEvent {
-                            Text(event)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-
-                        // What this session has cost so far. Tokens are chars/4
-                        // off the ledger, always said as an estimate.
-                        if let cost = costs[activity.id], cost.turns > 0 {
-                            Text("\(cost.turns) briefings · ≈\(cost.estTokens) tokens (estimate)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+            let names = AgentActivity.distinctNames(agents)
+            // One line each (review 2026-11-07, D2): with five agents the old
+            // cards pushed the messages below the fold. What a row leaves out —
+            // the whole task, the cost — is in its tooltip.
+            VStack(spacing: 2) {
+                ForEach(agents) { activity in
+                    agentRow(activity, name: names[activity.id] ?? activity.displayName, cost: costs[activity.id])
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.fill.quaternary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .accessibilityElement(children: .combine)
             }
         }
+    }
+
+    private func agentRow(_ activity: AgentActivity, name: String, cost: Stats.Summary?) -> some View {
+        let waiting = activity.state == .waiting
+        let doing = activity.currentTask.map { "“\($0)”" } ?? activity.lastEvent ?? ""
+        let tooltip = [doing, cost.flatMap { $0.turns > 0 ? $0.costLine : nil }]
+            .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n")
+        return HStack(alignment: .firstTextBaseline, spacing: 9) {
+            // The provider's own colour, the same one its notes use below, so a
+            // session and what it said read as one thing.
+            Image(systemName: activity.provider.symbolName)
+                .fontWeight(.semibold)
+                .foregroundStyle(Palette.tint(for: activity.provider))
+                .frame(width: 18)
+                .accessibilityHidden(true)
+            Text(name)
+                .fontWeight(.semibold)
+                .lineLimit(1)
+                .layoutPriority(1)
+            StateBadge(state: activity.state, label: activity.stateLabel)
+            Text(doing)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 8)
+            Text(RelativeTime.short(from: activity.updatedAt))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Orange is what "waiting on you" means everywhere in the app, and a
+        // waiting row is the one place the colour fills more than a badge (D4).
+        .background(waiting ? AnyShapeStyle(Color.orange.opacity(0.13)) : AnyShapeStyle(.fill.quaternary),
+                    in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .help(tooltip)
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: Messages
@@ -406,8 +422,7 @@ private struct ProjectPane: View {
                         // literal "you": a human is not the assignee, and
                         // `transition` only lets the two parties to the
                         // contract move it — this button was doomed to fail
-                        // with "you is not allowed to do that"
-                        // (audit 2026-10-08).
+                        // with "you is not allowed to do that".
                         Button("Reject") { model.deny(request.id); reload() }
                     }
                 }
@@ -424,7 +439,7 @@ private struct ProjectPane: View {
     /// `actor == from`, and the button is only shown when `from == "you"`).
     /// Reject used to come through here with a literal `by: "you"` and could
     /// never succeed — it now goes through `model.deny`, which acts as the
-    /// assignee on purpose (audit 2026-10-08).
+    /// assignee on purpose.
     private func updateRequest(_ request: AgentRequest, action: String) {
         do {
             _ = try RequestActions.perform(action: action, id: request.id, by: "you", result: nil, paths: model.paths)

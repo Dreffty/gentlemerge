@@ -154,13 +154,13 @@ final class OneAgentOneRowTests: XCTestCase {
                         now: now.addingTimeInterval(-5))
         Presence.record(label: "codex", project: "/p", branch: "agent/codex", paths: paths, environment: [:], now: now)
         XCTAssertEqual(labels(), ["codex"])
-        XCTAssertEqual(bus.activities().first?.currentTask, "on agent/codex", "the newest one speaks")
+        XCTAssertEqual(bus.activities().first?.branch, "agent/codex", "the newest one speaks")
     }
 
     func testTheMarkSpeaksAgainWhenTheSessionIsOver() {
         bus.save([session("cx-1", .codex, state: .ended)])
         Presence.record(label: "codex", project: "/p", branch: "main", paths: paths, environment: [:])
         XCTAssertEqual(labels(), ["codex"])
-        XCTAssertEqual(bus.activities().first { $0.isLive }?.currentTask, "on main")
+        XCTAssertEqual(bus.activities().first { $0.isLive }?.branch, "main")
     }
 }

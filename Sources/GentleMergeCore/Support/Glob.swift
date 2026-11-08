@@ -8,8 +8,8 @@ public enum Glob {
         // An absolute pattern has no business matching a repo-relative path — and
         // matched nothing at all, so a claim written that way (which is what an
         // agent gets from the path extractor, since it returns absolute paths)
-        // silently protected nothing and could not conflict-detect either
-        // (audit Tier 5 #34). Nothing here knows the repository root, so each
+        // silently protected nothing and could not conflict-detect either.
+        // Nothing here knows the repository root, so each
         // trailing window of the pattern's components is tried in turn: for
         // `/Users/dev/app/lib/store/**` the window `lib/store/**` is the claim the
         // author meant. Each window is still anchored, so this cannot match a
@@ -111,10 +111,10 @@ public enum Glob {
     /// used to keep its middle dot, so it named a directory no repository has
     /// and matched nothing: the claim was accepted, reported as claimed, and
     /// protected nothing — the worst kind of failure, because it looks like
-    /// protection (audit 2026-10-08). `.` means "this directory" wherever it
+    /// protection. `.` means "this directory" wherever it
     /// appears, and a doubled `/` is a `.` you did not have to type.
     ///
-    /// Two more spellings of the same file are folded here (audit 2026-11-01).
+    /// Two more spellings of the same file are folded here.
     /// A name is compared in its precomposed form, because macOS hands out
     /// `é` as one character or as `e` plus an accent depending on who made the
     /// file, and a wildcard claim (`café/*.txt`, matched by a regex that sees
@@ -122,7 +122,7 @@ public enum Glob {
     /// is `b`: a claim written with a `..` in the middle named a path nobody
     /// edits and protected nothing.
     ///
-    /// On macOS case is folded too (audit 2026-11-03). A Mac's disk does not
+    /// On macOS case is folded too. A Mac's disk does not
     /// tell `README.md` from `readme.md` — they are one file — so a claim on
     /// `Sources/Bus/**` that met an edit of `sources/bus/x.swift` protected
     /// nothing. Folding everywhere on a Mac costs a false overlap on the rare

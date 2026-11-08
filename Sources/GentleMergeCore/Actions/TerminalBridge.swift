@@ -122,7 +122,7 @@ public struct TerminalBridge: Sendable {
     /// `TerminalBridge` already turns `-1743` into "macOS blocked automation",
     /// so the failure mode is known to be reachable — a hang is the same
     /// condition with worse manners. I could not construct the hang, so this is
-    /// bounded by judgement rather than measurement (audit Tier 3 #14).
+    /// bounded by judgement rather than measurement.
     static let scriptTimeout: TimeInterval = 10
 
     private func run(_ script: String) -> ScriptResult {
@@ -191,7 +191,7 @@ enum ScriptableTerminal: Sendable {
     /// arrives from the hook payload and travels through `activities.json` and
     /// `state.json`, so a value like `evil" to quit` produced
     /// `tell application "evil" to quit to activate` and `osascript` ran it with
-    /// the app's Automation grant (audit Tier 3 #13).
+    /// the app's Automation grant.
     ///
     /// Mitigating factor: the home is `0700`, so this needed same-user access;
     /// it is medium for that reason rather than high. Kept anyway, because a

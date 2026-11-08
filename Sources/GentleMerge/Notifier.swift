@@ -95,7 +95,7 @@ final class Notifier: NSObject {
     /// `isPending`, and any later event for the same session supersedes an
     /// earlier row, so "Got it" on a notice whose session had moved on did
     /// nothing at all — and the notice sat in Notification Center forever, since
-    /// nothing else ever called `withdraw` (audit 2026-10-11).
+    /// nothing else ever called `withdraw`.
     private func handle(actionID: String, itemID: String) {
         if let model, let item = model.items.first(where: { $0.id == itemID }) {
             switch actionID {

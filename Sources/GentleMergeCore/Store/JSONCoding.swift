@@ -72,7 +72,7 @@ public enum LockedFile {
     /// for as long as macOS keeps a file-access prompt on screen — a freshly
     /// signed app reading a handoff in ~/Downloads does exactly that. Waiting
     /// without a limit hung `who`, `brief`, the MCP server and the git
-    /// pre-commit gate behind a dialog nobody had seen (audit 2026-11-01).
+    /// pre-commit gate behind a dialog nobody had seen.
     public static func withExclusiveLock<T>(_ url: URL, waitingAtMost patience: TimeInterval,
                                             _ body: () throws -> T) throws -> T? {
         let directory = url.deletingLastPathComponent()

@@ -22,7 +22,7 @@ public enum WorktreeEnv {
     /// labels collides with probability 1/50, and realistic ones land on each
     /// other — `gemini` and `gpt` both hashed to 3800, `opencode` and `qwen` to
     /// 6800, so two agents ran one dev-server port range exactly as the README
-    /// promises they would not (audit 2026-10-08). 256 buckets makes that
+    /// promises they would not. 256 buckets makes that
     /// ~1/256, and `usableBuckets` keeps the arithmetic inside the port range
     /// whatever `basePort` is, degrading toward the old density rather than
     /// emitting an invalid port.
@@ -80,8 +80,7 @@ public enum WorktreeEnv {
     /// from `WorktreeLabel.read` — which only trims whitespace — or from
     /// `GENTLEMERGE_NAME` raw; `Identity.safe` is applied to env and presence
     /// labels but never to the worktree label. A label of `$(id)` therefore
-    /// wrote `export GENTLEMERGE_LABEL=$(id)` and ran `id` on the next `source`
-    /// (audit 2026-10-07).
+    /// wrote `export GENTLEMERGE_LABEL=$(id)` and ran `id` on the next `source`.
     static func shellQuoted(_ value: String) -> String { Shell.quoted(value) }
 
     public static func render(_ allocation: Allocation) -> String {
@@ -100,14 +99,18 @@ public enum WorktreeEnv {
     /// range — the collision this exists to avoid. Idempotent.
     public static func ensureGitignore(projectPath: String) {
         let url = URL(fileURLWithPath: projectPath).appendingPathComponent(".gitignore")
-        let line = ".gentlemerge/env.sh"
+        // The handoff too: it is rewritten after every commit, because it lists the
+        // last ones, so in git it would come up modified for ever. Agents reach it
+        // through the main checkout, so no worktree needs it committed.
+        let lines = [".gentlemerge/env.sh", ".gentlemerge/HANDOFF.md"]
         let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        let present = existing
+        let present = Set(existing
             .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .contains(line)
-        guard !present else { return }
+            .map { $0.trimmingCharacters(in: .whitespaces) })
+        let missing = lines.filter { !present.contains($0) }
+        guard !missing.isEmpty else { return }
         let separator = existing.isEmpty ? "" : (existing.hasSuffix("\n") ? "" : "\n")
-        try? AtomicFile.write(Data((existing + separator + line + "\n").utf8), to: url)
+        let added = missing.joined(separator: "\n") + "\n"
+        try? AtomicFile.write(Data((existing + separator + added).utf8), to: url)
     }
 }

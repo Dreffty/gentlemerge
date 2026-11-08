@@ -45,6 +45,9 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
     /// every one of them as "Agent · <project>", so nobody reading it knew whom to
     /// address. nil for an activity recorded before labels were kept.
     public var label: String?
+    /// The branch it is on, when its presence mark said. Kept apart from
+    /// `currentTask`, whose quotation marks mean "what you asked it for".
+    public var branch: String?
 
     /// `lastEvent` for a session the sweep buried. One word, because it is also
     /// what the presentation matches on.
@@ -63,7 +66,8 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         tty: String? = nil,
         terminalProgram: String? = nil,
         socketPath: String? = nil,
-        label: String? = nil
+        label: String? = nil,
+        branch: String? = nil
     ) {
         self.id = id
         self.provider = provider
@@ -78,6 +82,7 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         self.terminalProgram = terminalProgram
         self.socketPath = socketPath
         self.label = label
+        self.branch = branch
     }
 
     /// How to name this agent to a person or to another agent: its label when that
@@ -114,6 +119,47 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
         return copy
     }
 
+    /// How much this needs you: a question waiting first, then a turn that ended
+    /// with the next move yours, then the ones at work.
+    public var urgency: Int {
+        switch state {
+        case .waiting: return 0
+        case .idle: return 1
+        case .working: return 2
+        case .ended: return 3
+        }
+    }
+
+    /// The order a person should read them in: what waits on you first, however
+    /// long it has waited, and the newest first within each state.
+    public static func byUrgency(_ lhs: AgentActivity, _ rhs: AgentActivity) -> Bool {
+        lhs.urgency != rhs.urgency ? lhs.urgency < rhs.urgency : lhs.updatedAt > rhs.updatedAt
+    }
+
+    /// A name for each, by id, that tells apart sessions which would all read
+    /// "Claude Code": the branch when they are on different ones, and otherwise a
+    /// number in the order they started, which is the order you opened them in.
+    public static func distinctNames(_ activities: [AgentActivity]) -> [String: String] {
+        let shared = Dictionary(grouping: activities, by: \.displayName).filter { $0.value.count > 1 }
+        var names: [String: String] = [:]
+        for activity in activities {
+            guard let twins = shared[activity.displayName] else {
+                names[activity.id] = activity.displayName
+                continue
+            }
+            let sameBranch = twins.filter { $0.branch == activity.branch }
+            if let branch = activity.branch, !branch.isEmpty, sameBranch.count == 1 {
+                names[activity.id] = "\(activity.displayName) · on \(branch)"
+                continue
+            }
+            let order = sameBranch.sorted { ($0.startedAt, $0.id) < ($1.startedAt, $1.id) }
+            let number = (order.firstIndex { $0.id == activity.id } ?? 0) + 1
+            let branch = activity.branch.map { " · on \($0)" } ?? ""
+            names[activity.id] = "\(activity.displayName)\(branch) · \(number)"
+        }
+        return names
+    }
+
     public var stateLabel: String {
         switch state {
         case .working: return "working"
@@ -130,12 +176,13 @@ public struct AgentActivity: Codable, Sendable, Identifiable, Equatable {
     /// silence. Identity, state and the thing it is doing are what "news"
     /// actually means here.
     public var fingerprintLine: String {
-        "\(id)|\(state.rawValue)|\(currentTask ?? lastEvent ?? "")"
+        "\(id)|\(state.rawValue)|\(currentTask ?? lastEvent ?? "")" + (branch.map { "|on \($0)" } ?? "")
     }
 
     /// One line for another agent to read.
     public func briefingLine(now: Date = Date()) -> String {
         var line = "- \(displayName) · \(projectName)"
+        if let branch, !branch.isEmpty { line += " on \(branch)" }
         if let currentTask, !currentTask.isEmpty {
             line += " — “\(BriefingRenderer.quote(currentTask))”"
         } else if let lastEvent, !lastEvent.isEmpty, !diedUncleanly {
@@ -485,7 +532,7 @@ public struct AgentBus: Sendable {
     /// to the presence mark's `presence:<label>@<project>#<branch>`, so every
     /// agent was told about itself under "Other agents you have running right
     /// now": one phantom peer, a wrong headcount, and tokens spent on it every
-    /// turn (audit 2026-10-08). `who` passes no label and is unaffected — it is
+    /// turn. `who` passes no label and is unaffected — it is
     /// you asking, and it should list everything.
     ///
     /// The label alone was not enough (2026-10-21): two sessions in one project
@@ -1120,8 +1167,7 @@ public struct AgentBus: Sendable {
         // to say something. Claims used to be missing from this guard, which is
         // the earliest place the briefing can return nil — so a reader whose
         // backlog had drained and whose peers had gone quiet never heard about a
-        // path another agent had claimed, which is the one thing worth hearing
-        // (audit 2026-10-07).
+        // path another agent had claimed, which is the one thing worth hearing.
         // What this reader touches — claims plus request scope. Empty means no
         // signal, and a reader with no footprint gets everything, exactly as
         // before. Delta only: a session start needs the whole map.
@@ -1131,8 +1177,8 @@ public struct AgentBus: Sendable {
         // it. It compared only `pending` messages and the peer fingerprint, so
         // once the message backlog drained it returned nil — with the claim
         // still un-announced because the budget had cut it. Nothing would ever
-        // change again, so the collision warning never arrived at all
-        // (audit 2026-10-07). Putting claims in the fingerprint instead of the
+        // change again, so the collision warning never arrived at all.
+        // Putting claims in the fingerprint instead of the
         // gate does not help: the fingerprint is recorded each turn, so an
         // unannounced claim matches itself.
         let readerScope: [String] = {
@@ -1287,8 +1333,8 @@ public struct AgentBus: Sendable {
         // old bug this fixes: `keeping` counts physical lines, not array
         // elements — a multi-line body is one element but many rendered lines,
         // and undercounting it let the cap cut a long urgent after its first
-        // lines while the handle in that first line still marked it delivered
-        // (audit 2026-10-06, finding 1). And message blocks lead un-cut while
+        // lines while the handle in that first line still marked it delivered.
+        // And message blocks lead un-cut while
         // they fit, with the first non-fitting one still kept complete — the
         // same rule that lets budgetPriority always take the first urgent —
         // because a cut block could never deliver and would re-appear
@@ -1362,8 +1408,8 @@ public struct AgentBus: Sendable {
                 // Not marked seen here. This runs before the cap, so marking at
                 // this point records claims the budget then throws away — and a
                 // claim is never re-shown once seen, so it was lost outright,
-                // including via `brief --as` and via a later full briefing
-                // (audit 2026-10-07). Marked below, once we know the line
+                // including via `brief --as` and via a later full briefing.
+                // Marked below, once we know the line
                 // survived, exactly like a message block.
             }
             // Ownership zones are worth their tokens once per session — full
@@ -1413,8 +1459,7 @@ public struct AgentBus: Sendable {
         // Claims get the same treatment as messages and request updates: the
         // cursor advances only for a line that is actually in the output. A
         // claim cut by the budget stays unseen, so it is announced next turn
-        // instead of being recorded as delivered and never surfacing again
-        // (audit 2026-10-07).
+        // instead of being recorded as delivered and never surfacing again.
         for (id, line) in claimLines where deliveredLines.contains(line) {
             cursor.seenClaimIDs.insert(id)
         }
@@ -1423,7 +1468,7 @@ public struct AgentBus: Sendable {
         // block. The handle is not enough: it sits at the front of the block,
         // so a cap that cut everything after the first line still matched it
         // and marked a truncated message delivered — its tail then never came
-        // back (audit 2026-10-06, finding 1). The output is the rendered text
+        // back. The output is the rendered text
         // cut at a line boundary, so a block survived exactly when its last
         // physical line did.
         //
@@ -1432,7 +1477,7 @@ public struct AgentBus: Sendable {
         // a message whose text ends in a newline — `quote` preserves it, leaving
         // "" as the block's final line — matched unconditionally and was
         // recorded delivered although the cap had cut its body. It then never
-        // reappeared (audit 2026-10-07).
+        // reappeared.
         var actuallyDelivered: [AgentMessage] = []
         for message in candidates {
             if coalescedIDs.contains(message.id) {
@@ -1782,8 +1827,8 @@ public struct AgentBus: Sendable {
 /// with a blank separator, so the test passes for every briefing ever
 /// rendered. A message whose text ends in a newline leaves exactly such a
 /// trailing blank — `BriefingRenderer.quote` preserves it — and was recorded
-/// delivered although the cap had cut its body, so it never came back
-/// (audit 2026-10-07). Judging the last line with ink on it restores the check.
+/// delivered although the cap had cut its body, so it never came back.
+/// Judging the last line with ink on it restores the check.
 static func lastMeaningfulLine(_ block: [String]) -> String? {
     for element in block.reversed() {
         for line in element.split(separator: "\n", omittingEmptySubsequences: false).reversed()

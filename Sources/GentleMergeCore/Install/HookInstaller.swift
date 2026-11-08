@@ -139,7 +139,7 @@ public struct HookInstaller: Sendable {
 
         // Installing again over the same install changes nothing, so it writes
         // nothing: it used to rewrite the file and leave one more backup each
-        // time (audit 2026-11-03).
+        // time.
         if areEqual(settings, original) {
             return Result(changed: false, backup: nil, notes: notes + ["already installed — settings.json left as it was"])
         }
@@ -341,7 +341,7 @@ public struct HookInstaller: Sendable {
             // top-level `notify` may be replaced. The insert path below already
             // knew this; the replace path did not, so a config whose only
             // `notify` lived under some `[table]` had that line overwritten and
-            // its top-level key silently never written (audit Tier 3 #13).
+            // its top-level key silently never written.
             if trimmed.hasPrefix("[") { break }
             guard trimmed.hasPrefix("notify") else { continue }
             guard let equals = trimmed.firstIndex(of: "="),
@@ -379,7 +379,7 @@ static func tomlBasicString(_ value: String) -> String {
 ///
 /// The old version only handled spaces, so a home containing `"`, `` ` ``, `$`
 /// or `\` was interpolated raw into the hook `command` string in
-/// `~/.claude/settings.json` and the Codex notify script (audit Tier 3 #13).
+/// `~/.claude/settings.json` and the Codex notify script.
 /// Single quotes are literal in sh; the only escape inside them is `'\''`.
 static func shellQuoted(_ path: String) -> String {
     "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
@@ -551,7 +551,7 @@ func parseTOMLStringArray(_ text: String) -> [String] {
     ///
     /// This value lands in a shell command string in `~/.claude/settings.json`,
     /// so a path containing `"`, `` ` ``, `$` or `\` has to be escaped too —
-    /// the space-only version emitted all of those raw (audit Tier 3 #13).
+    /// the space-only version emitted all of those raw.
     private func quoted(_ path: String) -> String {
         HookInstaller.shellQuoted(path)
     }

@@ -108,7 +108,7 @@ public struct SpoolStore: Sendable {
     /// The app recorded in `app.pid`, if that process is alive and is a
     /// gentlemerge. After a crash and a reboot the number can belong to any
     /// program, and then the app is "not running" — not "running", and not a
-    /// reason to refuse to start one (audit 2026-11-01). `pid > 0` before
+    /// reason to refuse to start one. `pid > 0` before
     /// `kill`: `kill(-1, 0)` succeeds for "any process", `0` is our own group.
     public func runningAppPID() -> Int32? {
         guard let raw = try? String(contentsOf: paths.appPID, encoding: .utf8)

@@ -96,9 +96,9 @@ public struct Ownership: Sendable, Equatable {
     /// agent stage an invasion of somebody's zone *and* the deletion of that
     /// zone's declaration in a single commit: the gate saw no zone, the commit
     /// landed, and the declaration was then gone from history for everybody —
-    /// the next agent found the zone free (audit 2026-10-07).
+    /// the next agent found the zone free.
     ///
-    /// Narrowed to the threat it names (audit 2026-10-08): what must not rule
+    /// Narrowed to the threat it names: what must not rule
     /// is a zone the commit is *rewriting*, not any commit that happens to
     /// touch the file. Disarming on the file's presence switched the whole
     /// ownership layer off for the ordinary case — the task list lives in the
@@ -197,7 +197,7 @@ public struct Ownership: Sendable, Equatable {
     /// the prefix threw away everything after the first wildcard, so a pattern
     /// naming an exact file could lose to one naming a directory, and two
     /// different patterns could tie and be separated only by their order in the
-    /// file (audit Tier 4 #20). Ties keep the earliest declaration, as before.
+    /// file. Ties keep the earliest declaration, as before.
     public func owner(of path: String) -> String? {
         rules.filter { Glob.matches($0.pattern, path) }
             .max {

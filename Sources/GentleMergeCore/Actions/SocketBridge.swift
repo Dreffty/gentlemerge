@@ -51,7 +51,7 @@ public struct SocketBridge: Sendable {
         // reported a partial write as success. A peer that closed between
         // `connect` and `write` raises SIGPIPE, whose default disposition on
         // Darwin is to terminate the process — and this is called from the
-        // MainActor, inside the menu-bar app (audit Tier 5 #28).
+        // MainActor, inside the menu-bar app.
         //
         // Unreachable today: `wireLine` always throws `.unknownWireFormat`, so
         // `NudgeGate` falls back to the tty. It is fixed because this is the

@@ -5,8 +5,9 @@ share one repository: a local bus (hooks or MCP in, briefings out), a git
 pre-commit gate that costs no tokens, and a filesystem protocol any language
 can speak. 100% local — Swift 6, Swift Package Manager, no dependencies.
 
-One binary, two modes: `gentlemerge <command>` is the CLI, bare
-`gentlemerge` is the macOS menu-bar app. All logic lives in `GentleMergeCore`,
+One binary, two modes: `gentlemerge <command>` is the CLI, and the same
+binary inside `GentleMerge.app` (or `gentlemerge app`) is the macOS menu-bar
+app; bare `gentlemerge` in a terminal prints the help. All logic lives in `GentleMergeCore`,
 which imports no UI frameworks, so the same code runs the app, the Linux CLI,
 and the test suite.
 
@@ -15,10 +16,12 @@ and the test suite.
 ```
 Sources/
   GentleMerge/            # thin layer: CLI + macOS UI, all logic in Core
-    main.swift           # argv>1 → CLI, else the SwiftUI app
-    CLI.swift            # every subcommand (say, brief, task, claim, delegate,
-                         #   request, watch, precommit, land, radar, review,
-                         #   stats, env, snapshot, sim, demo, mcp, install…)
+    main.swift           # a command → CLI; inside the .app with none → the SwiftUI app
+    CLI.swift            # the dispatch: which command runs, and the door that
+                         #   refuses an option nobody declared
+    CLI+<Family>.swift   # one file per family of commands: Bus (say, who,
+                         #   brief, show), Tasks, Gate (precommit, land, radar),
+                         #   Hooks, Claims, Requests, Watch, Projects, Install…
     MainWindow.swift     # sessions, messages, requests, tasks, commits
     MenuBarSummary.swift # popover counts
     Notifier.swift       # UserNotifications for questions/failures
@@ -52,7 +55,7 @@ Sources/
     Install/
       HookInstaller.swift # Claude/Codex hooks: idempotent, backed up, reversible
       HookScript.swift   # embedded gentlemerge-hook.sh source
-      GitHookInstaller.swift # pre-commit gate in the repo common dir
+      GitHookInstaller.swift # commit gate and post-* counters in the repo common dir
     Model/
       InboxItem.swift / JSONValue.swift / SpoolEnvelope.swift / PathScope.swift
     Projects/
@@ -97,7 +100,9 @@ docs/  # AGENT_PROTOCOL.md (the ~200-token agent contract),
    reads directly for hook-less agents). Everything lands as JSON under
    `~/.gentlemerge` and tasks in `<repo>/.gentlemerge/HANDOFF.md`.
 3. **Enforce.** The pre-commit hook rejects commits that invade another
-   agent's live claim, ownership zone, or pending request contract.
+   agent's live claim, ownership zone, or pending request contract. What git
+   does not run it for (`--no-verify`, `cherry-pick`, `merge --ff-only`,
+   `rebase`) the post-* hooks count afterwards and publish as an urgent note.
 4. **Brief.** Each turn injects only what changed since the last one —
    silent when there is nothing new. Every injection is counted in the
    ledger as `briefing.injected`, which is what `stats` adds up.

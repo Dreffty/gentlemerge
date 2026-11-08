@@ -220,8 +220,7 @@ public enum Landing {
     /// `-z`, because the plain form C-quotes any non-ASCII path
     /// (`"sp\303\244 ce.txt"`): authorsOf then ran `git log -- "<quoted>"
     /// "` (no match, "unknown authors"), and releaseCovering's glob never
-    /// matched — so the landing agent's own claim stayed alive until TTL
-    /// (audit Tier 2 #7).
+    /// matched — so the landing agent's own claim stayed alive until TTL.
     public static func filesChanged(from old: String, to new: String, repo: String) -> [String] {
         let output = git(["diff", "--name-only", "-z", old, new], in: repo)
         guard output.succeeded else { return [] }

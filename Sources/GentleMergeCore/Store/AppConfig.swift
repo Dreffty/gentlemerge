@@ -183,7 +183,7 @@ public struct AppConfig: Codable, Sendable, Equatable {
     /// A silent failure here is worse than a crash: `gentlemerge config set
     /// claimsPolicy deny` printed `deny` and exited 0 on a read-only or full
     /// home, having persisted nothing — so the user believed a setting had
-    /// changed when it had not (audit Tier 5 #31). Callers that genuinely want
+    /// changed when it had not. Callers that genuinely want
     /// the old behaviour can drop the result; the CLI must not.
     ///
     /// A file that is there but unreadable is copied aside first

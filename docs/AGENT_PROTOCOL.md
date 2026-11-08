@@ -12,7 +12,10 @@ worktree and branch.
 - Respect `## Ownership` in `.gentlemerge/HANDOFF.md`. Claim explicitly if you
   must cross a zone.
 - Commits are checked by a pre-commit hook. If it blocks you, read the one-line
-  reason and coordinate; never bypass it.
+  reason and coordinate; never bypass it. `--no-verify`, `cherry-pick`, a
+  fast-forward or a rebase get past it, and everyone in the project is told so.
+- An option a command does not know stops it: exit 2, nothing done. For text that
+  starts with a dash, put `--` first: `gentlemerge say -- "--no-verify hides this"`.
 - If a task is better done by another agent (e.g. image generation, bulk
   refactor), use `gentlemerge delegate --to capability:<name> ...` and
   **continue your own work**. The result arrives in a later briefing.

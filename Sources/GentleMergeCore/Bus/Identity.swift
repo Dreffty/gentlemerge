@@ -31,8 +31,8 @@ public struct Identity: Sendable, Equatable {
         // becoming the agent already working — it claimed paths as `alice`,
         // renewed `alice`'s claim instead of conflicting with it, overwrote
         // `alice`'s presence mark with its own heartbeat (so `who` stopped
-        // listing the real one), and could never be addressed separately
-        // (audit 2026-10-08). With nothing to identify us we answer "you",
+        // listing the real one), and could never be addressed separately.
+        // With nothing to identify us we answer "you",
         // which is not anybody's name and so cannot be mistaken for theirs.
         if provider != .unknown { return Identity(label: AgentBus.label(for: provider), source: .provider) }
         return Identity(label: "you", source: .human)
@@ -48,7 +48,7 @@ public struct Identity: Sendable, Equatable {
     /// NUMERAL FIFTY) and produced a label that renders identically to `claude`
     /// but fails every `to == "claude"` route and every claim comparison. A
     /// homoglyph is an impersonation that survives the filter this function's
-    /// own docstring claims to implement (audit Tier 5 #22).
+    /// own docstring claims to implement.
     public static func safe(_ value: String) -> String {
         let isAllowed: (UInt8) -> Bool = { byte in
             (byte >= 48 && byte <= 57)    // 0-9

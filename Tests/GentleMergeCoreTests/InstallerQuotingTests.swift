@@ -151,7 +151,9 @@ final class InstallerQuotingTests: XCTestCase {
         func writeHooks(gate: String) throws {
             let scripts: [(String, String)] = GitHookInstaller.hookNames
                 .map { ($0, GitHookInstaller.script(gateDefault: gate)) }
-                + [("post-commit", GitHookInstaller.postCommitScript(gateDefault: gate))]
+                + [("post-commit", GitHookInstaller.postCommitScript(gateDefault: gate)),
+                   ("post-merge", GitHookInstaller.postMergeScript(gateDefault: gate)),
+                   ("post-rewrite", GitHookInstaller.postRewriteScript(gateDefault: gate))]
             for (name, body) in scripts {
                 let path = hooksDir.appendingPathComponent(name)
                 try body.write(to: path, atomically: true, encoding: .utf8)

@@ -172,7 +172,7 @@ public enum Shell {
     /// scheme name read out of the repository was interpolated bare into
     /// `xcodebuild -scheme '<name>'`, so a scheme file called
     /// `ok'; touch PWNED; echo '` ran `touch PWNED` the next time anybody ran
-    /// `gentlemerge review` or `gentlemerge land` (audit 2026-10-08).
+    /// `gentlemerge review` or `gentlemerge land`.
     public static func quoted(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }

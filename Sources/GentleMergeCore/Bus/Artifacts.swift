@@ -159,7 +159,7 @@ public struct ArtifactStore: Sendable {
         #else
         // swift-corelibs Foundation does not expose NSString's abbreviation API.
         let path = url(for: attachment).path
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let home = Paths.userHome().path
         if path == home { return "~" }
         return path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
         #endif

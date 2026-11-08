@@ -1,7 +1,7 @@
 import XCTest
 @testable import GentleMergeCore
 
-/// A batch of small correctness fixes from docs/AUDIT_HANDOFF.md Tier 4 and 5.
+/// A batch of small correctness fixes found by the October audits.
 /// Each one is a function that answers the wrong question, or a tie broken by
 /// nothing at all.
 final class SpecificityAndParsingTests: XCTestCase {

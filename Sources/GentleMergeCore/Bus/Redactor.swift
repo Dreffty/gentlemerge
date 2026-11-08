@@ -78,7 +78,7 @@ public enum Redactor {
         // line layout is taken as one match. The second shape is a key that
         // arrives without its `-----END-----`: requiring both delimiters meant
         // a truncated paste — the head of a file, a body cut by a length limit
-        // — left the key material standing in full (audit 2026-10-24). One
+        // — left the key material standing in full. One
         // base64 run of 20+ characters is required, so naming the header in
         // prose ("I found a -----BEGIN RSA PRIVATE KEY----- in config") is not
         // a key and is not redacted: there is nothing there to leak.
@@ -93,7 +93,7 @@ public enum Redactor {
         // Google's OAuth trio: the refresh token (`1//`) was caught, but not the
         // client secret (`GOCSPX-`) or the access token (`ya29.`) that come
         // with it in every token file — only the JSON form was, because the
-        // `client_secret` name gives it away (audit 2026-10-26).
+        // `client_secret` name gives it away.
         (.apiKey, #"\b(?:sk-ant-[A-Za-z0-9_-]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{20,}|nvapi-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{20,}|npm_[A-Za-z0-9]{20,}|1//[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{16,}|whsec_[A-Za-z0-9]{20,}|SG\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}|sbp_[A-Za-z0-9]{30,}|nfp_[A-Za-z0-9]{16,}|shp(?:at|ca|pa|ss)_[A-Fa-f0-9]{32}|gsk_[A-Za-z0-9]{20,}|figd_[A-Za-z0-9_-]{20,}|dop_v1_[a-f0-9]{40,}|lin_api_[A-Za-z0-9]{20,})"#),
         // A Telegram bot token is `<bot id>:<secret>`. The id is eight to ten
         // digits, so the long-number rule took the id and left the half that is
@@ -120,7 +120,7 @@ public enum Redactor {
         // - **It has a digit and a capital**, which a random key nearly always
         //   does and a stretch of English or of a directory name rarely does.
         (.apiKey, #"(?<![A-Za-z0-9+/._~-])(?!/)(?=[A-Za-z0-9+/]{0,39}[+/])(?=[A-Za-z0-9+/]{0,39}[0-9])(?=[A-Za-z0-9+/]{0,39}[A-Z])[A-Za-z0-9+/]{40}(?![A-Za-z0-9+/_~-])(?!\.[A-Za-z0-9])"#),
-        // Every run in these two is bounded (audit 2026-11-01). Unbounded, each
+        // Every run in these two is bounded. Unbounded, each
         // word boundary in `a-a-a-…` or `a.a.a.…` started a scan to the end of
         // the text before failing, so the cost grew with the square of the
         // length: 40 KB took a second or two, and a 2 MB attachment never
@@ -136,6 +136,11 @@ public enum Redactor {
         // prefix plus the check digits behind.
         (.iban, #"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){3,7}\b"#),
         (.card, #"\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{2,4}\b|\b\d{4}[ -]\d{6}[ -]\d{4,5}\b"#),
+        // A phone number the way people write one: a `+`, the country, then
+        // groups. The rule below only sees an unbroken run of seven digits, so
+        // `+34 612 345 678` went through whole. Three groups at least, which keeps
+        // "+1 on this" and "+12 today" what they are.
+        (.longNumber, #"(?<![\w+])\+\d{1,3}(?:[ .-]\d{2,4}){2,5}(?![\w])"#),
         // Short numbers are line numbers, ports and versions. Long runs are
         // phone numbers, document ids and account numbers.
         (.longNumber, #"\b\d{7,}\b"#),
@@ -151,8 +156,7 @@ public enum Redactor {
     /// - **An auth scheme is not the value.** `Authorization: Bearer <token>`
     ///   put `[redacted]` over the word `Bearer` and left the token sitting
     ///   next to it, which is worse than not filtering at all: the line reads
-    ///   as handled. The scheme word is consumed along with the value
-    ///   (audit 2026-10-24).
+    ///   as handled. The scheme word is consumed along with the value.
     /// - **The name is whole segments, not any letters at all.** `[A-Za-z_]*`
     ///   in front of the keyword let `pass` inside `bypass` be the name, so
     ///   `bypass = true` and `compass: norte` were eaten and reported as a
@@ -182,7 +186,7 @@ public enum Redactor {
     /// - **Its own output is not a value.** A note is scrubbed when it is written
     ///   and again when it is read, and `key: [redacted]` read back as a key with
     ///   the value `[redacted`: every pass replaced that and left the `]`, so a
-    ///   note grew `]]` (audit 2026-11-06).
+    ///   note grew `]]`.
     private static let assignment =
         #"(?i)\b((?:[A-Za-z0-9]{1,40}[_-]){0,6}(?:pass(?:word|wd)?|passphrase|contraseña|clave|secret|token|auth|authorization|bearer|api[_-]?key|apikey|access[_-]?key|private[_-]?key|pgpassword|(?<=[_-])pwd)(?:[_-](?:key|base|value|string|phrase)){0,3})(?![A-Za-z0-9])["']?\s*[:=]\s*(?:(?:bearer|basic|token|digest|jwt)\s+)?(?!\[redacted)(?:"[^"\n]{1,4000}"|'[^'\n]{1,4000}'|[^\s,;)\]}]{3,})"#
 

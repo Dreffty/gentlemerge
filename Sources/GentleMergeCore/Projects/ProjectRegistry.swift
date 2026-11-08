@@ -6,12 +6,36 @@ public struct ProjectSummary: Codable, Sendable, Identifiable, Equatable {
     public var name: String
     public var lastSeenAt: Date
     public var lastProvider: AgentProvider?
+    /// Whether the folder holds something of its own: a repository, or a handoff
+    /// somebody started. nil on an entry written before this was kept.
+    public var isEstablished: Bool?
 
-    public init(path: String, name: String, lastSeenAt: Date, lastProvider: AgentProvider? = nil) {
+    public init(
+        path: String,
+        name: String,
+        lastSeenAt: Date,
+        lastProvider: AgentProvider? = nil,
+        isEstablished: Bool? = nil
+    ) {
         self.path = path
         self.name = name
         self.lastSeenAt = lastSeenAt
         self.lastProvider = lastProvider
+        self.isEstablished = isEstablished
+    }
+
+    /// How long a plain folder keeps its row after the last session in it.
+    public static let recentWindow: TimeInterval = 7 * 24 * 3600
+
+    /// Whether this deserves a row by default. Every session leaves an entry, so most
+    /// of the list soon is scratch folders and `/tmp`: a repository or a handoff keeps
+    /// its row for good, and a plain folder for as long as somebody is working in it.
+    public func isListed(now: Date = Date()) -> Bool {
+        if isEstablished == true { return true }
+        if ProjectRegistry.looksDisposable(path) { return false }
+        // Not looked at yet (see `refreshEstablished`), so not hidden yet.
+        guard isEstablished != nil else { return true }
+        return now.timeIntervalSince(lastSeenAt) < Self.recentWindow
     }
 }
 
@@ -53,11 +77,19 @@ public struct ProjectRegistry: Sendable {
     ) -> String {
         // Resolving the repository root costs a `git` process, so a path we
         // already know about short-circuits it — events arrive far more often
-        // than new projects appear.
-        let path = knownRoot(containing: rawPath) ?? Self.canonicalPath(for: rawPath)
+        // than new projects appear. Unless it has a repository of its own further
+        // down: then the known folder is only somewhere it happens to live.
+        let path: String
+        if let known = knownRoot(containing: rawPath), !Self.hasRepository(under: known, on: rawPath) {
+            path = known
+        } else {
+            path = Self.canonicalPath(for: rawPath)
+        }
+        let established = Self.isEstablished(path)
         if let index = projects.firstIndex(where: { $0.path == path }) {
             guard date > projects[index].lastSeenAt else { return path }
             projects[index].lastSeenAt = date
+            projects[index].isEstablished = established
             if let provider { projects[index].lastProvider = provider }
         } else {
             projects.append(
@@ -65,7 +97,8 @@ public struct ProjectRegistry: Sendable {
                     path: path,
                     name: URL(fileURLWithPath: path).lastPathComponent,
                     lastSeenAt: date,
-                    lastProvider: provider
+                    lastProvider: provider,
+                    isEstablished: established
                 )
             )
         }
@@ -81,6 +114,60 @@ public struct ProjectRegistry: Sendable {
             .map(\.path)
             .filter { normalized == $0 || normalized.hasPrefix($0 + "/") }
             .max { $0.count < $1.count }
+    }
+
+    /// A `.git` between a known folder and the path inside it. A few `stat`s, which
+    /// is what the short-circuit in `seen` can afford and a `git` process is not.
+    private static func hasRepository(under known: String, on rawPath: String) -> Bool {
+        var directory = PathExtractor.normalized(rawPath)
+        while directory != known, directory.hasPrefix(known + "/") {
+            if FileManager.default.fileExists(atPath: directory + "/.git") { return true }
+            directory = (directory as NSString).deletingLastPathComponent
+        }
+        return false
+    }
+
+    /// A repository, or a handoff somebody started. A handoff counts because it is
+    /// where open tasks live, and those must not drop off the list with the folder's
+    /// last session.
+    public static func isEstablished(_ path: String) -> Bool {
+        FileManager.default.fileExists(atPath: path + "/.git")
+            || FileManager.default.fileExists(atPath: ProjectHandoff.fileURL(for: path).path)
+    }
+
+    /// A folder made to be thrown away: the system's temporary folders, and the
+    /// scratch workspaces agent apps open sessions in.
+    public static func looksDisposable(_ path: String) -> Bool {
+        let temporary = ["/tmp", "/private/tmp", "/var/tmp", "/private/var/tmp", "/var/folders", "/private/var/folders"]
+        if temporary.contains(where: { path == $0 || path.hasPrefix($0 + "/") }) { return true }
+        return path.contains("/scratch-workspaces/")
+            || URL(fileURLWithPath: path).lastPathComponent.hasPrefix("scratch-")
+    }
+
+    /// The ones that get a row by default (see `ProjectSummary.isListed`).
+    public func visibleProjects(now: Date = Date()) -> [ProjectSummary] {
+        projects.filter { $0.isListed(now: now) }
+    }
+
+    /// Looks again at whether each folder holds something of its own: an entry from
+    /// before this was kept, or a folder that got a repository with no session since.
+    /// Touches every project's folder, so the app does this off the main thread (see
+    /// `InboxModel.settleProjects`); macOS may have to ask before it can answer.
+    public mutating func refreshEstablished() {
+        let found = Dictionary(uniqueKeysWithValues: projects.map { ($0.path, Self.isEstablished($0.path)) })
+        adoptEstablished(found)
+    }
+
+    /// `refreshEstablished`'s answer, for whoever worked it out elsewhere.
+    public mutating func adoptEstablished(_ found: [String: Bool]) {
+        var changed = false
+        for index in projects.indices {
+            guard let established = found[projects[index].path],
+                  projects[index].isEstablished != established else { continue }
+            projects[index].isEstablished = established
+            changed = true
+        }
+        if changed { save() }
     }
 
     public mutating func forget(path: String) {
@@ -308,7 +395,7 @@ public struct ProjectRegistry: Sendable {
                 // — trimming each line corrupted filenames with leading or
                 // trailing spaces, and the overlap report then compared a
                 // trimmed path from here against an untrimmed one from
-                // `parseStatus`, so they never matched (audit Tier 5 #40).
+                // `parseStatus`, so they never matched.
                 files: lines.filter { !$0.isEmpty }
             )
         }
@@ -343,6 +430,12 @@ public struct ProjectRegistry: Sendable {
         rebuildingWhenStale: Bool
     ) -> (map: ProjectMap?, head: String?, rebuilt: Bool) {
         let head = currentCommit(in: handoff.projectPath)
+        // A folder of projects is not a project: a map of it mixes them all, and
+        // sends every new session to some file of whichever one happens to be
+        // largest. That goes for a map built before this rule as well.
+        if ProjectMap.isFolderOfRepositories(handoff.projectPath) {
+            return (nil, head, handoff.map != nil)
+        }
         if let existing = handoff.map, existing.isSealed(with: head) || !rebuildingWhenStale {
             return (existing, head, false)
         }
@@ -354,12 +447,12 @@ public struct ProjectRegistry: Sendable {
 
     /// What `addTask` actually did. The returned handoff alone cannot say: it is
     /// the handoff either way, so a caller that did not count tasks was told
-    /// "added" for text that had been refused (audit Tier 5 #32).
+    /// "added" for text that had been refused.
     ///
     /// `writeFailed` is the same class one level down: the write is best-effort
     /// by design — the shared list must never break a command — and an agent
     /// told "added" for a write that did not land believes work is being
-    /// tracked when nothing is (audit 2026-10-08).
+    /// tracked when nothing is.
     public enum TaskAddOutcome: String, Sendable, Equatable {
         case added
         case alreadyThere
@@ -384,7 +477,7 @@ public struct ProjectRegistry: Sendable {
     /// The MCP `task_add` tool answered "added" for text the redactor had
     /// refused as almost entirely secret. The agent then believed the task was
     /// on the board — it never retried, never mentioned it, and simply moved on
-    /// with work nobody was tracking (audit Tier 5 #32). The same class the code
+    /// with work nobody was tracking. The same class the code
     /// already fixes for `task_done`, where "an id nobody issued must error".
     @discardableResult
     public static func addTaskReporting(
@@ -528,13 +621,14 @@ public struct ProjectRegistry: Sendable {
     ) -> String? {
         var handoff = handoff(for: projectPath)
         let (map, head, rebuilt) = refreshedMap(for: handoff, rebuildingWhenStale: refreshingMap)
+        let hadOne = handoff.map != nil
         handoff.map = map
 
         // Writing the map back is what stops the next session walking the tree
         // again. Two conditions, both about consent: a caller that asked not to
         // refresh asked for a read, and a project with no handoff file has not
         // asked us to leave one behind.
-        if refreshingMap, rebuilt, map != nil, exists(for: handoff.projectPath) { save(handoff) }
+        if refreshingMap, rebuilt, map != nil || hadOne, exists(for: handoff.projectPath) { save(handoff) }
 
         let open = handoff.openTasks.prefix(taskLimit)
         guard map != nil || !handoff.commits.isEmpty || !open.isEmpty || !handoff.notes.isEmpty else {
@@ -688,7 +782,7 @@ public struct ProjectRegistry: Sendable {
         // Report a write that did not land rather than printing "Handoff ready"
         // over a file that is not there: an agent that believes the shared list
         // exists will not create it, and will keep asking for one that never
-        // appears (audit 2026-10-08).
+        // appears.
         guard save(handoff) else {
             throw InitializeError.unwritable(ProjectHandoff.fileURL(for: path).path)
         }

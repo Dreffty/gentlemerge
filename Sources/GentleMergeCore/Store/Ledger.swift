@@ -1,6 +1,6 @@
 import Foundation
 
-/// Append-only record of what arrived, what you authorized, and how long the
+/// Append-only record of what arrived, what was decided, and how long the
 /// agent sat there waiting. Plain JSONL so it stays greppable without the app.
 public struct LedgerEntry: Codable, Sendable, Identifiable, Equatable {
     public enum Kind: String, Codable, Sendable {

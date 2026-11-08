@@ -50,7 +50,7 @@ final class PresenceTests: XCTestCase {
         let live = bus.activities().filter(\.isLive)
         XCTAssertEqual(live.count, 1)
         XCTAssertEqual(live.first?.projectName, "gameapp")
-        XCTAssertEqual(live.first?.currentTask, "on feature/x")
+        XCTAssertEqual(live.first?.branch, "feature/x")
     }
 
     func testWithoutAMarkNobodyIsClaimedToBeWorking() {
@@ -205,7 +205,7 @@ final class PresenceTests: XCTestCase {
         let live = bus.activities().filter(\.isLive)
         XCTAssertEqual(live.count, 2)
         XCTAssertTrue(live.contains { $0.currentTask == "migración" })
-        XCTAssertTrue(live.contains { $0.currentTask == "on main" })
+        XCTAssertTrue(live.contains { $0.branch == "main" })
     }
 
     // MARK: - Never persist the merged list (audit Tier 1 #4)

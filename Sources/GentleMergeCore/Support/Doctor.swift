@@ -49,6 +49,7 @@ public struct Doctor: Sendable {
             git(paths: paths, repo: repo, override: gitVersion),
             clock(paths: paths, now: now),
             ownership(paths: paths, project: project),
+            handoffInGit(project: project),
         ]
     }
 
@@ -96,8 +97,7 @@ public struct Doctor: Sendable {
         // for the same stated reason: nothing above the pid_t range was ever a
         // pid. A hand-edited or corrupt `app.pid` of `-1` made `kill(-1, 0)`
         // return 0 (it reports success for "any process may be signalled") and
-        // printed "running (pid -1)"; `0` signals the caller's own process group
-        // (audit Tier 5 #30).
+        // printed "running (pid -1)"; `0` signals the caller's own process group.
         if let value = SpoolStore(paths: paths).runningAppPID() {
             return Check(name: "app", level: .ok, detail: "running (pid \(value))")
         }
@@ -127,12 +127,11 @@ public struct Doctor: Sendable {
         } catch {
             return Check(name: "git-hooks", level: .warn, detail: error.localizedDescription)
         }
-        let missing = (GitHookInstaller.hookNames + ["post-commit"]).filter { name in
-            let path = directory.appendingPathComponent(name)
+        let missing = GitHookInstaller.installedHooks.filter { hook in
+            let path = directory.appendingPathComponent(hook.name)
             guard let body = try? String(contentsOf: path, encoding: .utf8) else { return true }
-            let marker = name == "post-commit" ? GitHookInstaller.postCommitMarker : GitHookInstaller.marker
-            return !body.contains(marker) || !FileManager.default.isExecutableFile(atPath: path.path)
-        }
+            return !body.contains(hook.marker) || !FileManager.default.isExecutableFile(atPath: path.path)
+        }.map(\.name)
         if missing.isEmpty {
             // Hooks without a gate binary warn on every commit but check
             // nothing. That is exactly the state worth shouting about.
@@ -142,14 +141,14 @@ public struct Doctor: Sendable {
             // doctor used to look in the real home, find nothing, and report
             // "commits pass unchecked" for a perfectly healthy install. Its own
             // `DoctorTests` only ever set `GENTLEMERGE_BIN`, so the path was
-            // never exercised (audit Tier 5 #44).
+            // never exercised.
             //
             // And `paths.bin` was itself only a model of where the hook looks,
             // which is the deeper problem: the model and the hook disagreed.
             // Every standard-home hook looked for a directory literally named
             // `$HOME` (single-quoted, never expanded), passed every commit
             // unchecked, and doctor — finding the binary right where it
-            // modelled it — reported the gate live (audit 2026-10-26). So the
+            // modelled it — reported the gate live. So the
             // hook is asked: its own `AI_DEFAULT=` line is evaluated by `sh`
             // exactly as git evaluates it on every commit. Running one
             // assignment from a hook git already runs whole adds no exposure.
@@ -162,7 +161,8 @@ public struct Doctor: Sendable {
                     detail: "hooks live in \(directory.path) but the gate binary is missing at \(gate) — commits pass unchecked. Reinstall (`gentlemerge install`) or set GENTLEMERGE_BIN.")
             }
             return Check(name: "git-hooks", level: .ok,
-                detail: "pre-commit + pre-merge-commit + post-commit live in \(directory.path)" + (note.map { " (\($0))" } ?? ""))
+                detail: GitHookInstaller.installedHooks.map(\.name).joined(separator: " + ")
+                    + " live in \(directory.path)" + (note.map { " (\($0))" } ?? ""))
         }
         return Check(name: "git-hooks", level: .warn,
             detail: "missing \(missing.joined(separator: ", ")) in \(directory.path) — run `gentlemerge git-hooks install --project \(repo.path)`")
@@ -206,6 +206,29 @@ public struct Doctor: Sendable {
         }
         return Check(name: "ownership", level: .warn,
             detail: "\(ownership.rules.count) rule(s) from HANDOFF.md — unprotected; run `gentlemerge ownership pin --project \(project)`")
+    }
+
+    /// The handoff is rewritten after every commit, because it lists the last ones.
+    /// In git, it comes up modified for ever.
+    public static func handoffInGit(project: String) -> Check {
+        guard GitSnapshot.isRepository(project) else {
+            return Check(name: "handoff", level: .ok, detail: "no repository here to keep it out of")
+        }
+        let repo = URL(fileURLWithPath: project)
+        let relative = Ownership.handoffRelativePath
+        func git(_ arguments: [String]) -> Bool {
+            Shell.run("/usr/bin/env", ["git"] + arguments, in: repo,
+                      environment: ["GIT_OPTIONAL_LOCKS": "0"], timeout: 10).succeeded
+        }
+        if git(["ls-files", "--error-unmatch", relative]) {
+            return Check(name: "handoff", level: .warn,
+                detail: "\(relative) is tracked by git, and every commit leaves it modified. `git rm --cached \(relative)` and commit: the file stays, and agents go on reading it.")
+        }
+        if !git(["check-ignore", "-q", relative]) {
+            return Check(name: "handoff", level: .warn,
+                detail: "\(relative) is not ignored, so one `git add -A` starts tracking it. `gentlemerge project init` adds the line.")
+        }
+        return Check(name: "handoff", level: .ok, detail: "kept out of git")
     }
 
     static func clock(paths: Paths, now: Date) -> Check {        let probe = paths.home.appendingPathComponent(".doctor-clock")

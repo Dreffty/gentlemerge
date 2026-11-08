@@ -35,7 +35,15 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
         "--session", "--mode",
     ]
 
-    public func contains(_ flag: String) -> Bool { raw.contains(flag) }
+    /// The part of the line that can hold flags: everything before a bare `--`.
+    private var flagged: ArraySlice<String> { raw.prefix { $0 != CommandOptions.literalSeparator } }
+
+    /// What comes after that `--`: text, however it is spelled.
+    private var literal: ArraySlice<String> {
+        raw.drop { $0 != CommandOptions.literalSeparator }.dropFirst()
+    }
+
+    public func contains(_ flag: String) -> Bool { flagged.contains(flag) }
 
     /// Whether a token is a flag (`--urgent`, `-n`) rather than somebody's text.
     ///
@@ -60,18 +68,20 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
     /// is somebody who forgot to say who, and reading "--global" as the
     /// addressee would route the note to nobody at all.
     public func value(after flag: String) -> String? {
-        guard let index = raw.firstIndex(of: flag), index + 1 < raw.count else { return nil }
-        let value = raw[index + 1]
+        let line = flagged
+        guard let index = line.firstIndex(of: flag), index + 1 < line.endIndex else { return nil }
+        let value = line[index + 1]
         return Self.looksLikeFlag(value) ? nil : value
     }
 
     /// Every value given for a flag that may be repeated, such as `--attach`.
     public func values(after flag: String) -> [String] {
+        let line = Array(flagged)
         var found: [String] = []
         var index = 0
-        while index < raw.count {
-            if raw[index] == flag, index + 1 < raw.count, !Self.looksLikeFlag(raw[index + 1]) {
-                found.append(raw[index + 1])
+        while index < line.count {
+            if line[index] == flag, index + 1 < line.count, !Self.looksLikeFlag(line[index + 1]) {
+                found.append(line[index + 1])
                 index += 2
             } else {
                 index += 1
@@ -82,19 +92,19 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
 
     /// What is left once the flags and the values they eat are taken out.
     public var positional: [String] {
+        let line = Array(flagged)
         var result: [String] = []
         var index = 0
-        while index < raw.count {
-            let argument = raw[index]
+        while index < line.count {
+            let argument = line[index]
             if Self.valueFlags.contains(argument) {
                 // Only skip the next token when it really is a value. `value(after:)`
                 // returns nil for a following flag (so `--to --global` reads the
                 // right way), but this unconditionally did `index += 2` and
                 // swallowed that flag too. Reachable: `gentlemerge radar --project`
                 // with no value left `single == false` downstream and swept every
-                // registered project instead of the named one, with no error
-                // (audit Tier 5 #25).
-                let nextIsValue = index + 1 < raw.count && !Self.looksLikeFlag(raw[index + 1])
+                // registered project instead of the named one, with no error.
+                let nextIsValue = index + 1 < line.count && !Self.looksLikeFlag(line[index + 1])
                 index += nextIsValue ? 2 : 1
             } else if Self.looksLikeFlag(argument) || argument == "-" {
                 // A bare "-" is the conventional "standard input" and never somebody's text.
@@ -104,6 +114,6 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
                 index += 1
             }
         }
-        return result
+        return result + literal
     }
 }

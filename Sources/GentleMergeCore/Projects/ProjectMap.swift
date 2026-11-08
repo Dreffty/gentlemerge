@@ -148,6 +148,33 @@ public struct ProjectMap: Codable, Sendable, Equatable {
     /// largest thing in the repository; it is never where you start reading.
     static let largestReadableHub = 200_000
 
+    /// A folder that is no repository itself and holds several: `Side Projects`, or
+    /// wherever else somebody keeps their work. Looks two levels down, which is as far
+    /// as people nest these, and skips hidden folders, where worktrees live.
+    public static func isFolderOfRepositories(_ path: String) -> Bool {
+        guard !GitSnapshot.isRepository(path) else { return false }
+        let manager = FileManager.default
+        func subfolders(of directory: URL) -> [URL] {
+            let entries = (try? manager.contentsOfDirectory(
+                at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]
+            )) ?? []
+            return entries.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+        }
+        func isRepository(_ folder: URL) -> Bool {
+            manager.fileExists(atPath: folder.appendingPathComponent(".git").path)
+        }
+        var found = 0
+        for child in subfolders(of: URL(fileURLWithPath: path)) {
+            if isRepository(child) {
+                found += 1
+            } else {
+                found += subfolders(of: child).filter(isRepository).count
+            }
+            if found >= 2 { return true }
+        }
+        return false
+    }
+
     public static func build(for projectPath: String, head: String?, now: Date = Date()) -> ProjectMap {
         let root = URL(fileURLWithPath: projectPath)
         let scan = walk(root)
@@ -249,8 +276,7 @@ public struct ProjectMap: Codable, Sendable, Equatable {
             // Descending by count, ascending by name. A tuple comparison sorts both
             // components the same way, so `> ($1.value, $0.key)` left equal counts
             // in *reverse* alphabetical order — `Tests (30) · Sources (30)`. Two
-            // explicit steps are the only way to mix directions
-            // (audit Tier 5 #42).
+            // explicit steps are the only way to mix directions.
             .sorted { a, b in
                 a.value != b.value ? a.value > b.value : a.key < b.key
             }

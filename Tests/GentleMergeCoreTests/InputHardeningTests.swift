@@ -1,7 +1,7 @@
 import XCTest
 @testable import GentleMergeCore
 
-/// A batch of small, mechanical findings from docs/AUDIT_HANDOFF.md Tier 5.
+/// A batch of small, mechanical findings from the October audits.
 /// They share a shape: a value that reaches an arithmetic or array operation
 /// that traps, or a filter that does not do what its own docstring claims. Each
 /// one is a crash or a silent wrong answer from a plain integer or string.
