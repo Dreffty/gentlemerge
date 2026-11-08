@@ -100,14 +100,18 @@ public enum WorktreeEnv {
     /// range — the collision this exists to avoid. Idempotent.
     public static func ensureGitignore(projectPath: String) {
         let url = URL(fileURLWithPath: projectPath).appendingPathComponent(".gitignore")
-        let line = ".gentlemerge/env.sh"
+        // The handoff too: it is rewritten after every commit, because it lists the
+        // last ones, so in git it would come up modified for ever. Agents reach it
+        // through the main checkout, so no worktree needs it committed.
+        let lines = [".gentlemerge/env.sh", ".gentlemerge/HANDOFF.md"]
         let existing = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        let present = existing
+        let present = Set(existing
             .components(separatedBy: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .contains(line)
-        guard !present else { return }
+            .map { $0.trimmingCharacters(in: .whitespaces) })
+        let missing = lines.filter { !present.contains($0) }
+        guard !missing.isEmpty else { return }
         let separator = existing.isEmpty ? "" : (existing.hasSuffix("\n") ? "" : "\n")
-        try? AtomicFile.write(Data((existing + separator + line + "\n").utf8), to: url)
+        let added = missing.joined(separator: "\n") + "\n"
+        try? AtomicFile.write(Data((existing + separator + added).utf8), to: url)
     }
 }

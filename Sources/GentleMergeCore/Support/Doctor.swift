@@ -49,6 +49,7 @@ public struct Doctor: Sendable {
             git(paths: paths, repo: repo, override: gitVersion),
             clock(paths: paths, now: now),
             ownership(paths: paths, project: project),
+            handoffInGit(project: project),
         ]
     }
 
@@ -206,6 +207,29 @@ public struct Doctor: Sendable {
         }
         return Check(name: "ownership", level: .warn,
             detail: "\(ownership.rules.count) rule(s) from HANDOFF.md — unprotected; run `gentlemerge ownership pin --project \(project)`")
+    }
+
+    /// The handoff is rewritten after every commit, because it lists the last ones.
+    /// In git, it comes up modified for ever.
+    public static func handoffInGit(project: String) -> Check {
+        guard GitSnapshot.isRepository(project) else {
+            return Check(name: "handoff", level: .ok, detail: "no repository here to keep it out of")
+        }
+        let repo = URL(fileURLWithPath: project)
+        let relative = Ownership.handoffRelativePath
+        func git(_ arguments: [String]) -> Bool {
+            Shell.run("/usr/bin/env", ["git"] + arguments, in: repo,
+                      environment: ["GIT_OPTIONAL_LOCKS": "0"], timeout: 10).succeeded
+        }
+        if git(["ls-files", "--error-unmatch", relative]) {
+            return Check(name: "handoff", level: .warn,
+                detail: "\(relative) is tracked by git, and every commit leaves it modified. `git rm --cached \(relative)` and commit: the file stays, and agents go on reading it.")
+        }
+        if !git(["check-ignore", "-q", relative]) {
+            return Check(name: "handoff", level: .warn,
+                detail: "\(relative) is not ignored, so one `git add -A` starts tracking it. `gentlemerge project init` adds the line.")
+        }
+        return Check(name: "handoff", level: .ok, detail: "kept out of git")
     }
 
     static func clock(paths: Paths, now: Date) -> Check {        let probe = paths.home.appendingPathComponent(".doctor-clock")

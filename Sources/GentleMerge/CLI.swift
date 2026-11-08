@@ -1118,9 +1118,13 @@ enum CLI {
                 for file in skipped {
                     print("  left \(file.name) alone: \(file.reason). Add a line pointing at .gentlemerge/HANDOFF.md yourself.")
                 }
-                // Generated per-worktree ports stay out of git; the ports
-                // module owns that ignore line, not the Core init.
+                // Generated files stay out of git; the ports module owns those
+                // ignore lines, not the Core init. A line there does nothing for a
+                // file git already follows, and untracking it is a change in
+                // somebody's repository, so that part is said and left to them.
                 WorktreeEnv.ensureGitignore(projectPath: directory)
+                let inGit = Doctor.handoffInGit(project: handoff.projectPath)
+                if inGit.level == .warn { print(inGit.detail) }
 
                 // `--label <name>`: this worktree declares who it is, on the
                 // shared bus. `--git-hooks`: the pre-commit in the common dir,

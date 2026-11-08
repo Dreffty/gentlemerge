@@ -99,6 +99,8 @@ gentlemerge project init --git-hooks            # HANDOFF.md + the commit gate i
 git worktree add ../wt-claude -b agent/claude && (cd ../wt-claude && gentlemerge project init --label claude)
 git worktree add ../wt-hermes -b agent/hermes && (cd ../wt-hermes && gentlemerge project init --label hermes)
 ```
+`init` also keeps `.gentlemerge/HANDOFF.md` out of git, in `.gitignore`: it is rewritten after every commit, because it lists the last ones, and every worktree reads the main checkout's copy. If yours is already tracked, `gentlemerge doctor` gives you the line to untrack it.
+
 Every worktree gets its own label: that is what `say --to <label>` routes by and
 what the gate judges "mine" from. Labels are ASCII (letters, digits and `#` `-` `_` `.`, 24 chars)
 — anything else is stripped, and the same stripping is applied when git hands the
