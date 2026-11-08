@@ -320,7 +320,7 @@ public enum Presence {
         // than the session row of that same agent. Codex is the plain case: its
         // only hook fires at the end of a turn and never writes a mark, so the
         // first `gentlemerge say` it ran listed it twice — once idle, once "on
-        // main" (audit 2026-11-06). If the row stops being live, the mark
+        // main". If the row stops being live, the mark
         // speaks again.
         let sessions = stored.filter(\.isLive)
         loose.removeAll { mark in
@@ -385,8 +385,8 @@ public enum Presence {
     /// `/Users/bob/code/app` — produced the same identity and therefore the same
     /// file on disk, so the second mark overwrote the first: one repo saw no
     /// agents, the other saw an agent whose path was the other one, and both
-    /// vanished from `who` and from every briefing's peer list
-    /// (audit Tier 5 #36). `ProjectRegistry.canonicalPath` maps every worktree of
+    /// vanished from `who` and from every briefing's peer list.
+    /// `ProjectRegistry.canonicalPath` maps every worktree of
     /// one repo to a single root, so the last component was the only
     /// discriminator left — and it is not one.
     static func identity(of mark: Mark) -> String {

@@ -178,7 +178,7 @@ public enum Stats {
     /// `range(of:)` finds the *first* one and a summary can name the word twice
     /// before the count — `"claim-fix -> main @ abc: 3 file(s), 1 claim(s)
     /// released"` reported zero claims released, because "claim" first occurs
-    /// inside the branch name and nothing numeric precedes it (audit Tier 5 #35).
+    /// inside the branch name and nothing numeric precedes it.
     static func count(before word: String, in summary: String?) -> Int {
         guard let summary else { return 0 }
         var searchStart = summary.endIndex

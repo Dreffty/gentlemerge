@@ -93,7 +93,7 @@ public enum NudgeGate {
             // `.ended` is not — the tty path below spells out why ("nothing at
             // the other end but a shell"), and the socket is no better. With
             // pid reuse acknowledged in `Liveness`, that is a notice delivered
-            // to whatever inherited the socket (audit Tier 5 #29).
+            // to whatever inherited the socket.
             guard activity.state != .ended else { return .skipped("recipient has ended") }
             guard Liveness.isProcessAlive(activity.pid, seenAt: activity.updatedAt) == true else { return .skipped("process is gone") }
             if let lastNudgedAt, now.timeIntervalSince(lastNudgedAt) < quietPeriod {

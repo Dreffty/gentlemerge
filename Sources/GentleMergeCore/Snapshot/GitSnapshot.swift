@@ -84,8 +84,7 @@ public struct GitSnapshot: Sendable {
         // `output.succeeded`, not just "is stdout empty": in a repository with no
         // commits git prints `HEAD` on stdout *and* exits 128, so the old
         // `!head.isEmpty` check took "HEAD" for a revision and the whole
-        // snapshot died on a raw `fatal: Not a valid object name HEAD`
-        // (audit 2026-10-08).
+        // snapshot died on a raw `fatal: Not a valid object name HEAD`.
         let revision = git(["rev-parse", "HEAD"])
         let head = revision.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasHead = revision.succeeded && !head.isEmpty && head != "HEAD"
@@ -162,7 +161,7 @@ public struct GitSnapshot: Sendable {
 
     /// Keeps the ref namespace from growing forever. Nothing called it, so
     /// every restore point ever taken — and every restore adds one of its own —
-    /// stayed (audit 2026-11-03); `create` calls it now. Only the ref goes: git
+    /// stayed; `create` calls it now. Only the ref goes: git
     /// keeps the unreachable commit until its own gc expires it, two weeks by
     /// default, so a pruned snapshot can still be dug out by hand.
     public func prune(keeping limit: Int = 30, sparing: String? = nil) {
@@ -241,7 +240,7 @@ public struct GitSnapshot: Sendable {
         // Minus the ones we have just written back ourselves: a restored
         // `d/old.txt` shows up as untracked against the index (the rename is
         // still staged), and reporting it under both "restored" and "left in
-        // place" described one file as two (audit 2026-10-08).
+        // place" described one file as two.
         //
         // `-z` and `--untracked-files=all`: without `-z` git quotes and escapes
         // names with accents or odd characters, so they never matched the

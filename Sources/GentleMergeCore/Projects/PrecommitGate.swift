@@ -29,7 +29,7 @@ public struct PrecommitGate: Sendable {
     /// output that never quotes, escapes or truncates a path.
     ///
     /// Three deliberate choices, each of which was a live bypass before
-    /// (audit 2026-10-07):
+    ///:
     ///
     /// - **`-z`, not `--name-only`.** With `--name-only` git C-quotes any path
     ///   holding a non-ASCII byte (`"lib/donn\303\251es/caf\303\251.txt"`), and

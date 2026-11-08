@@ -395,7 +395,7 @@ public struct ProjectRegistry: Sendable {
                 // — trimming each line corrupted filenames with leading or
                 // trailing spaces, and the overlap report then compared a
                 // trimmed path from here against an untrimmed one from
-                // `parseStatus`, so they never matched (audit Tier 5 #40).
+                // `parseStatus`, so they never matched.
                 files: lines.filter { !$0.isEmpty }
             )
         }
@@ -447,12 +447,12 @@ public struct ProjectRegistry: Sendable {
 
     /// What `addTask` actually did. The returned handoff alone cannot say: it is
     /// the handoff either way, so a caller that did not count tasks was told
-    /// "added" for text that had been refused (audit Tier 5 #32).
+    /// "added" for text that had been refused.
     ///
     /// `writeFailed` is the same class one level down: the write is best-effort
     /// by design — the shared list must never break a command — and an agent
     /// told "added" for a write that did not land believes work is being
-    /// tracked when nothing is (audit 2026-10-08).
+    /// tracked when nothing is.
     public enum TaskAddOutcome: String, Sendable, Equatable {
         case added
         case alreadyThere
@@ -477,7 +477,7 @@ public struct ProjectRegistry: Sendable {
     /// The MCP `task_add` tool answered "added" for text the redactor had
     /// refused as almost entirely secret. The agent then believed the task was
     /// on the board — it never retried, never mentioned it, and simply moved on
-    /// with work nobody was tracking (audit Tier 5 #32). The same class the code
+    /// with work nobody was tracking. The same class the code
     /// already fixes for `task_done`, where "an id nobody issued must error".
     @discardableResult
     public static func addTaskReporting(
@@ -782,7 +782,7 @@ public struct ProjectRegistry: Sendable {
         // Report a write that did not land rather than printing "Handoff ready"
         // over a file that is not there: an agent that believes the shared list
         // exists will not create it, and will keep asking for one that never
-        // appears (audit 2026-10-08).
+        // appears.
         guard save(handoff) else {
             throw InitializeError.unwritable(ProjectHandoff.fileURL(for: path).path)
         }

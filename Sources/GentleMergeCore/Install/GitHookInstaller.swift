@@ -68,7 +68,7 @@ public struct GitHookInstaller: Sendable {
     /// The gate path is interpolated into `${GENTLEMERGE_BIN:-...}`, and `word`
     /// in that expansion is subject to command substitution and arithmetic — so a
     /// home directory containing `$(...)` executed it on *every commit*, and one
-    /// containing `"` produced a hook that was a syntax error (audit 2026-10-07).
+    /// containing `"` produced a hook that was a syntax error.
     /// Assigning it through single quotes first removes the expansion entirely.
     static func shellQuoted(_ value: String) -> String { Shell.quoted(value) }
 
@@ -88,7 +88,7 @@ public struct GitHookInstaller: Sendable {
     ///   hook runs. Single-quoting it made the hook look for a directory
     ///   literally named `$HOME`, say "gate binary not found … this commit is
     ///   NOT checked", and exit 0. Every commit in every repository installed
-    ///   with the default home went through unchecked (audit 2026-10-26). Every
+    ///   with the default home went through unchecked. Every
     ///   hook test set `GENTLEMERGE_BIN`, so `AI_DEFAULT` was never consulted
     ///   and nothing noticed.
     ///
@@ -258,7 +258,7 @@ public struct GitHookInstaller: Sendable {
         // the lexical form and leaves a link alone, so `core.hooksPath=.link`
         // pointing at `/tmp/shared` compared as inside the repo while git ran
         // our gate from a directory every repository on the machine shares —
-        // exactly what this error exists to prevent (audit 2026-10-08).
+        // exactly what this error exists to prevent.
         let customPath = custom.resolvingSymlinksInPath().standardizedFileURL.path
         let classicPath = classic.resolvingSymlinksInPath().standardizedFileURL.path
         if customPath == classicPath { return (classic, nil) }
@@ -335,7 +335,7 @@ public struct GitHookInstaller: Sendable {
             // previous home. `ensureBinaryLink` re-links the binary in the *new*
             // home, so the hook could not find it: every commit then printed
             // "gate binary not found … this commit is NOT checked" and passed
-            // unchecked (audit Tier 5 #38).
+            // unchecked.
             if existing.contains(marker) {
                 if existing == script { return false }
                 // Ours, but stale. Rewrite in place — never chain ourselves — and
@@ -356,7 +356,7 @@ public struct GitHookInstaller: Sendable {
             // A stale `*.gentlemerge-prev` from an earlier chain must go first:
             // `moveItem` refuses to overwrite, so the throw used to escape the
             // install loop and leave *nothing* installed, with a message naming
-            // the collision instead of the cause (audit Tier 5 #39).
+            // the collision instead of the cause.
             let previous = hook.appendingPathExtension("gentlemerge-prev")
             if FileManager.default.fileExists(atPath: previous.path) {
                 try? FileManager.default.removeItem(at: previous)

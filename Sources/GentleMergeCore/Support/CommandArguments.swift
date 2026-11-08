@@ -103,8 +103,7 @@ public struct CommandArguments: Sendable, Equatable, ExpressibleByArrayLiteral {
                 // right way), but this unconditionally did `index += 2` and
                 // swallowed that flag too. Reachable: `gentlemerge radar --project`
                 // with no value left `single == false` downstream and swept every
-                // registered project instead of the named one, with no error
-                // (audit Tier 5 #25).
+                // registered project instead of the named one, with no error.
                 let nextIsValue = index + 1 < line.count && !Self.looksLikeFlag(line[index + 1])
                 index += nextIsValue ? 2 : 1
             } else if Self.looksLikeFlag(argument) || argument == "-" {

@@ -136,8 +136,7 @@ public enum ProjectChecks {
                     // cosmetic: a scheme file named
                     // `ok'; touch PWNED; echo '.xcscheme` used to execute
                     // whatever its name said, as the committing agent, the first
-                    // time anybody ran `gentlemerge review` or `land`
-                    // (audit 2026-10-08).
+                    // time anybody ran `gentlemerge review` or `land`.
                     command: "xcodebuild -scheme \(Shell.quoted(scheme)) -destination 'platform=macOS' build",
                     kind: .build,
                     timeout: 900,

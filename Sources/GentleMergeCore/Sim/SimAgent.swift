@@ -46,7 +46,7 @@ public enum SimError: Error, LocalizedError {
 /// front door: `GIT_EDITOR` is set by Claude Code itself (`GIT_EDITOR=true`),
 /// so `gentlemerge demo` — the README's "try it without any AI" — refused to
 /// start inside the agent this exists to coordinate, with a message about
-/// unsetting variables the reader never set (audit 2026-10-24). They are
+/// unsetting variables the reader never set. They are
 /// pinned to harmless values instead of being rejected: `setenv` here reaches
 /// `ProcessInfo.processInfo.environment`, which is what `Shell` hands to every
 /// child, so an inherited `GIT_EDITOR=vim` cannot sit waiting for a keystroke

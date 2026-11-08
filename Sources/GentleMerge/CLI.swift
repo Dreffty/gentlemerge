@@ -30,8 +30,8 @@ enum CLI {
 
         // Asking about a command never runs it. No command looked for `--help`,
         // so they all ignored it and did their job: `uninstall --help` removed
-        // the hooks, `compact --help` deep-cleaned, `land --help` merged
-        // (audit 2026-11-06). Up here, before anything can act or leave a trace.
+        // the hooks, `compact --help` deep-cleaned, `land --help` merged.
+        // Up here, before anything can act or leave a trace.
         if let command, command != "help", asksForHelp(rest) {
             printUsage(of: command)
             return 0
@@ -79,8 +79,7 @@ enum CLI {
                         // "gentlemerge" — it resolved to <cwd>/gentlemerge, the
                         // gate then reported "binary not found" on every demo
                         // commit and checked nothing, while the demo printed
-                        // `commit ok` for the step the README shows blocked
-                        // (audit 2026-10-08).
+                        // `commit ok` for the step the README shows blocked.
                         binary: CurrentExecutable.url) { print($0) }
                 }
                 return 0
@@ -502,7 +501,7 @@ enum CLI {
             // The field is documented as "<= 0 means uncapped" and the gate reads
             // it as `> 0`, so 0 is the only way to turn the cap off — and the
             // shared positive-integer guard used to reject it, making the
-            // documented value unreachable (audit Tier 5 #43). Zero is accepted;
+            // documented value unreachable. Zero is accepted;
             // a negative stays refused, because that is a typo rather than an
             // intention.
             guard let minutes = Int(value), minutes >= 0 else {
@@ -540,7 +539,7 @@ enum CLI {
         }
         // Report the failure instead of printing the new value and exiting 0. A read-only
         // or full home used to make `config set` claim success while persisting
-        // nothing, so the user believed a setting had changed (audit Tier 5 #31).
+        // nothing, so the user believed a setting had changed.
         do {
             try config.save(to: paths.config)
         } catch {
@@ -660,8 +659,8 @@ enum CLI {
             // root answered with the main checkout's label and every worktree
             // signed as whoever owned that one. A note from hermes filed under
             // `from: claude` was dropped by the recipient's own `from != me`
-            // filter, and `say --done` buried the other agent's blockers
-            // (audit 2026-10-08). Every other command already used the checkout.
+            // filter, and `say --done` buried the other agent's blockers.
+            // Every other command already used the checkout.
             resolved: Identity.resolve(cwd: checkoutDirectory(arguments, allowPositional: false), provider: .unknown, paths: paths))
         } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1
@@ -895,7 +894,7 @@ enum CLI {
         // Drain first, like `brief`, `claims` and `precommit`: the activities
         // this prints are made from hook events, and without the app running
         // nothing else turns the spool into them. `who` answered "No agent
-        // sessions running" with two agents mid-turn (audit 2026-11-01).
+        // sessions running" with two agents mid-turn.
         InboxModel.drainHeadless(paths: paths)
         let bus = AgentBus(paths: paths)
         // Everything, still: unlike the briefing, this is you asking, and the
@@ -1469,7 +1468,7 @@ enum CLI {
         // directory committing here, so adopting one made `me` equal whoever
         // happened to be alive. When that happened to be the claim holder, rule
         // 1's `$0.label != me` skipped its own claim and the commit sailed
-        // through (audit 2026-10-07). With no label, `evaluate` still blocks on
+        // through. With no label, `evaluate` still blocks on
         // live claims — it just cannot apply ownership zones, which need
         // somebody to tell owner from invader.
         let label = committerLabel(at: directory, paths: paths)
@@ -1645,8 +1644,7 @@ enum CLI {
         // Who is adding it is a different question, and it is about the
         // *checkout*: `gentlemerge.label` is per worktree, so resolving the
         // author against the repository root credited the main checkout's label
-        // and every worktree wrote "by claude" into the shared list
-        // (audit 2026-10-08).
+        // and every worktree wrote "by claude" into the shared list.
         let checkout = checkoutDirectory(arguments, allowPositional: false)
 
         switch arguments.first {
@@ -2030,7 +2028,7 @@ enum CLI {
         // "claude", so `say --to hermes` (the label `project init --label`
         // creates and AGENT_PROTOCOL.md tells agents to use) was never
         // delivered to anybody, and two Claude worktrees each read the other's
-        // mail (audit 2026-10-08). The hook has already resolved
+        // mail. The hook has already resolved
         // GENTLEMERGE_LABEL — it is in the environment and in the envelope.
         let identity: Identity
         do {
@@ -2058,8 +2056,8 @@ enum CLI {
         // The briefing below reads what has been drained. With the app running
         // that lags by seconds; without it (Linux, or the app quit) nothing
         // drained between one `brief` and the next, so a turn's delta never
-        // showed what the others had started and watches never fired
-        // (audit 2026-11-03). A small backlog is drained here, waiting at most
+        // showed what the others had started and watches never fired.
+        // A small backlog is drained here, waiting at most
         // a second for the lock; a big one is left to a command that no hook
         // timeout can cut off halfway.
         let spool = SpoolStore(paths: paths)
@@ -2206,8 +2204,7 @@ enum CLI {
         // from the *repository root*, which in the documented five-worktrees
         // layout is the main checkout — so a worktree was judged as whoever
         // owned that one, and an agent editing its own zone heard nothing
-        // while a claim held by somebody else was silently skipped as "mine"
-        // (audit 2026-10-08).
+        // while a claim held by somebody else was silently skipped as "mine".
         let provider = value(after: "--provider", in: arguments)
             .flatMap(AgentProvider.init(rawValue:))
         let me = WorktreeLabel.read(cwd: URL(fileURLWithPath: checkout))
@@ -2219,8 +2216,8 @@ enum CLI {
         // names an absolute path inside this worktree, and relativising it
         // against the canonical repository root produced `../wt-bob/lib/x.dart`
         // — which no glob can match, so the advice was silence for every agent
-        // working in a worktree, i.e. exactly the layout the README teaches
-        // (audit 2026-10-08). `recordImplicitPathClaims` already resolves the
+        // working in a worktree, i.e. exactly the layout the README teaches.
+        // `recordImplicitPathClaims` already resolves the
         // checkout correctly; this now agrees with it.
         let project = ProjectRegistry.canonicalPath(for: checkout)
         let rel = ToolInputFormatter.relativeToCheckout(file, checkout: checkout)
@@ -2308,7 +2305,7 @@ enum CLI {
         // `GENTLEMERGE_LABEL` first, then this worktree's label. Reading only the
         // worktree label meant agents told apart by the environment variable —
         // the documented way for several of them sharing one folder — were all
-        // "you" here, and all got the same hundred ports (audit 2026-11-01).
+        // "you" here, and all got the same hundred ports.
         let label = (try? actingLabel(arguments, explicit: nil)) ?? defaultAuthor()
         let text = WorktreeEnv.render(WorktreeEnv.allocation(label: label, config: config))
         guard isSet("--write", in: arguments) else {
@@ -2702,7 +2699,7 @@ enum CLI {
 
     /// Who an ownership change is credited to: the acting label, as for `say`
     /// and `task claim`. `defaultAuthor()` alone credited an agent known by its
-    /// `GENTLEMERGE_LABEL` as `you` (audit 2026-11-01).
+    /// `GENTLEMERGE_LABEL` as `you`.
     private static func ownershipAuthor(_ arguments: [String]) -> String {
         (try? actingLabel(arguments, explicit: nil)) ?? defaultAuthor()
     }
@@ -2991,7 +2988,7 @@ enum CLI {
         // Refused rather than faked. The hook script has three modes — notify,
         // context and advise — and a fourth named `blocking` was passed here and
         // silently ignored, so `--blocking` produced an ordinary notify and then
-        // reported success (audit Tier 5 #33).
+        // reported success.
         //
         // It stays unimplemented on purpose: a blocking mode answers a
         // permission prompt on the agent's behalf, and "GentleMerge approving
@@ -3028,7 +3025,7 @@ enum CLI {
             paths.hookScript.path,
             "--provider", "claude-code",
             // No `--timeout`: the script's argument loop discards it, so passing
-            // one only looked like configuration (audit Tier 5 #33).
+            // one only looked like configuration.
             "--mode", "notify",
         ]
         let input = Pipe()

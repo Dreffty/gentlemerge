@@ -22,7 +22,7 @@ public enum WorktreeEnv {
     /// labels collides with probability 1/50, and realistic ones land on each
     /// other — `gemini` and `gpt` both hashed to 3800, `opencode` and `qwen` to
     /// 6800, so two agents ran one dev-server port range exactly as the README
-    /// promises they would not (audit 2026-10-08). 256 buckets makes that
+    /// promises they would not. 256 buckets makes that
     /// ~1/256, and `usableBuckets` keeps the arithmetic inside the port range
     /// whatever `basePort` is, degrading toward the old density rather than
     /// emitting an invalid port.
@@ -80,8 +80,7 @@ public enum WorktreeEnv {
     /// from `WorktreeLabel.read` — which only trims whitespace — or from
     /// `GENTLEMERGE_NAME` raw; `Identity.safe` is applied to env and presence
     /// labels but never to the worktree label. A label of `$(id)` therefore
-    /// wrote `export GENTLEMERGE_LABEL=$(id)` and ran `id` on the next `source`
-    /// (audit 2026-10-07).
+    /// wrote `export GENTLEMERGE_LABEL=$(id)` and ran `id` on the next `source`.
     static func shellQuoted(_ value: String) -> String { Shell.quoted(value) }
 
     public static func render(_ allocation: Allocation) -> String {

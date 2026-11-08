@@ -72,7 +72,7 @@ struct MainWindow: View {
                         // session has no project has nowhere to navigate, and the
                         // old `?? ""` tagged it as an empty project that sat in the
                         // same selection space as the real ones — clickable, and
-                        // resolving to nothing (audit 2026-10-11).
+                        // resolving to nothing.
                         .tag(activity.projectPath)
                     }
                 }
@@ -126,8 +126,7 @@ private struct ProjectPane: View {
 
     /// Whether the project has a handoff file, resolved once per refresh rather
     /// than in the body: `ProjectRegistry.exists` canonicalises a path, which
-    /// spawns git, and the body re-renders on every 3-second drain tick
-    /// (audit 2026-10-11).
+    /// spawns git, and the body re-renders on every 3-second drain tick.
     @State private var handoffExists = false
     /// Merged in at render time, by task id. Never part of the handoff file.
     @State private var claimed: [String: TaskClaim] = [:]
@@ -178,7 +177,7 @@ private struct ProjectPane: View {
         // The model writes `lastMessage` from ~30 places and nothing read it:
         // add a task, deny a request, kick off a headless run and the window
         // said nothing either way — including when the write had failed and the
-        // answer was the one thing worth seeing (audit 2026-10-08).
+        // answer was the one thing worth seeing.
         .safeAreaInset(edge: .bottom) {
             if let message = model.lastMessage, !message.isEmpty {
                 Text(message)
@@ -198,8 +197,7 @@ private struct ProjectPane: View {
                     // The newest session in this project, so the diff is since
                     // *its* baseline. Passing no session fell back to HEAD, and
                     // a Review of work already committed then said "nothing
-                    // since HEAD" — the button appeared to do nothing
-                    // (audit 2026-10-11).
+                    // since HEAD" — the button appeared to do nothing.
                     let session = model.mostRecentSession(in: projectPath)
                     model.startReview(projectPath: projectPath, sessionID: session?.id)
                     showReview = true
@@ -233,7 +231,7 @@ private struct ProjectPane: View {
         .onChange(of: projectPath) { _, _ in reload() }
         // Tasks and claims were read once, in `reload`, and never again: what
         // another agent added or ticked did not appear in the window until the
-        // pane was torn down and rebuilt (audit 2026-10-11). The drain already
+        // pane was torn down and rebuilt. The drain already
         // ticks every 3 seconds for the bus, so this piggybacks on it and reads
         // the cheap local files — `handoffWithoutCommits` skips the `git log`.
         .onReceive(Timer.publish(every: 3, on: .main, in: .common).autoconnect()) { _ in
@@ -424,8 +422,7 @@ private struct ProjectPane: View {
                         // literal "you": a human is not the assignee, and
                         // `transition` only lets the two parties to the
                         // contract move it — this button was doomed to fail
-                        // with "you is not allowed to do that"
-                        // (audit 2026-10-08).
+                        // with "you is not allowed to do that".
                         Button("Reject") { model.deny(request.id); reload() }
                     }
                 }
@@ -442,7 +439,7 @@ private struct ProjectPane: View {
     /// `actor == from`, and the button is only shown when `from == "you"`).
     /// Reject used to come through here with a literal `by: "you"` and could
     /// never succeed — it now goes through `model.deny`, which acts as the
-    /// assignee on purpose (audit 2026-10-08).
+    /// assignee on purpose.
     private func updateRequest(_ request: AgentRequest, action: String) {
         do {
             _ = try RequestActions.perform(action: action, id: request.id, by: "you", result: nil, paths: model.paths)

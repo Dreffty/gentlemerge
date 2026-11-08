@@ -166,7 +166,7 @@ public enum ConflictRadar {
     /// transient lock was reported as "share no history — a rebase would fail
     /// too", and auto-land claimed "radar sees a conflict" for a radar that
     /// never answered. Typed, so each caller tells the truth about which one
-    /// it got (audit Tier 2 #8).
+    /// it got.
     public enum ConflictAnswer: Sendable, Equatable {
         case clean
         case paths([String])
@@ -226,7 +226,7 @@ public enum ConflictRadar {
     /// `--name-only` gives disjoint sets for a rename/modify pair (new here,
     /// old there), `overlaps` said false, and the pair never reached
     /// merge-tree — a real conflict the radar could never announce, which is
-    /// the feature's stated purpose failing silently (audit Tier 2 #9).
+    /// the feature's stated purpose failing silently.
     static func changedFiles(from base: String, to tip: String, in repo: String) -> [String]? {
         let output = git(
             ["diff", "--name-status", "-z", "-M", "\(base)...\(tip)"],
@@ -305,8 +305,7 @@ public enum ConflictRadar {
         // The same cap the other two maps get. `lastAutoNote` was one key per
         // project *and branch*, and `pairOffset` one per project, neither ever
         // pruned — so the file grew for as long as the machine kept branching,
-        // which is the growth the other two lines were written to prevent
-        // (audit Tier 5 #41).
+        // which is the growth the other two lines were written to prevent.
         if state.lastAutoNote.count > 200 {
             let cutoff = state.lastAutoNote.values.sorted().suffix(200).first ?? .distantPast
             state.lastAutoNote = state.lastAutoNote.filter { $0.value >= cutoff }

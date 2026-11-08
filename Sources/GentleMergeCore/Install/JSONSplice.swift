@@ -6,8 +6,8 @@ import Foundation
 /// `install` and `uninstall` only ever change `hooks` in `~/.claude/settings.json`,
 /// but they parsed the whole file and wrote it back sorted and re-indented in
 /// Foundation's own style (`"key" : value`): every other setting moved, and a
-/// settings file kept in a dotfiles repository showed a diff on every line
-/// (audit 2026-11-03). Here only the value of the one key is rewritten, in the
+/// settings file kept in a dotfiles repository showed a diff on every line.
+/// Here only the value of the one key is rewritten, in the
 /// style Claude Code itself writes (two spaces, `"key": value`).
 ///
 /// Anything this cannot read with certainty — not an object, a duplicated

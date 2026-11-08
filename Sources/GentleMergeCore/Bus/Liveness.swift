@@ -22,7 +22,7 @@ public enum Liveness {
     /// The system reuses pids, and after a restart it hands out the same low
     /// numbers again: the pid of a session that died with the machine soon
     /// belongs to some other program, which answered "alive" and kept the dead
-    /// session in every briefing until its mark expired (audit 2026-11-03).
+    /// session in every briefing until its mark expired.
     /// `seenAt` — when the pid was last reported by its session — settles it:
     /// a process that started after that moment is not the one that reported.
     /// A minute of slack, so a clock nudged by NTP never buries a live agent.

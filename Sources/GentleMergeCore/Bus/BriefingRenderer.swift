@@ -126,8 +126,8 @@ public struct BriefingRenderer: Sendable {
         // counted lines, so a prefix larger than the cap drove the remainder's
         // budget negative, `max(budget, 0)` zero, and the return was `kept + tail`
         // with no upper clamp anywhere: measured 5864 chars against a cap of
-        // 1200, while the README sells ~231 tokens/turn as a guarantee
-        // (audit 2026-10-07). The existing flood test never saw it because its
+        // 1200, while the README sells ~231 tokens/turn as a guarantee.
+        // The existing flood test never saw it because its
         // inputs (100 messages of ~18 chars, one sender, no peers, no claims) kept
         // `kept` small enough that nothing was ever cut — 1191 chars, no
         // truncation notice at all.

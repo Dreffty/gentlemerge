@@ -387,7 +387,7 @@ public enum HandoffMarkdown {
     /// Task and step text is one line. The grammar is line-based, so an
     /// interior newline renders as a second line that parses back as a
     /// different task — or a remainder the tasks heading discards — and the
-    /// next save permanently deletes the lost half (audit Tier 2 #11).
+    /// next save permanently deletes the lost half.
     static func oneLine(_ text: String) -> String {
         text.replacingOccurrences(of: "\r\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
@@ -486,7 +486,7 @@ public enum HandoffMarkdown {
         // Swift reads `\r\n` as one character, so splitting a file saved with
         // Windows line endings on "\n" split nothing: the task metadata
         // (`· added … · by …`) was read as part of the task's text, and the next
-        // save wrote a file with both endings in it (audit 2026-11-03). The
+        // save wrote a file with both endings in it. The
         // file is ours and is written back with `\n`.
         let text = text.replacingOccurrences(of: "\r\n", with: "\n")
         var handoff = ProjectHandoff(projectPath: projectPath)
@@ -813,8 +813,7 @@ public enum HandoffMarkdown {
         // a literal " · " in the text was protected at render time (nbsp), so
         // only real metadata — plain-space separators — matches here.
         // Unescaping first would restore the separators and feed them straight
-        // back to this parser, and the task's own words would be stolen again
-        // (audit Tier 2 #11).
+        // back to this parser, and the task's own words would be stolen again.
         var text = checkbox.text
         var addedAt: Date?
         var addedBy: String?

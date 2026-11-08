@@ -313,7 +313,7 @@ public struct PathClaims: Sendable {
             // Labels are reused across repos by design (`claude`, `codex` are
             // just names), so matching on the label alone let a stale
             // heartbeat left in a *different* repository unlock this repo's
-            // gate for the life of the claim (audit 2026-10-07). A mark with
+            // gate for the life of the claim. A mark with
             // no project is treated as saying nothing, which keeps the claim
             // alive — the conservative direction for an enforcement point.
             let marks = presence.filter {

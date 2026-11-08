@@ -97,8 +97,7 @@ public struct Doctor: Sendable {
         // for the same stated reason: nothing above the pid_t range was ever a
         // pid. A hand-edited or corrupt `app.pid` of `-1` made `kill(-1, 0)`
         // return 0 (it reports success for "any process may be signalled") and
-        // printed "running (pid -1)"; `0` signals the caller's own process group
-        // (audit Tier 5 #30).
+        // printed "running (pid -1)"; `0` signals the caller's own process group.
         if let value = SpoolStore(paths: paths).runningAppPID() {
             return Check(name: "app", level: .ok, detail: "running (pid \(value))")
         }
@@ -142,14 +141,14 @@ public struct Doctor: Sendable {
             // doctor used to look in the real home, find nothing, and report
             // "commits pass unchecked" for a perfectly healthy install. Its own
             // `DoctorTests` only ever set `GENTLEMERGE_BIN`, so the path was
-            // never exercised (audit Tier 5 #44).
+            // never exercised.
             //
             // And `paths.bin` was itself only a model of where the hook looks,
             // which is the deeper problem: the model and the hook disagreed.
             // Every standard-home hook looked for a directory literally named
             // `$HOME` (single-quoted, never expanded), passed every commit
             // unchecked, and doctor — finding the binary right where it
-            // modelled it — reported the gate live (audit 2026-10-26). So the
+            // modelled it — reported the gate live. So the
             // hook is asked: its own `AI_DEFAULT=` line is evaluated by `sh`
             // exactly as git evaluates it on every commit. Running one
             // assignment from a hook git already runs whole adds no exposure.

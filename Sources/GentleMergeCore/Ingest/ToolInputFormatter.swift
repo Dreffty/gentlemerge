@@ -148,7 +148,7 @@ public enum ToolInputFormatter {
     /// project folder do exactly this — came back as an absolute path that no
     /// claim could match, and the pre-edit warning stayed silent. The recorder
     /// of implicit claims already resolved both sides; the advisor now agrees
-    /// with it (audit 2026-11-01).
+    /// with it.
     public static func relativeToCheckout(_ file: String, checkout: String) -> String? {
         guard !file.isEmpty, !checkout.isEmpty else { return nil }
         let root = resolvingExistingPrefix(URL(fileURLWithPath: checkout)).path

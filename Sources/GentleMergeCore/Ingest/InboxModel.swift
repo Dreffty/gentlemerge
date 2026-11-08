@@ -21,7 +21,7 @@ public final class InboxModel {
             // Best effort here — this is a property observer on a model the user
             // is looking at, and there is nowhere useful to surface a throw. The
             // CLI's own `config set` path does report its failure instead, which
-            // is the case that matters (audit Tier 5 #31).
+            // is the case that matters.
             do {
                 try config.save(to: paths.config)
             } catch {
@@ -865,13 +865,13 @@ public final class InboxModel {
     /// git call per branch plus four per overlapping pair, which on a repository
     /// with fifteen branches and sixty pairs froze the runloop for seconds — the
     /// app stops draining, stops writing state and stops the delivery timer
-    /// while it happens (audit 2026-10-11). Serial, so two drains never sweep at
+    /// while it happens. Serial, so two drains never sweep at
     /// once; the radar only writes lock-guarded JSON, safe from any thread.
     ///
     /// The project list and `paths` are captured before the hop — `self` is not
     /// Sendable and the sweep needs neither, exactly as `maybeAutoLand` does.
     ///
-    /// `@Sendable` is spelled out on both hops (audit 2026-11-01). Left to
+    /// `@Sendable` is spelled out on both hops. Left to
     /// inference, the closure handed to `async` from this main-actor method was
     /// main-actor isolated wherever the SDK's Dispatch overlay did not already
     /// mark it `@Sendable` — Xcode 16's did not — and the Swift 6 runtime on
@@ -999,7 +999,7 @@ public final class InboxModel {
         // `spentTodayMinutes` reads and JSON-decodes every line of ledger.jsonl,
         // and it was evaluated inside the loop, so N assigned requests meant N ×
         // L decodes every 3-second tick — the app's quiet background cost
-        // scaling with work it was not doing (audit Tier 4 #21).
+        // scaling with work it was not doing.
         let spentToday = Dispatcher.spentTodayMinutes(paths: paths, now: now)
         for request in assigned {
             guard !dispatchedRequestIDs.contains(request.id) else { continue }
@@ -1058,7 +1058,7 @@ public final class InboxModel {
     /// For the read that happens on every 3-second tick: tasks and claims are
     /// plain local files, and showing what another agent added a minute ago is
     /// the whole point of the pane — but a `git log` per tick, per open project,
-    /// is ~40 ms of synchronous git the drain does not need (audit 2026-10-11).
+    /// is ~40 ms of synchronous git the drain does not need.
     /// The full read still happens on appear and on project change.
     public func handoffWithoutCommits(for projectPath: String) -> ProjectHandoff {
         ProjectRegistry.handoff(for: projectPath, refreshingCommits: false)
@@ -1077,7 +1077,7 @@ public final class InboxModel {
     /// `addTaskReporting` exists precisely to distinguish "added" from "already
     /// on the board", "refused as a secret" and "I could not write the file",
     /// and throwing that away meant the window claimed a task was on the board
-    /// while the board did not have it (audit 2026-10-08).
+    /// while the board did not have it.
     public func addTask(_ text: String, to projectPath: String, by author: String = "you") {
         let (_, outcome) = ProjectRegistry.addTaskReporting(
             text, to: projectPath, by: author, paths: paths
@@ -1118,7 +1118,7 @@ public final class InboxModel {
     public func setNotes(_ notes: String, in projectPath: String) {
         // The same lock the task list takes: this is another read-modify-write of
         // the same shared file, and a note typed while an agent adds a task must
-        // not overwrite it (audit 2026-10-08).
+        // not overwrite it.
         _ = ProjectRegistry.mutateHandoff(projectPath, in: paths) { handoff in
             handoff.notes = notes
         }
@@ -1409,7 +1409,7 @@ public final class InboxModel {
 /// everything `clearHistory` and `trimHistory` had just removed — so "Clear
 /// history" came straight back on the next tick, and `state.json` accumulated
 /// every row ever ingested, re-encoded on every three-second drain, growing
-/// without bound (audit 2026-10-07). A removal is a decision, not a stale copy,
+/// without bound. A removal is a decision, not a stale copy,
 /// so it has to be remembered across the merge that follows it.
 private var removedIDs: Set<String> = []
 

@@ -117,7 +117,7 @@ public struct AgentRequest: Codable, Sendable, Identifiable, Equatable {
     /// contract, and until now nothing compared it to the clock — it was advisory
     /// for everything except the headless dispatcher's own timeout. A request
     /// created three days ago with a 30-minute budget still showed up in every
-    /// briefing and could still be accepted at any later date (audit Tier 4 #15).
+    /// briefing and could still be accepted at any later date.
     ///
     /// Measured from `createdAt`, not `updatedAt`: the budget covers the whole
     /// delegation, and resetting it on every state change would let a request
@@ -223,8 +223,7 @@ public struct Requests: Sendable {
                 // absent or unrecognised — decoded as `.queued` — could never be
                 // accepted at all: `accept` threw "cannot go from queued to
                 // in_progress", and `.queued` was reachable by no other route, so
-                // it sat in every briefing forever and could only be rejected
-                // (audit Tier 4 #19).
+                // it sat in every briefing forever and could only be rejected.
                 .queued: [.assigned, .inProgress, .rejected],
                 .assigned: [.inProgress, .rejected],
                 .inProgress: [.done, .failed],
@@ -243,7 +242,7 @@ public struct Requests: Sendable {
             // minus `--label`. So any unlabelled agent could accept, reject,
             // ack or complete somebody else's request, release the delegate's
             // `may_touch` claims, tick its task, and post the result to the
-            // delegator as "you" (audit 2026-10-07). A human at a terminal is
+            // delegator as "you". A human at a terminal is
             // served by `gentlemerge request ... --as <label>`, not by trusting
             // a magic actor.
             switch new {

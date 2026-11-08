@@ -276,8 +276,7 @@ public struct ProjectMap: Codable, Sendable, Equatable {
             // Descending by count, ascending by name. A tuple comparison sorts both
             // components the same way, so `> ($1.value, $0.key)` left equal counts
             // in *reverse* alphabetical order — `Tests (30) · Sources (30)`. Two
-            // explicit steps are the only way to mix directions
-            // (audit Tier 5 #42).
+            // explicit steps are the only way to mix directions.
             .sorted { a, b in
                 a.value != b.value ? a.value > b.value : a.key < b.key
             }

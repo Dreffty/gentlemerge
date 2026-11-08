@@ -10,14 +10,14 @@ import Foundation
 /// that safe would alter must never reach them — with `--label "🚀rocket"` the
 /// claim was filed as `rocket` while the gate read `🚀rocket`, so the committer
 /// was told *"`a.txt` is claimed by rocket … say --to rocket"* about its own
-/// claim, for the life of the claim (audit 2026-10-08).
+/// claim, for the life of the claim.
 public enum WorktreeLabel {
     /// `extensions.worktreeConfig` is a repository-wide setting that has to live
     /// in a **working tree's** config. In a linked worktree of a *bare*
     /// repository there is none: `git config` writes it into the bare common
     /// config, git then concludes that every linked worktree of that repository
     /// is bare too, and every command dies with `fatal: this operation must be
-    /// run in a work tree` (audit 2026-10-08). Refusing costs one `git config`
+    /// run in a work tree`. Refusing costs one `git config`
     /// read; the alternative bricks the user's repository.
     public struct BareRepository: Error, LocalizedError, CustomStringConvertible {
         public let path: String
@@ -82,8 +82,7 @@ public enum WorktreeLabel {
         guard output.succeeded else {
             // Its own error, not `InstallError.unreadable`: that one is about a
             // config file and its text reads "… is not a JSON object — refusing
-            // to rewrite it", which is a lie about a git failure
-            // (audit 2026-10-08).
+            // to rewrite it", which is a lie about a git failure.
             throw LabelError.gitRefused(path: repo.path,
                                        detail: output.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
         }
