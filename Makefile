@@ -1,4 +1,4 @@
-.PHONY: build release test app bundle run install install-app install-hooks install-hooks-approval status uninstall-hooks clean
+.PHONY: build release test app bundle run install install-app install-hooks status uninstall-hooks clean
 .DEFAULT_GOAL := build
 UNAME_S := $(shell uname -s)
 
@@ -84,9 +84,6 @@ endif
 
 install-hooks: $(CLI_PREREQUISITE)
 	@$(CLI) install
-
-install-hooks-approval: $(CLI_PREREQUISITE)
-	@$(CLI) install --remote-approval
 
 status: $(CLI_PREREQUISITE)
 	@$(CLI) status

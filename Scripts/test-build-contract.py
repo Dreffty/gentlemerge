@@ -47,6 +47,10 @@ class BuildContractTests(unittest.TestCase):
         self.assertNotIn('bundle.sh', result.stdout)
         self.assertIn('gentlemerge install', result.stdout)
 
+    def test_no_target_calls_an_option_that_no_longer_exists(self):
+        """Remote approval went on 2026-08-15; its make target stayed behind."""
+        self.assertNotIn('remote-approval', ROOT.joinpath('Makefile').read_text())
+
     def test_the_app_installs_outside_the_protected_folders_without_sudo(self):
         """It used to run from build/, inside ~/Downloads when the repo lives there.
 

@@ -19,4 +19,15 @@ final class DocumentedFiguresTests: XCTestCase {
         XCTAssertFalse(text.contains("20–70"))
         XCTAssertTrue(text.contains("~100/turn"), "say what `gentlemerge stats` says")
     }
+
+    /// The product changed name and purpose; the first screen of help had not. It
+    /// still opened as the approval inbox it used to be.
+    func testHelpSpeaksOfTheProductAsItIsNow() throws {
+        let binary = URL(fileURLWithPath: ProcessInfo.processInfo.environment["GENTLEMERGE_BIN"] ?? ".build/debug/gentlemerge")
+            .standardizedFileURL.path
+        let help = Shell.run(binary, ["help"]).stdout
+        XCTAssertFalse(help.contains("every agent that needs you"), help)
+        XCTAssertFalse(help.contains("what you authorized"), help)
+        XCTAssertTrue(help.hasPrefix("gentlemerge — coordination for AI coding agents that share one repository"), help)
+    }
 }

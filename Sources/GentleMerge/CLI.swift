@@ -3075,7 +3075,7 @@ enum CLI {
     }
 
     private static let usageText = """
-        gentlemerge — one place for every agent that needs you.
+        gentlemerge — coordination for AI coding agents that share one repository.
 
         USAGE
           gentlemerge                       start the menu bar app
@@ -3094,7 +3094,7 @@ enum CLI {
                                               lapsed watches, stale presence,
                                               old dispatch logs and messages
           gentlemerge list                  pending items, as text
-          gentlemerge history [-n 20]       what you authorized, and when
+          gentlemerge history [-n 20]       what happened, and when
           gentlemerge test-event            fire a synthetic event
           gentlemerge print-hook            print the hook script
 
