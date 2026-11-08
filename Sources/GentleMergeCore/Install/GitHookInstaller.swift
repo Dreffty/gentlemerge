@@ -58,7 +58,7 @@ public struct GitHookInstaller: Sendable {
     /// binary instead of a fixed path that was never filled.
     static func gateDefault(paths: Paths) -> String {
         let link = paths.bin.appendingPathComponent("gentlemerge").path
-        let standard = FileManager.default.homeDirectoryForCurrentUser
+        let standard = Paths.userHome()
             .appendingPathComponent(".gentlemerge/bin/gentlemerge").path
         return link == standard ? "$HOME/.gentlemerge/bin/gentlemerge" : link
     }

@@ -11,11 +11,26 @@ public struct Paths: Sendable {
     public let home: URL
     private let claudeSettingsOverride: URL?
     private let codexConfigOverride: URL?
+    /// The person's home, where the agents keep their own settings.
+    private let userHome: URL
 
-    public init(home: URL, claudeSettings: URL? = nil, codexConfig: URL? = nil) {
+    public init(home: URL, claudeSettings: URL? = nil, codexConfig: URL? = nil, userHome: URL? = nil) {
         self.home = home
         self.claudeSettingsOverride = claudeSettings
         self.codexConfigOverride = codexConfig
+        self.userHome = userHome ?? Self.userHome()
+    }
+
+    /// `$HOME` when it is set, the account's home otherwise.
+    ///
+    /// macOS answers `homeDirectoryForCurrentUser` from the account and ignores
+    /// `$HOME`, so a run with a fake one wrote into the real `~/.claude/settings.json`
+    /// (2026-10-31). The hook script and git already go by `$HOME`; now so does this.
+    public static func userHome(_ environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        if let value = environment["HOME"], !value.isEmpty {
+            return URL(fileURLWithPath: value, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
     }
 
     /// The paths for this process. Under XCTest with no `GENTLEMERGE_HOME`, a scratch
@@ -57,14 +72,15 @@ public struct Paths: Sendable {
         #else
         let platformHome: URL? = nil
         #endif
+        let userHome = Self.userHome(environment)
         let home = url("GENTLEMERGE_HOME") ?? platformHome
-            ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".gentlemerge", isDirectory: true)
+            ?? userHome.appendingPathComponent(".gentlemerge", isDirectory: true)
 
         return Paths(
             home: home,
             claudeSettings: url("GENTLEMERGE_CLAUDE_SETTINGS"),
-            codexConfig: url("GENTLEMERGE_CODEX_CONFIG")
+            codexConfig: url("GENTLEMERGE_CODEX_CONFIG"),
+            userHome: userHome
         )
     }
 
@@ -138,15 +154,11 @@ public struct Paths: Sendable {
     public var codexNotifyScript: URL { bin.appendingPathComponent("gentlemerge-codex-notify.sh") }
 
     public var claudeSettings: URL {
-        claudeSettingsOverride
-            ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".claude/settings.json")
+        claudeSettingsOverride ?? userHome.appendingPathComponent(".claude/settings.json")
     }
 
     public var codexConfig: URL {
-        codexConfigOverride
-            ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".codex/config.toml")
+        codexConfigOverride ?? userHome.appendingPathComponent(".codex/config.toml")
     }
 
     @discardableResult
