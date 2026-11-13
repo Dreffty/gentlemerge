@@ -41,14 +41,14 @@ final class DispatchOncePerRequestTests: XCTestCase {
 
     /// The CLI and the MCP server drain before every read, in a process that exits at
     /// once. Starting an agent there left it with nobody to record how it ended.
-    func testAOneShotDrainNeverStartsAHeadlessAgent() throws {
+    func testAOneShotDrainNeverStartsAHeadlessAgent() async throws {
         for _ in 0..<3 { InboxModel.drainHeadless(paths: paths) }
         XCTAssertEqual(startedLines(), 0)
         XCTAssertFalse(FileManager.default.fileExists(atPath: paths.dispatch.appendingPathComponent("req-once.started").path))
     }
 
     /// And the app itself, restarted (or a second app), must not start it again.
-    func testASecondModelOverTheSameHomeDoesNotRestartTheRequest() throws {
+    func testASecondModelOverTheSameHomeDoesNotRestartTheRequest() async throws {
         var launched: [String] = []
         let first = InboxModel(paths: paths)
         first.runDispatch = { request, _ in launched.append(request.id); return Task {} }
@@ -62,14 +62,14 @@ final class DispatchOncePerRequestTests: XCTestCase {
         XCTAssertEqual(launched, ["req-once"], "the request was started again by another process")
     }
 
-    func testTheMarkerIsTakenExactlyOnce() {
+    func testTheMarkerIsTakenExactlyOnce() async {
         let dispatcher = Dispatcher(paths: paths)
         XCTAssertTrue(dispatcher.claimStart(of: "req-x"))
         XCTAssertFalse(dispatcher.claimStart(of: "req-x"))
         XCTAssertFalse(dispatcher.claimStart(of: "../escape"), "ids are validated before they reach a path")
     }
 
-    func testOldMarkersAreSweptWithTheOtherDispatchDebris() throws {
+    func testOldMarkersAreSweptWithTheOtherDispatchDebris() async throws {
         _ = Dispatcher(paths: paths).claimStart(of: "req-old")
         let url = paths.dispatch.appendingPathComponent("req-old.started")
         try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-90 * 86_400)],

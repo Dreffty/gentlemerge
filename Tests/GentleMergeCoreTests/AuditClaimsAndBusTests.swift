@@ -214,7 +214,7 @@ final class WatchByLabelTests: XCTestCase {
 
     /// A Claude Code session in the worktree labelled `hermes` is hermes. The watch for
     /// `hermes` never fired, and the one for `claude` fired instead.
-    func testAWatchOnAWorktreeLabelFiresForThatWorktreesSession() throws {
+    func testAWatchOnAWorktreeLabelFiresForThatWorktreesSession() async throws {
         let canonical = ProjectRegistry.canonicalPath(for: project.path)
         let watches = Watches(paths: paths)
         try watches.add(WatchRule(owner: "boss", projectPath: canonical, kind: .sessionIdle, target: "hermes"))
@@ -228,7 +228,7 @@ final class WatchByLabelTests: XCTestCase {
         XCTAssertFalse(got.contains { $0.text.contains("claude finished") })
     }
 
-    func testASessionWithNoWorktreeLabelStillMatchesItsProviderName() throws {
+    func testASessionWithNoWorktreeLabelStillMatchesItsProviderName() async throws {
         let canonical = ProjectRegistry.canonicalPath(for: project.path)
         try Watches(paths: paths).add(WatchRule(owner: "boss", projectPath: canonical, kind: .sessionIdle, target: "claude"))
         model.ingest(stop(label: nil, session: "s-plain"))

@@ -109,7 +109,7 @@ final class DispatchApprovalNotificationTests: XCTestCase {
     }
 
     /// The "Approve dispatch?" banner outlived the decision it asked for.
-    func testApprovingTakesTheNotificationBack() throws {
+    func testApprovingTakesTheNotificationBack() async throws {
         let request = try pendingRequest()
         var withdrawn: [String] = []
         model.onDispatchResolved = { withdrawn.append($0) }
@@ -117,7 +117,7 @@ final class DispatchApprovalNotificationTests: XCTestCase {
         XCTAssertEqual(withdrawn, [request.id])
     }
 
-    func testDenyingTakesTheNotificationBack() throws {
+    func testDenyingTakesTheNotificationBack() async throws {
         let request = try pendingRequest()
         var withdrawn: [String] = []
         model.onDispatchResolved = { withdrawn.append($0) }

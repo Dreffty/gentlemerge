@@ -30,7 +30,13 @@ public struct Paths: Sendable {
         #if canImport(ObjectiveC)
         let xctestLoaded = NSClassFromString("XCTestCase") != nil
         #else
-        let xctestLoaded = false
+        // No Objective-C runtime to ask on Linux, and none of the XCTest variables
+        // below are exported there either — so this was always false and the suite
+        // wrote into the developer's real home after all. What Linux does have is
+        // the runner itself: `swift test` executes the test bundle directly, so the
+        // process is `<Package>PackageTests.xctest`. A child a test starts is the
+        // real binary under its own name, exactly as on macOS.
+        let xctestLoaded = (ProcessInfo.processInfo.arguments.first ?? "").hasSuffix(".xctest")
         #endif
         let underTest = xctestLoaded
             || environment["XCTestConfigurationFilePath"] != nil

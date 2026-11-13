@@ -47,7 +47,7 @@ final class PromptTaskInModelTests: XCTestCase {
             ]))
     }
 
-    func testAnAutomatedPromptKeepsTheTaskTheSessionHad() throws {
+    func testAnAutomatedPromptKeepsTheTaskTheSessionHad() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("prompt-task-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = try Paths(home: root).createDirectories()

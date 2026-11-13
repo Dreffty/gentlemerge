@@ -119,6 +119,25 @@ public struct SpoolStore: Sendable {
         var buffer = [CChar](repeating: 0, count: 4096)
         guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
         return URL(fileURLWithPath: String(cString: buffer)).lastPathComponent == "gentlemerge" ? pid : nil
+        #elseif os(Linux)
+        // The same question, asked of /proc. This branch used to answer `pid`
+        // for anything alive, which is the very mistake the comment above
+        // describes: a number left over in `app.pid` named whatever program had
+        // it now, `status` and `doctor` called that "running", and `brief`
+        // skipped its own drain to wait for an app that was never there.
+        // `exe` is the binary itself; the kernel appends " (deleted)" when it
+        // was replaced on disk while running. It cannot be read for another
+        // user's process, and `comm` — the name, cut at 15 characters, which
+        // `gentlemerge` fits — can.
+        if let target = try? FileManager.default.destinationOfSymbolicLink(atPath: "/proc/\(pid)/exe") {
+            var name = URL(fileURLWithPath: target).lastPathComponent
+            if name.hasSuffix(" (deleted)") { name.removeLast(" (deleted)".count) }
+            return name == "gentlemerge" ? pid : nil
+        }
+        if let name = try? String(contentsOfFile: "/proc/\(pid)/comm", encoding: .utf8) {
+            return name.trimmingCharacters(in: .whitespacesAndNewlines) == "gentlemerge" ? pid : nil
+        }
+        return nil
         #else
         return pid
         #endif
