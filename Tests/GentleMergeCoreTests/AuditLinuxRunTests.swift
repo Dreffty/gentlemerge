@@ -304,3 +304,35 @@ final class AbsurdDateTests: XCTestCase {
         XCTAssertEqual(blocked.count, 1, "and it still blocks, as a live claim does")
     }
 }
+
+/// Running a command costs no descriptors once it has returned.
+final class ShellDescriptorTests: XCTestCase {
+    /// `/dev/fd` lists this process's open descriptors on macOS and Linux alike.
+    private func openDescriptors() -> Int {
+        (try? FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count) ?? 0
+    }
+
+    /// Two were lost per call on Linux — the read ends of the two pipes. The
+    /// first CI run of this suite there reached 1,300 open pipes and crashed
+    /// inside Foundation's next spawn; an MCP server, which runs git on every
+    /// tool call, would have met the descriptor limit instead.
+    func testFortyCommandsLeaveNoDescriptorsBehind() throws {
+        // The first call may start machinery that stays (a monitor thread and
+        // its sockets); it is the growth per call after that which is a leak.
+        _ = Shell.run("/bin/echo", ["warm up"], timeout: 10)
+        let before = openDescriptors()
+        try XCTSkipIf(before == 0, "no /dev/fd here to count with")
+
+        for round in 0..<40 {
+            let output = Shell.run("/bin/echo", ["\(round)"], timeout: 10)
+            XCTAssertEqual(output.stdout, "\(round)\n")
+        }
+        // A reader thread closes its handle just after the call returns.
+        var after = openDescriptors()
+        for _ in 0..<20 where after > before + 4 {
+            Thread.sleep(forTimeInterval: 0.05)
+            after = openDescriptors()
+        }
+        XCTAssertLessThanOrEqual(after, before + 4, "\(after - before) descriptors still open after 40 commands")
+    }
+}

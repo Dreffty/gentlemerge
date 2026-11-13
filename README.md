@@ -139,17 +139,18 @@ build contract and the headless smoke test. macOS also assembles the app bundle,
 so its smoke test covers the GUI ingestion checks; Linux has no app, and those
 checks are skipped there — a skipped step is not a passing one. So:
 
-- **macOS is verified**: 996 tests and the smoke test pass on every commit.
-- **Linux is verified headless**: 989 tests (the rest need macOS and are
+- **macOS is verified**: 997 tests and the smoke test pass on every commit.
+- **Linux is verified headless**: 990 tests (the rest need macOS and are
   compiled out) and the smoke test's 120 headless checks. That is the CLI, the
   MCP server, the gate and the bus driven by real processes — not a live agent
   session, which nobody has confirmed on Linux yet.
 
 Until 2026-11-13 Linux was only shown to *build*: the test module did not
-compile there, so no test had ever run. The first full run found two things a
-build could not — the suite wrote into the developer's real home, and a stale
-`app.pid` was reported as a running app — both fixed in the commit that turned
-the tests on.
+compile there, so no test had ever run. The first full runs found three things
+a build could not — the suite wrote into the developer's real home, a stale
+`app.pid` was reported as a running app, and every command the binary ran left
+two file descriptors open (which a long-lived MCP server would eventually have
+run out of) — all fixed in the commits that turned the tests on.
 
 This is the same declaration the project has always made for live vendor
 sessions: what has not been exercised is stated, not rounded up.

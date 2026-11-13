@@ -110,9 +110,20 @@ public enum Shell {
         // #12). Closing the read handles instead is not an option — closing a
         // FileHandle another thread is reading raises on that thread, which the
         // suite caught when it turned the leak into a crash.
+        //
+        // Each reader closes its handle once it has read to the end — by then
+        // nobody else is reading it, so this is not the close the paragraph
+        // above rules out. It has to be said out loud because on Linux a
+        // finished `Thread` never lets go of its closure, so the Pipe it
+        // captured was never deallocated and its read end never closed: two
+        // descriptors lost on every call. A long-lived process — the MCP
+        // server runs git on every tool call — walked into the descriptor
+        // limit, and the test suite reached 1,300 open pipes and crashed
+        // inside Foundation's next spawn (audit 2026-11-13, first Linux CI run).
         readers.enter()
         let outReader = Thread {
             outBox.set(outPipe.fileHandleForReading.readDataToEndOfFile())
+            try? outPipe.fileHandleForReading.close()
             readers.leave()
         }
         outReader.name = "gentlemerge.shell.stdout"
@@ -120,6 +131,7 @@ public enum Shell {
         readers.enter()
         let errReader = Thread {
             errBox.set(errPipe.fileHandleForReading.readDataToEndOfFile())
+            try? errPipe.fileHandleForReading.close()
             readers.leave()
         }
         errReader.name = "gentlemerge.shell.stderr"
