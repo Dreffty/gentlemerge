@@ -25,38 +25,33 @@ jobs:
           swift-version: "6.0"
       - run: swift --version
       # `review` shells out to the project's own package script, and the smoke
-      # test asserts on that line. macOS only, because the smoke test is.
-      - if: runner.os == 'macOS'
-        uses: actions/setup-node@v4
+      # test asserts on that line.
+      - uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      # Every job builds. This is the whole of what Linux is claimed to do, and
-      # the only Linux claim the README makes.
-      - run: swift build -c release
-
-      # Everything below runs on macOS only, and that is a statement about
-      # Linux rather than a convenience: the test module does not compile on
-      # the toolchain here (XCTest's @MainActor isolation is applied more
-      # strictly), so the job used to fail on `swift test` and take the
-      # following steps down with it. A red run on every single push —
-      # `main` included — said "broken" about a project whose macOS side was
-      # passing in full, and it is the first thing anyone deciding whether to
-      # install this would have seen.
+      # Every job builds, tests and runs the headless smoke test.
       #
-      # Skipping is not the same as passing, and the README says so in the
-      # Status table: macOS is verified, Linux is shown to build and nothing
-      # more. Do not quietly widen these guards to make the matrix look
-      # greener — if you get the test module compiling on Linux, drop the
-      # guard and change the README in the same commit.
-      - if: runner.os == 'macOS'
-        run: swift test
-      - if: runner.os == 'macOS'
-        run: python3 Scripts/test-build-contract.py
+      # Linux used to stop after the build: the test module did not compile
+      # there. XCTest on Linux lists tests in a nonisolated context, so a
+      # synchronous test method in a `@MainActor` class cannot be referenced
+      # from it — nineteen such methods, each one a compile error. They are
+      # `async` now (which is what the other `@MainActor` test classes already
+      # were), the suite compiles, and the first full run on Linux found what a
+      # build alone never could: the suite writing into the real home, and a
+      # stale `app.pid` taken for a running app (audit 2026-11-13).
+      #
+      # If a step below goes red on one platform only, that is a finding about
+      # that platform. Fix it or say so in the README's Status table — do not
+      # put a `runner.os` guard back to make the matrix look greener.
+      - run: swift build -c release
+      - run: swift test
+      - run: python3 Scripts/test-build-contract.py
+      # The menu-bar app is macOS only; the smoke test skips its GUI checks
+      # where there is no bundle.
       - if: runner.os == 'macOS'
         run: make app
-      - if: runner.os == 'macOS'
-        run: GENTLEMERGE_BIN="$PWD/.build/release/gentlemerge" bash Scripts/smoke-test.sh
+      - run: GENTLEMERGE_BIN="$PWD/.build/release/gentlemerge" bash Scripts/smoke-test.sh
       # A crash in the app shows up above only as checks that waited in vain.
       # macOS writes the reason to a crash report; print the newest one.
       - if: failure() && runner.os == 'macOS'
