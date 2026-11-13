@@ -5,7 +5,7 @@ import XCTest
 /// The app's own clock sweeps what `gentlemerge compact` used to be the only way to sweep.
 @MainActor
 final class AppSweepTests: XCTestCase {
-    func testTheAppTickRemovesIdleLockFiles() throws {
+    func testTheAppTickRemovesIdleLockFiles() async throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("gentlemerge-sweep-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: root) }
@@ -54,7 +54,7 @@ final class AppConfigReloadTests: XCTestCase {
         try config.save(to: paths.config)
     }
 
-    func testATerminalChangeReachesTheRunningApp() throws {
+    func testATerminalChangeReachesTheRunningApp() async throws {
         let model = InboxModel(paths: paths)
         XCTAssertFalse(model.config.allowDispatch)
         try setFromTheTerminal { $0.allowDispatch = true }
@@ -62,7 +62,7 @@ final class AppConfigReloadTests: XCTestCase {
         XCTAssertTrue(model.config.allowDispatch)
     }
 
-    func testAnAppChangeAfterATerminalChangeKeepsBoth() throws {
+    func testAnAppChangeAfterATerminalChangeKeepsBoth() async throws {
         let model = InboxModel(paths: paths)
         try setFromTheTerminal { $0.allowDispatch = true }
         model.reloadConfigIfChanged()
@@ -72,7 +72,7 @@ final class AppConfigReloadTests: XCTestCase {
         XCTAssertEqual(onDisk.retentionDays, 9)
     }
 
-    func testAReloadDoesNotWriteTheFileBack() throws {
+    func testAReloadDoesNotWriteTheFileBack() async throws {
         let model = InboxModel(paths: paths)
         try setFromTheTerminal { $0.retentionDays = 12 }
         let before = InboxModel.modificationDate(of: paths.config)
@@ -82,7 +82,7 @@ final class AppConfigReloadTests: XCTestCase {
         XCTAssertEqual(model.config.retentionDays, 12)
     }
 
-    func testAnUnreadableFileDoesNotResetTheApp() throws {
+    func testAnUnreadableFileDoesNotResetTheApp() async throws {
         let model = InboxModel(paths: paths)
         model.config.retentionDays = 9
         try Data("{ not json".utf8).write(to: paths.config)

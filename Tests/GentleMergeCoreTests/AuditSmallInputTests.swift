@@ -174,10 +174,14 @@ final class SingleAppInstanceTests: XCTestCase {
 
         XCTAssertTrue(status().contains("running (pid \(stand.processIdentifier))"), status())
 
+        // The menu-bar app is macOS only: elsewhere `gentlemerge app` says so
+        // and exits, so there is no second app to step aside.
+        #if os(macOS)
         let second = Shell.run(binary, ["app"], in: root, environment: ["GENTLEMERGE_HOME": paths.home.path], timeout: 15)
         XCTAssertFalse(second.timedOut, "a second app started instead of stepping aside")
         XCTAssertEqual(second.status, 0)
         XCTAssertTrue(second.stderr.contains("already running"), second.stderr)
+        #endif
     }
 }
 

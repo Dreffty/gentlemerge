@@ -51,7 +51,7 @@ final class InboxHistoryTests: XCTestCase {
         return item
     }
 
-    func testClearedHistoryDoesNotComeBack() throws {
+    func testClearedHistoryDoesNotComeBack() async throws {
         for i in 0..<5 { try addResolved("gone\(i)") }
         let first = try XCTUnwrap(model.items.first { $0.summary.contains("gone0") })
         XCTAssertFalse(first.isPending)
@@ -67,7 +67,7 @@ final class InboxHistoryTests: XCTestCase {
     }
 
     /// And it stays gone across repeated drains, not just the first one.
-    func testClearedHistoryStaysGoneAcrossRepeatedSaves() throws {
+    func testClearedHistoryStaysGoneAcrossRepeatedSaves() async throws {
         for i in 0..<3 { try addResolved("bye\(i)") }
         let ids = Set(model.items.map(\.id))
 
@@ -86,7 +86,7 @@ final class InboxHistoryTests: XCTestCase {
     /// The merge the whole thing depends on must keep working: a row another
     /// process added while this one was draining must survive our save. This is
     /// the guarantee the removal ledger must not break.
-    func testRowsWrittenByAnotherProcessAreStillMerged() throws {
+    func testRowsWrittenByAnotherProcessAreStillMerged() async throws {
         let mine = try addResolved("mine")
         model.saveState()
 
@@ -107,7 +107,7 @@ final class InboxHistoryTests: XCTestCase {
     }
 
     /// A pending row is not history and must survive a clear.
-    func testClearingHistoryLeavesPendingRowsAlone() throws {
+    func testClearingHistoryLeavesPendingRowsAlone() async throws {
         let envelope = SpoolEnvelope(
             provider: .claudeCode,
             cwd: root.path,
@@ -125,7 +125,7 @@ final class InboxHistoryTests: XCTestCase {
     /// `trimHistory` is the same defect on the automatic path: with no removal
     /// ledger the file kept every row ever ingested regardless of
     /// `historyLimit`.
-    func testHistoryLimitIsActuallyEnforcedOnDisk() throws {
+    func testHistoryLimitIsActuallyEnforcedOnDisk() async throws {
         model.config.historyLimit = 3
         for i in 0..<12 { try addResolved("h\(i)") }
         model.saveState()
