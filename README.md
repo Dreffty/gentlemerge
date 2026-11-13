@@ -141,24 +141,28 @@ gentlemerge demo        # three simulated agents, one temp repo, the whole proto
 
 | Component | macOS | Linux | Windows |
 |---|---|---|---|
-| CLI, MCP server, claims, pre-commit, requests, land, demo | ✅ **verified on CI** | ⚠️ **builds, untested** | WSL2 ✅ · native: help wanted |
-| Claude Code hooks + socket delivery | ✅ *needs community verification* | ⚠️ *untested* | WSL2 |
-| Codex hooks | ✅ *needs verification* | ⚠️ *untested* | WSL2 |
+| CLI, MCP server, claims, pre-commit, requests, land, demo | ✅ **verified on CI** | ✅ **verified on CI** | WSL2 ✅ · native: help wanted |
+| Claude Code hooks + socket delivery | ✅ *needs community verification* | ⚠️ *simulated events only* | WSL2 |
+| Codex hooks | ✅ *needs verification* | ⚠️ *simulated events only* | WSL2 |
 | Menu-bar app, review UI, notifications | ✅ | — | — |
 
-**What "verified on CI" means, and what it does not.** macOS runs the whole
-pipeline on every push: `swift build -c release`, the full test suite, the build
-contract, the app bundle and the headless smoke test. Linux runs
-`swift build -c release` — the CLI and both libraries compile there — and
-**stops there by design**: the test module does not compile on the toolchain CI
-uses (XCTest's `@MainActor` isolation is applied more strictly there), so the
-workflow skips the steps that would need it rather than failing on them. A
-skipped step is not a passing one, which is the point of this section. So:
+**What "verified on CI" means, and what it does not.** Both platforms run the
+same pipeline on every push: `swift build -c release`, the full test suite, the
+build contract and the headless smoke test. macOS also assembles the app bundle,
+so its smoke test covers the GUI ingestion checks; Linux has no app, and those
+checks are skipped there — a skipped step is not a passing one. So:
 
-- **macOS is verified**: 975 tests and the smoke test pass on every commit.
-- **Linux is only shown to build.** No test and no smoke test has ever run
-  there, so nothing about it is *verified* behaviour — it is behaviour that
-  compiles. If you rely on the Linux path, treat this as the gap it is.
+- **macOS is verified**: 996 tests and the smoke test pass on every commit.
+- **Linux is verified headless**: 989 tests (the rest need macOS and are
+  compiled out) and the smoke test's 120 headless checks. That is the CLI, the
+  MCP server, the gate and the bus driven by real processes — not a live agent
+  session, which nobody has confirmed on Linux yet.
+
+Until 2026-11-13 Linux was only shown to *build*: the test module did not
+compile there, so no test had ever run. The first full run found two things a
+build could not — the suite wrote into the developer's real home, and a stale
+`app.pid` was reported as a running app — both fixed in the commit that turned
+the tests on.
 
 This is the same declaration the project has always made for live vendor
 sessions: what has not been exercised is stated, not rounded up.
