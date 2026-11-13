@@ -207,6 +207,36 @@ extension CLI {
                                             saves .gentlemerge/env.sh to source
                                             before running them
 
+        PATHS AND REQUESTS — who is editing where, and work handed over
+          gentlemerge claim --paths <glob,glob> [--intent "..."] [--ttl minutes]
+                                            reserve paths before you edit them.
+                                            Refused, with who holds them and for
+                                            how long, when another agent's live
+                                            claim overlaps. Lapses on its own in
+                                            30 minutes unless --ttl says otherwise
+          gentlemerge release [--paths <glob,glob>]
+                                            hand them back; with no --paths,
+                                            every claim of yours in this project
+          gentlemerge claims [--project dir]
+                                            the live claims here, and whose
+          gentlemerge delegate --to <label|capability:name> --title "..." --spec "..."
+                                            [--may-touch glob] [--budget minutes]
+                                            [--inputs a,b] [--expect path]
+                                            ask another agent for a piece of
+                                            work and keep going: --may-touch is
+                                            the only place it may commit,
+                                            --budget its time (30 by default)
+          gentlemerge request list [--mine|--for-me]
+          gentlemerge request show <id>
+          gentlemerge request accept|done|fail|reject|ack <id> [--result "..."]
+                                            the worker accepts and finishes;
+                                            whoever asked acknowledges the result
+          gentlemerge presence [--task "..."] [--capabilities a,b]
+                                            say you are here and what you are on,
+                                            for agents with no hooks to say it
+          gentlemerge mcp [--label name]    the same tools over MCP (stdio), for
+                                            any client that speaks it
+
         GUARDRAILS (phase 3)
           gentlemerge snapshot [list|create <label>|restore <id>] [--project dir]
 

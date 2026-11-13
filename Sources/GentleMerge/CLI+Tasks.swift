@@ -253,18 +253,23 @@ extension CLI {
         if let index = Int(first), words.count == 1 {
             return handoff.tasks.indices.contains(index) ? handoff.tasks[index] : nil
         }
-        let needle = words.joined(separator: " ").lowercased()
+        // Blank is not a selector. `task rm " "` matched the first task with a
+        // space in it — which is nearly every task — and removed it; the same
+        // went for `done`, `claim` and `watch task`.
+        let needle = words.joined(separator: " ").lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
         return handoff.tasks.first { $0.text.lowercased().contains(needle) }
-            ?? handoff.tasks.first { needle.contains($0.text.lowercased()) }
+            ?? handoff.tasks.first { !$0.text.isEmpty && needle.contains($0.text.lowercased()) }
     }
 
     /// Same rule one level down: a number is a position, anything else is
     /// matched against the text.
     static func resolveStep(_ word: String, in task: TaskItem) -> Int? {
         if let index = Int(word), task.steps.indices.contains(index) { return index }
-        let needle = word.lowercased()
+        let needle = word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
         return task.steps.firstIndex { $0.text.lowercased().contains(needle) }
-            ?? task.steps.firstIndex { needle.contains($0.text.lowercased()) }
+            ?? task.steps.firstIndex { !$0.text.isEmpty && needle.contains($0.text.lowercased()) }
     }
 
     /// `task step done <task> <step>` — the command that gets run mid-work, so
@@ -296,6 +301,12 @@ extension CLI {
         }
 
         if action == "add" {
+            // A point with nothing in it was reported as "already on the list".
+            guard !stepText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                FileHandle.standardError.write(
+                    Data("usage: gentlemerge task step add \"<task>\" \"<step>\" — the step is empty\n".utf8))
+                return 64
+            }
             let scrubbed = Redactor.scrub(stepText)
             guard !scrubbed.isSuppressed else {
                 FileHandle.standardError.write(

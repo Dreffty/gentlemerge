@@ -31,9 +31,28 @@ extension CLI {
         } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1
         }
+        // The MCP tool refuses both of these; the command line took them. A request
+        // with no title and no spec was created, assigned and filed in the handoff
+        // as a task that says nothing; `--budget abc` quietly became thirty minutes
+        // while `--budget -3` was an error.
+        for (flag, text) in [("--title", title), ("--spec", spec)]
+        where text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            FileHandle.standardError.write(Data("delegate: \(flag) is empty — say what is being asked for\n".utf8))
+            return 64
+        }
         let inputs = splitCSV(values(after: "--inputs", in: arguments))
         let mayTouch = splitCSV(values(after: "--may-touch", in: arguments))
-        let budget = intValue(after: "--budget", in: arguments) ?? 30
+        let budget: Int
+        if arguments.contains("--budget") {
+            guard let minutes = intValue(after: "--budget", in: arguments) else {
+                FileHandle.standardError.write(
+                    Data("--budget wants a whole number of minutes between 1 and 1440, e.g. --budget 15\n".utf8))
+                return 64
+            }
+            budget = minutes
+        } else {
+            budget = 30
+        }
 
         do {
             let request = try AgentBus(paths: paths).delegate(

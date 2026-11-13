@@ -20,15 +20,40 @@ public enum JSONCoding {
             if let text = try? container.decode(String.self) {
                 if let date = ISO8601DateFormatter.gentleMerge.date(from: text) { return date }
                 if let date = ISO8601DateFormatter.gentleMergeFractional.date(from: text) { return date }
-                if let seconds = Double(text) { return Date(timeIntervalSince1970: seconds) }
+                if let seconds = Double(text), let date = date(secondsSince1970: seconds) { return date }
             }
-            if let seconds = try? container.decode(Double.self) {
-                return Date(timeIntervalSince1970: seconds)
+            if let seconds = try? container.decode(Double.self), let date = date(secondsSince1970: seconds) {
+                return date
             }
             throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unreadable date")
         }
         return decoder
     }
+
+    /// A date written as a number, kept inside the years a calendar can name.
+    ///
+    /// These files are the protocol — any tool may write them — and a number
+    /// is taken as seconds whatever its size. One `"expires": 1e300` in
+    /// `claims-paths.json` decoded to a date so far away that the first
+    /// "how many minutes are left" converted it to an `Int` and trapped:
+    /// `claims`, `task list` and `brief` — the command every agent's hook runs
+    /// on every turn — died with "Double value cannot be converted to Int",
+    /// for every agent sharing that home, until somebody edited the file by
+    /// hand. `"nan"` and `"inf"` did the same through `Double(text)`.
+    ///
+    /// Clamped rather than refused: refusing fails the whole file, and for the
+    /// claims that reads as "nothing is claimed" — the gate opening because one
+    /// row was odd. A row in year 1 or year 9999 is merely long expired or
+    /// long-lived, and every other row is still read. Only a value that is not
+    /// a number at all (NaN, infinity) is unreadable.
+    static func date(secondsSince1970 seconds: Double) -> Date? {
+        guard seconds.isFinite else { return nil }
+        return Date(timeIntervalSince1970: min(max(seconds, earliestSeconds), latestSeconds))
+    }
+
+    /// 0001-01-01 and 9999-12-31T23:59:59Z, the range an ISO 8601 string spans.
+    private static let earliestSeconds: Double = -62_135_596_800
+    private static let latestSeconds: Double = 253_402_300_799
 }
 
 /// One named lock per file, taken by everyone who touches it.

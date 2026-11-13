@@ -98,8 +98,13 @@ extension CLI {
             ttl = PathClaims.explicitTTL
         }
 
-        do {
-            for pattern in recorded {
+        // Every pattern gets its own answer. The loop used to stop at the first
+        // refusal, so what `--paths a,b` left you holding depended on the order
+        // you wrote them in: with `a` taken, `b` was never tried and nothing
+        // said so; with `b` taken, `a` was claimed and the exit code said no.
+        var refused = false
+        for pattern in recorded {
+            do {
                 let claim = try PathClaims(paths: paths).claim(
                     pattern: pattern,
                     label: label,
@@ -109,17 +114,17 @@ extension CLI {
                 )
                 let minutes = max(Int(claim.expires.timeIntervalSinceNow / 60), 0)
                 print("Claimed \(claim.pattern) for \(label), \(minutes)m left")
+            } catch let conflict as PathClaimConflict {
+                // Exit 1 so a script can notice; the description says who has it
+                // and for how long — the next move is a conversation.
+                FileHandle.standardError.write(Data("\(conflict.description)\n".utf8))
+                refused = true
+            } catch {
+                FileHandle.standardError.write(Data("could not claim: \(error)\n".utf8))
+                return 1
             }
-            return 0
-        } catch let conflict as PathClaimConflict {
-            // Exit 1 so a script can notice; the description says who has it
-            // and for how long — the next move is a conversation.
-            FileHandle.standardError.write(Data("\(conflict.description)\n".utf8))
-            return 1
-        } catch {
-            FileHandle.standardError.write(Data("could not claim: \(error)\n".utf8))
-            return 1
         }
+        return refused ? 1 : 0
     }
 
     /// `gentlemerge release [--paths <glob,glob>]` — hand back what you were
@@ -144,6 +149,15 @@ extension CLI {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .map { Glob.relativize($0, roots: roots) }
+        // `--paths` with nothing after it is a mistake — an empty variable in a
+        // script, usually — and it was read as no `--paths` at all, which means
+        // "everything": asking to hand back one path handed back all of them.
+        if arguments.contains("--paths"), patterns.isEmpty {
+            FileHandle.standardError.write(
+                Data(("usage: gentlemerge release [--paths <glob,glob>] [--project dir]\n"
+                    + "       (no --paths releases every claim of yours in this project)\n").utf8))
+            return 64
+        }
 
         do {
             let store = PathClaims(paths: paths)

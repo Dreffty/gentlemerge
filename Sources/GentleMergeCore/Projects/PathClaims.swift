@@ -63,7 +63,13 @@ public struct PathClaimConflict: Error, Sendable, CustomStringConvertible {
     public let holders: [PathClaim]
 
     public var description: String {
-        holders.map { ClaimRejection.plan(holder: $0, path: pattern, now: Date()) }
+        // One line per thing to do, not per claim in the way: a holder with
+        // `lib/store/**` and `lib/store/s.dart` both stands in front of
+        // `lib/store/s.dart`, and the plan — ask them, unstage, wait — came out
+        // twice, word for word.
+        var seen = Set<String>()
+        return holders.map { ClaimRejection.plan(holder: $0, path: pattern, now: Date()) }
+            .filter { seen.insert($0).inserted }
             .joined(separator: "\n")
     }
 }
@@ -323,15 +329,26 @@ public struct PathClaims: Sendable {
             }
             let dead: Bool = {
                 guard !marks.isEmpty else { return false }
-                if marks.contains(where: { mark in mark.pid.map { isPIDAlive($0, mark.updatedAt) } == false }) { return true }
+                // A mark under the claim's own label says more about it than a
+                // parent's or a subagent's does, so those speak only when it
+                // has none of its own.
+                let own = marks.filter { $0.label == claim.label }
+                let speaking = own.isEmpty ? marks : own
+                let verdicts = speaking.map { mark in mark.pid.flatMap { isPIDAlive($0, mark.updatedAt) } }
+                // One label can have several marks — one per branch it works
+                // on, one per subagent — and a single dead pid among them used
+                // to reap the claim outright: an executor that finished, or a
+                // second session that fell over, unlocked the paths of the one
+                // still editing them. Somebody provably there outweighs
+                // somebody provably gone; we cannot tell whose claim it is, and
+                // an enforcement point keeps what it cannot attribute.
+                if verdicts.contains(true) { return false }
+                if verdicts.contains(false) { return true }
                 // Staleness is not death. A session still running that has not
                 // written a heartbeat in a while must keep its claim; only
                 // marks whose process is gone *and* whose heartbeat is old
                 // count as evidence that the owner is gone.
-                return marks.allSatisfy { mark in
-                    mark.pid.map { isPIDAlive($0, mark.updatedAt) } != true
-                        && now.timeIntervalSince(mark.updatedAt) >= Presence.timeToLive
-                }
+                return speaking.allSatisfy { now.timeIntervalSince($0.updatedAt) >= Presence.timeToLive }
             }()
             if dead { reaped.append(claim) } else { live.append(claim) }
         }
