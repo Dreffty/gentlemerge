@@ -388,7 +388,16 @@ public enum WorkInspector {
         }
 
         if !checks.contains(where: { $0.kind == .test && $0.status == .passed }) {
-            questions.append("No test suite ran, so nothing confirmed behaviour — only that it builds.")
+            // "Only that it builds" is itself a claim, and it was made whatever
+            // had happened: with no checks detected at all, and next to a build
+            // that had just failed. Say it only when a build did pass.
+            let built = checks.contains { $0.kind == .build && $0.status == .passed }
+            let attempted = checks.contains {
+                $0.kind == .test && ($0.status == .failed || $0.status == .timedOut)
+            }
+            let what = attempted ? "No test suite passed" : "No test suite ran"
+            questions.append("\(what), so nothing confirmed behaviour"
+                + (built ? " — only that it builds." : "."))
         }
 
         return questions

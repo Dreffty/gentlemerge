@@ -1811,18 +1811,23 @@ enum CLI {
         if let index = Int(first), words.count == 1 {
             return handoff.tasks.indices.contains(index) ? handoff.tasks[index] : nil
         }
-        let needle = words.joined(separator: " ").lowercased()
+        // Blank is not a selector. `task rm " "` matched the first task with a
+        // space in it — which is nearly every task — and removed it; the same
+        // went for `done`, `claim` and `watch task`.
+        let needle = words.joined(separator: " ").lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
         return handoff.tasks.first { $0.text.lowercased().contains(needle) }
-            ?? handoff.tasks.first { needle.contains($0.text.lowercased()) }
+            ?? handoff.tasks.first { !$0.text.isEmpty && needle.contains($0.text.lowercased()) }
     }
 
     /// Same rule one level down: a number is a position, anything else is
     /// matched against the text.
     private static func resolveStep(_ word: String, in task: TaskItem) -> Int? {
         if let index = Int(word), task.steps.indices.contains(index) { return index }
-        let needle = word.lowercased()
+        let needle = word.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
         return task.steps.firstIndex { $0.text.lowercased().contains(needle) }
-            ?? task.steps.firstIndex { needle.contains($0.text.lowercased()) }
+            ?? task.steps.firstIndex { !$0.text.isEmpty && needle.contains($0.text.lowercased()) }
     }
 
     /// `task step done <task> <step>` — the command that gets run mid-work, so
@@ -1854,6 +1859,12 @@ enum CLI {
         }
 
         if action == "add" {
+            // A point with nothing in it was reported as "already on the list".
+            guard !stepText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                FileHandle.standardError.write(
+                    Data("usage: gentlemerge task step add \"<task>\" \"<step>\" — the step is empty\n".utf8))
+                return 64
+            }
             let scrubbed = Redactor.scrub(stepText)
             guard !scrubbed.isSuppressed else {
                 FileHandle.standardError.write(
@@ -2312,8 +2323,13 @@ enum CLI {
             ttl = PathClaims.explicitTTL
         }
 
-        do {
-            for pattern in recorded {
+        // Every pattern gets its own answer. The loop used to stop at the first
+        // refusal, so what `--paths a,b` left you holding depended on the order
+        // you wrote them in: with `a` taken, `b` was never tried and nothing
+        // said so; with `b` taken, `a` was claimed and the exit code said no.
+        var refused = false
+        for pattern in recorded {
+            do {
                 let claim = try PathClaims(paths: paths).claim(
                     pattern: pattern,
                     label: label,
@@ -2323,17 +2339,17 @@ enum CLI {
                 )
                 let minutes = max(Int(claim.expires.timeIntervalSinceNow / 60), 0)
                 print("Claimed \(claim.pattern) for \(label), \(minutes)m left")
+            } catch let conflict as PathClaimConflict {
+                // Exit 1 so a script can notice; the description says who has it
+                // and for how long — the next move is a conversation.
+                FileHandle.standardError.write(Data("\(conflict.description)\n".utf8))
+                refused = true
+            } catch {
+                FileHandle.standardError.write(Data("could not claim: \(error)\n".utf8))
+                return 1
             }
-            return 0
-        } catch let conflict as PathClaimConflict {
-            // Exit 1 so a script can notice; the description says who has it
-            // and for how long — the next move is a conversation.
-            FileHandle.standardError.write(Data("\(conflict.description)\n".utf8))
-            return 1
-        } catch {
-            FileHandle.standardError.write(Data("could not claim: \(error)\n".utf8))
-            return 1
         }
+        return refused ? 1 : 0
     }
 
     /// `gentlemerge release [--paths <glob,glob>]` — hand back what you were
@@ -2358,6 +2374,15 @@ enum CLI {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .map { Glob.relativize($0, roots: roots) }
+        // `--paths` with nothing after it is a mistake — an empty variable in a
+        // script, usually — and it was read as no `--paths` at all, which means
+        // "everything": asking to hand back one path handed back all of them.
+        if arguments.contains("--paths"), patterns.isEmpty {
+            FileHandle.standardError.write(
+                Data(("usage: gentlemerge release [--paths <glob,glob>] [--project dir]\n"
+                    + "       (no --paths releases every claim of yours in this project)\n").utf8))
+            return 64
+        }
 
         do {
             let store = PathClaims(paths: paths)
@@ -2423,9 +2448,28 @@ enum CLI {
         } catch {
             FileHandle.standardError.write(Data("\(error)\n".utf8)); return 1
         }
+        // The MCP tool refuses both of these; the command line took them. A request
+        // with no title and no spec was created, assigned and filed in the handoff
+        // as a task that says nothing; `--budget abc` quietly became thirty minutes
+        // while `--budget -3` was an error.
+        for (flag, text) in [("--title", title), ("--spec", spec)]
+        where text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            FileHandle.standardError.write(Data("delegate: \(flag) is empty — say what is being asked for\n".utf8))
+            return 64
+        }
         let inputs = splitCSV(values(after: "--inputs", in: arguments))
         let mayTouch = splitCSV(values(after: "--may-touch", in: arguments))
-        let budget = intValue(after: "--budget", in: arguments) ?? 30
+        let budget: Int
+        if arguments.contains("--budget") {
+            guard let minutes = intValue(after: "--budget", in: arguments) else {
+                FileHandle.standardError.write(
+                    Data("--budget wants a whole number of minutes between 1 and 1440, e.g. --budget 15\n".utf8))
+                return 64
+            }
+            budget = minutes
+        } else {
+            budget = 30
+        }
 
         do {
             let request = try AgentBus(paths: paths).delegate(
@@ -3237,6 +3281,36 @@ enum CLI {
                                             dev servers never collide. --write
                                             saves .gentlemerge/env.sh to source
                                             before running them
+
+        PATHS AND REQUESTS — who is editing where, and work handed over
+          gentlemerge claim --paths <glob,glob> [--intent "..."] [--ttl minutes]
+                                            reserve paths before you edit them.
+                                            Refused, with who holds them and for
+                                            how long, when another agent's live
+                                            claim overlaps. Lapses on its own in
+                                            30 minutes unless --ttl says otherwise
+          gentlemerge release [--paths <glob,glob>]
+                                            hand them back; with no --paths,
+                                            every claim of yours in this project
+          gentlemerge claims [--project dir]
+                                            the live claims here, and whose
+          gentlemerge delegate --to <label|capability:name> --title "..." --spec "..."
+                                            [--may-touch glob] [--budget minutes]
+                                            [--inputs a,b] [--expect path]
+                                            ask another agent for a piece of
+                                            work and keep going: --may-touch is
+                                            the only place it may commit,
+                                            --budget its time (30 by default)
+          gentlemerge request list [--mine|--for-me]
+          gentlemerge request show <id>
+          gentlemerge request accept|done|fail|reject|ack <id> [--result "..."]
+                                            the worker accepts and finishes;
+                                            whoever asked acknowledges the result
+          gentlemerge presence [--task "..."] [--capabilities a,b]
+                                            say you are here and what you are on,
+                                            for agents with no hooks to say it
+          gentlemerge mcp [--label name]    the same tools over MCP (stdio), for
+                                            any client that speaks it
 
         GUARDRAILS (phase 3)
           gentlemerge snapshot [list|create <label>|restore <id>] [--project dir]
