@@ -145,7 +145,7 @@ final class ProjectListingTests: XCTestCase {
     }
 
     @MainActor
-    func testTheWindowListsTheSameOnes() throws {
+    func testTheWindowListsTheSameOnes() async throws {
         let repository = try makeRepository("repo")
         let plain = try makeFolder("plain")
         let paths = Paths(home: root.appendingPathComponent("home"))

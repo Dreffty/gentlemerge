@@ -27,7 +27,7 @@ Linux runs the same two suites on CI (`swift test`, then the smoke test against
 the release binary). To repeat it by hand in a container: `swift:6.0-noble`
 (Swift 6.0.3, git 2.43) with `python3` added for the smoke test — the jammy
 image's stock git 2.34 is too old for `merge-tree`, and the radar/landing tests
-fail with it. Last real run (2026-11-13): `swift test` 995 executed, 0 failed,
+fail with it. Last real run (2026-11-14): `swift test` 1071 executed, 0 failed,
 1 skipped (the stdio MCP test, which wants `GENTLEMERGE_BIN`);
 `Scripts/smoke-test.sh` 120 passed, 0 failed (fewer than macOS: GUI/app checks
 skip off-mac).

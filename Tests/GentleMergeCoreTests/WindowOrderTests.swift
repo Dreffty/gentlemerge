@@ -51,7 +51,7 @@ final class WindowOrderTests: XCTestCase {
     }
 
     @MainActor
-    func testTheModelListsThemByUrgency() throws {
+    func testTheModelListsThemByUrgency() async throws {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent("order-\(UUID())")
         defer { try? FileManager.default.removeItem(at: home) }
         let paths = Paths(home: home)
