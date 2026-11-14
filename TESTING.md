@@ -18,7 +18,7 @@ gentlemerge --version
 swift test && make app && sh Scripts/smoke-test.sh
 ```
 
-Require zero test failures and `100 passed, 0 failed` from the smoke with the
+Require zero test failures and `127 passed, 0 failed` from the smoke with the
 macOS bundle available. Without the bundle, GUI-backed checks are skipped and
 the count is lower. Always rebuild first; an old app plus a new CLI is not a
 verification of this checkout. Runtime varies with builds and the machine.
