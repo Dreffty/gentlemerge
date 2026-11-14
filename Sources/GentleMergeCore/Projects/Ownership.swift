@@ -164,6 +164,13 @@ public struct Ownership: Sendable, Equatable {
         let rules = from(handoff: ProjectRegistry.handoff(for: project, refreshingCommits: false)).rules
         var store = loadPinned(paths: paths)
         let before = store[project] ?? []
+        // Pinning a handoff with no zones replaced the pinned set with nothing:
+        // a rule added by hand with `ownership add` vanished, and the command
+        // said "pinned 0 rule(s)" and exited 0. Unpinning is `rm`, one rule at a
+        // time, so nobody loses a zone to a typo in the handoff.
+        if rules.isEmpty, !before.isEmpty {
+            throw OwnershipError.nothingToPin(keeping: before.count)
+        }
         store[project] = rules
         try savePinned(store, paths: paths)
         Ledger(url: paths.ledger).append(LedgerEntry(
@@ -178,7 +185,13 @@ public struct Ownership: Sendable, Equatable {
     public static func setRule(pattern: String, owner: String?, project: String, paths: Paths, by author: String) throws -> [Rule] {
         var store = loadPinned(paths: paths)
         var rules = store[project] ?? []
+        let before = rules.count
         rules.removeAll { $0.pattern == pattern }
+        // Removing a rule nobody pinned changed nothing and still said "now N
+        // rule(s) pinned", so a misspelt pattern looked like a success.
+        if owner == nil, rules.count == before {
+            throw OwnershipError.noSuchRule(pattern, pinned: rules.map(\.pattern))
+        }
         if let owner { rules.append(Rule(pattern: pattern, owner: owner)) }
         store[project] = rules
         try savePinned(store, paths: paths)
@@ -212,5 +225,21 @@ public struct Ownership: Sendable, Equatable {
 
     public func render() -> String {
         rules.map { "- \($0.pattern) → \($0.owner)" }.joined(separator: "\n")
+    }
+}
+
+public enum OwnershipError: Error, LocalizedError, Equatable {
+    case nothingToPin(keeping: Int)
+    case noSuchRule(String, pinned: [String])
+
+    public var errorDescription: String? {
+        switch self {
+        case .nothingToPin(let count):
+            return "HANDOFF.md declares no zones, so pinning it would drop the \(count) pinned rule(s); "
+                + "they were kept. Remove one with `gentlemerge ownership rm <pattern>`."
+        case .noSuchRule(let pattern, let pinned):
+            return "no pinned rule is named exactly `\(pattern)`"
+                + (pinned.isEmpty ? " — nothing is pinned here." : "; pinned: \(pinned.map { "`\($0)`" }.joined(separator: ", ")).")
+        }
     }
 }

@@ -139,8 +139,8 @@ build contract and the headless smoke test. macOS also assembles the app bundle,
 so its smoke test covers the GUI ingestion checks; Linux has no app, and those
 checks are skipped there — a skipped step is not a passing one. So:
 
-- **macOS is verified**: 997 tests and the smoke test pass on every commit.
-- **Linux is verified headless**: 990 tests (the rest need macOS and are
+- **macOS is verified**: 1002 tests and the smoke test pass on every commit.
+- **Linux is verified headless**: 995 tests (the rest need macOS and are
   compiled out) and the smoke test's 120 headless checks. That is the CLI, the
   MCP server, the gate and the bus driven by real processes — not a live agent
   session, which nobody has confirmed on Linux yet.

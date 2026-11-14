@@ -46,4 +46,24 @@ final class CLIOwnershipTests: XCTestCase {
         let ledger = try String(contentsOf: Paths(home: home).ledger, encoding: .utf8)
         XCTAssertTrue(ledger.contains("ownership.changed"), ledger)
     }
+
+    /// `pin` over a handoff with no zones replaced the pinned set with nothing.
+    func testPinningAHandoffWithNoZonesKeepsWhatWasPinned() throws {
+        XCTAssertEqual(ownership(["add", "lib/**", "hermes"]).status, 0)
+        try Data("# p — agent handoff\n\n## Notes\n\nno zones here\n".utf8)
+            .write(to: project.appendingPathComponent(".gentlemerge/HANDOFF.md"))
+        let pin = ownership(["pin"])
+        XCTAssertEqual(pin.status, 1, pin.stdout)
+        XCTAssertTrue(pin.stderr.contains("were kept"), pin.stderr)
+        XCTAssertTrue(ownership([]).stdout.contains("lib/** → hermes"))
+    }
+
+    /// Removing a rule nobody pinned said "now 0 rule(s) pinned" and exited 0.
+    func testRemovingARuleThatIsNotThereSaysSo() throws {
+        XCTAssertEqual(ownership(["add", "lib/**", "hermes"]).status, 0)
+        let miss = ownership(["rm", "lib/*"])
+        XCTAssertEqual(miss.status, 1)
+        XCTAssertTrue(miss.stderr.contains("`lib/**`"), "names what is pinned: \(miss.stderr)")
+        XCTAssertTrue(ownership([]).stdout.contains("lib/** → hermes"))
+    }
 }
