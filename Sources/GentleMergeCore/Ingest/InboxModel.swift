@@ -973,7 +973,13 @@ public final class InboxModel {
             lastMessage = "Could not read dispatch approvals: \(error)"
             return
         }
-        let live = Set(liveActivities.map { AgentBus.label(for: $0.provider) })
+        // The label the session goes by, not its provider's name. A Claude Code
+        // session in the worktree labelled `hermes` counted as a live `claude`:
+        // a request for `claude` was then held back for a session that would
+        // never be briefed with it, and one for `hermes` could be started
+        // headless next to the live session it was meant for, once that
+        // session's presence mark had aged out.
+        let live = Set(liveActivities.map { $0.label ?? AgentBus.label(for: $0.provider) })
             .union(Presence.marks(paths: paths).filter { !$0.isExpired }.map(\.label))
         // Read the ledger once for the whole sweep, not once per assigned request.
         // `spentTodayMinutes` reads and JSON-decodes every line of ledger.jsonl,
@@ -1417,7 +1423,13 @@ private func trimHistory() {
     /// rows are never deleted, only re-stated, so a union cannot resurrect.
     func saveState() {
         do {
-            var byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+            // Not `uniqueKeysWithValues`: that traps on a repeated id, and `items`
+            // is whatever `state.json` held. One row written twice — a hand edit,
+            // another tool, a merge of two homes — and every command that drains
+            // (`who`, `brief`, the gate) died with "Duplicate values for key"
+            // until somebody repaired the file by hand. The newer row wins, as it
+            // does for the rows merged from disk below.
+            var byID = Dictionary(items.map { ($0.id, $0) }) { a, b in a.updatedAt >= b.updatedAt ? a : b }
             if let data = try? Data(contentsOf: paths.state),
                let stored = try? JSONCoding.decoder().decode([InboxItem].self, from: data) {
                 for row in stored {

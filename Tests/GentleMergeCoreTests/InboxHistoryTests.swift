@@ -30,6 +30,23 @@ final class InboxHistoryTests: XCTestCase {
         await MainActor.run { try? FileManager.default.removeItem(at: self.paths.home) }
     }
 
+    /// `state.json` is read by every command that drains, and one row written
+    /// twice trapped the dictionary built from it: `who`, `brief` and the gate
+    /// all died with "Duplicate values for key".
+    func testARowWrittenTwiceIsOneRowNotACrash() async throws {
+        let item = try addResolved("twice")
+        model.saveState()
+        let rows = try JSONCoding.decoder().decode([InboxItem].self, from: Data(contentsOf: paths.state))
+        try AtomicFile.write(try JSONCoding.encoder().encode(rows + rows), to: paths.state)
+
+        let second = InboxModel(paths: paths)
+        second.loadState()
+        second.saveState()
+        XCTAssertEqual(second.items.filter { $0.id == item.id }.count, 1)
+        let saved = try JSONCoding.decoder().decode([InboxItem].self, from: Data(contentsOf: paths.state))
+        XCTAssertEqual(saved.filter { $0.id == item.id }.count, 1)
+    }
+
     /// A resolved row, which is what history is made of: ingest, then mark
     /// handled through the same public path the UI uses. Identified by diffing
     /// ids rather than by title, since the title is the provider's wording and
