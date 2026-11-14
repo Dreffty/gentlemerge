@@ -26,7 +26,8 @@ extension AgentActivity.State {
 enum Palette {
     /// The colour of whoever wrote a note — the same one their sessions use.
     static func tint(forAuthor author: String) -> Color {
-        switch author {
+        // A subagent signs as `claude#exec1`: it is still Claude's colour.
+        switch author.split(separator: "#").first.map(String.init) ?? author {
         case "you": return .blue
         case "claude": return .purple
         case "codex": return .teal

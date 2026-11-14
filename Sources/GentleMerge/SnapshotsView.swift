@@ -13,6 +13,11 @@ struct SnapshotsView: View {
     @State private var snapshots: [SnapshotRef] = []
     @State private var confirming: String?
     @State private var report: RestoreReport?
+    /// Asked once per reload, not in the body: the answer comes from git, and
+    /// the body is re-evaluated every time the pane behind this sheet refreshes
+    /// — every three seconds — so the window ran two `git` processes on the
+    /// main thread on each tick for as long as the sheet was open.
+    @State private var isRepository = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,7 +27,7 @@ struct SnapshotsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if snapshots.isEmpty {
-                        Text(GitSnapshot.isRepository(projectPath)
+                        Text(isRepository
                             ? "No restore points yet. Take one before a risky change: the button above, or `gentlemerge snapshot create`."
                             : "This project is not a git repository, so there is nothing to snapshot.")
                             .font(.callout)
@@ -77,7 +82,7 @@ struct SnapshotsView: View {
                 reload()
             }
             .controlSize(.small)
-            .disabled(!GitSnapshot.isRepository(projectPath))
+            .disabled(!isRepository)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -130,6 +135,7 @@ struct SnapshotsView: View {
     }
 
     private func reload() {
+        isRepository = GitSnapshot.isRepository(projectPath)
         snapshots = model.snapshots(forProjectAt: projectPath)
     }
 }
