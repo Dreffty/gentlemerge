@@ -51,7 +51,7 @@ struct MainWindow: View {
                         .foregroundStyle(.secondary)
                 }
                 ForEach(model.liveActivities) { activity in
-                    HStack(spacing: 8) {
+                    let row = HStack(spacing: 8) {
                         Circle()
                             .fill(activity.state.tint)
                             .frame(width: 8, height: 8)
@@ -69,7 +69,18 @@ struct MainWindow: View {
                     // old `?? ""` tagged it as an empty project that sat in the
                     // same selection space as the real ones — clickable, and
                     // resolving to nothing (audit 2026-10-11).
-                    .tag(activity.projectPath)
+                    //
+                    // Unwrapped before it is used as a tag. The selection is a
+                    // `String`, and a tag of `String?` is a different type, which
+                    // SwiftUI never matches against it: the row answered to
+                    // nothing, or to the id `ForEach` gives it — the session id,
+                    // which names no project. A row with no project is not
+                    // selectable at all.
+                    if let path = activity.projectPath {
+                        row.tag(path)
+                    } else {
+                        row.selectionDisabled()
+                    }
                 }
             }
 
@@ -120,6 +131,9 @@ private struct ProjectPane: View {
     /// Read with the task board on every refresh tick, so the section can
     /// leave the layout entirely while there is nothing open.
     @State private var openRequests: [AgentRequest] = []
+    /// Counts the full reloads, so a slower read that started before the last
+    /// one cannot land after it and put the older state back on screen.
+    @State private var reloads = 0
 
     private var projectName: String { URL(fileURLWithPath: projectPath).lastPathComponent }
 
@@ -511,8 +525,11 @@ private struct ProjectPane: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-            } else {
-                Text("No commits — this folder is not a git repository.")
+            } else if handoff != nil {
+                // Only once something has been read: this line used to show
+                // while the first load was still on its way, calling every
+                // project "not a git repository" for a moment.
+                Text("No commits to show — nothing committed yet, or this folder is not a git repository.")
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -539,6 +556,8 @@ private struct ProjectPane: View {
     private func load(refreshingCommits: Bool) {
         let path = projectPath
         let paths = model.paths
+        if refreshingCommits { reloads += 1 }
+        let generation = reloads
         Task {
             let snapshot = await Task.detached(priority: .userInitiated) {
                 PaneSnapshot(
@@ -549,9 +568,20 @@ private struct ProjectPane: View {
                         .filter { $0.projectPath == path && $0.isOpenInTheWindow }
                 )
             }.value
-            // The person may have moved to another project while this was reading.
-            guard path == projectPath else { return }
-            handoff = snapshot.handoff
+            // The person may have moved to another project while this was reading,
+            // or done something here: a tick that began before they ticked a task
+            // would otherwise untick it again until the next one.
+            guard path == projectPath, generation == reloads else { return }
+            var fresh = snapshot.handoff
+            // A tick reads the task list, not git, so what it has for commits is
+            // only what the file last recorded — nothing at all for a project
+            // with no handoff file. Three seconds after opening such a project
+            // the commits were replaced by "this folder is not a git repository".
+            // The commits the last full load found stay until the next one.
+            if !refreshingCommits, let shown = handoff, shown.projectPath == fresh.projectPath {
+                fresh.commits = shown.commits
+            }
+            handoff = fresh
             claimed = snapshot.claimed
             handoffExists = snapshot.handoffExists
             openRequests = snapshot.openRequests
