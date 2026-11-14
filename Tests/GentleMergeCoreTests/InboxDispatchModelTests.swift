@@ -103,6 +103,44 @@ final class InboxDispatchModelTests: XCTestCase {
         XCTAssertTrue(model.approvedRequestIDs.contains(request.id))
     }
 
+    /// A Claude Code session in the worktree labelled `worker`, known to the app
+    /// only by its hook events: it has no presence mark of its own.
+    private func liveClaudeSession(labelled label: String) {
+        model.ingest(SpoolEnvelope(
+            id: "env-\(UUID())", provider: .claudeCode, cwd: paths.home.path, label: label,
+            payload: .object([
+                "session_id": .string("session-\(label)"),
+                "hook_event_name": .string("UserPromptSubmit"),
+                "prompt": .string("working on it"),
+            ])
+        ))
+    }
+
+    /// The live set was built from provider names, so this session counted as a
+    /// live `claude` and `worker` looked absent: the request was started
+    /// headless next to the session it was meant for.
+    func testALiveSessionIsLiveUnderTheLabelItGoesBy() async throws {
+        _ = try request(tier: "cheap")
+        model.config.allowDispatch = true
+        liveClaudeSession(labelled: "worker")
+        model.refreshBus()
+        XCTAssertTrue(launched.isEmpty, "started headless beside a live session with that label")
+    }
+
+    /// And the other half: a request for `claude` is not held back by a Claude
+    /// Code session that goes by another name and will never be briefed with it.
+    func testAProvidersNameIsNotLiveWhenItsSessionGoesByAnotherLabel() async throws {
+        model.config.agents = [AgentTarget(label: "claude", command: ["never-execute-this"], costTier: "cheap")]
+        var request = AgentRequest(id: "req-claude", from: "planner", fromVerified: true, to: "claude",
+            projectPath: paths.home.path, title: "Review", spec: "Review only", budgetMinutes: 5, state: .assigned)
+        request.resolvedTo = "claude"
+        try Requests(paths: paths).save(request)
+        model.config.allowDispatch = true
+        liveClaudeSession(labelled: "worker")
+        model.refreshBus()
+        XCTAssertEqual(launched, ["req-claude"], "held back for a session that is not `claude`")
+    }
+
     func testTerminalRequestDisappearsFromApprovals() async throws {
         let request = try request()
         model.config.allowDispatch = true
